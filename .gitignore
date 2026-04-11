@@ -1,0 +1,6 @@
+node_modules/
+dist/
+dashboard/node_modules/
+dashboard/.astro/
+*.tgz
+.DS_Store

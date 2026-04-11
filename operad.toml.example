@@ -1,0 +1,69 @@
+# operad — cross-platform tmux session orchestrator
+# Copy to ~/.config/operad/operad.toml and customize.
+
+[orchestrator]
+# socket = "$PREFIX/tmp/tmx.sock"     # Android default
+# socket = "/tmp/operad.sock"          # Linux/macOS default
+# state_file = "$HOME/.local/share/tmx/state.json"
+# log_dir = "$HOME/.local/share/tmx/logs"
+health_interval_s = 120
+boot_timeout_s = 300
+process_budget = 32
+wake_lock_policy = "active_sessions"   # always | active_sessions | boot_only | never
+dashboard_port = 18970
+memory_warning_mb = 2000
+memory_critical_mb = 1200
+memory_emergency_mb = 800
+
+[adb]
+enabled = false                        # Android-only: ADB self-targeting
+# connect_script = "$HOME/tools/adb-wireless-connect.sh"
+connect_timeout_s = 45
+retry_interval_s = 300
+phantom_fix = true
+boot_delay_s = 15
+
+[battery]
+enabled = true
+low_threshold_pct = 10
+poll_interval_s = 60
+
+[boot]
+auto_start = 6                         # Auto-start N most recent sessions
+visible = 10                           # Show N sessions on dashboard
+
+# Health check defaults by session type
+[health_defaults.claude]
+check = "tmux_alive"
+unhealthy_threshold = 2
+
+[health_defaults.daemon]
+check = "tmux_alive"
+unhealthy_threshold = 2
+
+[health_defaults.service]
+check = "tmux_alive"
+unhealthy_threshold = 2
+
+# -- Sessions ------------------------------------------------------------------
+
+[[session]]
+name = "my-project"
+type = "claude"
+path = "$HOME/code/my-project"
+auto_go = false
+priority = 5
+enabled = true
+
+# [[session]]
+# name = "api-server"
+# type = "service"
+# path = "$HOME/code/api"
+# command = "bun run dev"
+# priority = 1
+# depends_on = []
+#
+# [session.health]
+# check = "http"
+# url = "http://localhost:3000/health"
+# unhealthy_threshold = 3
