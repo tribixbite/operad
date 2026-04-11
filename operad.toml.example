@@ -1,7 +1,7 @@
 # operad — cross-platform tmux session orchestrator
 # Copy to ~/.config/operad/operad.toml and customize.
 
-[orchestrator]
+[operad]
 # socket = "$PREFIX/tmp/tmx.sock"     # Android default
 # socket = "/tmp/operad.sock"          # Linux/macOS default
 # state_file = "$HOME/.local/share/tmx/state.json"

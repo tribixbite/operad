@@ -2,5 +2,8 @@ node_modules/
 dist/
 dashboard/node_modules/
 dashboard/.astro/
+site/node_modules/
+site/dist/
+site/.astro/
 *.tgz
 .DS_Store

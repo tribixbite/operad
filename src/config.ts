@@ -181,9 +181,9 @@ const NAME_PATTERN = /^[a-z0-9-]+$/;
 function validateConfig(raw: Record<string, unknown>): TmxConfig {
   const errors: string[] = [];
 
-  // Orchestrator section
+  // Orchestrator section — accepts [operad] or [orchestrator] for backwards compat
   const plat = detectPlatform();
-  const orc = (raw.orchestrator ?? {}) as Record<string, unknown>;
+  const orc = ((raw as any).operad ?? raw.orchestrator ?? {}) as Record<string, unknown>;
   const orchestrator: OrchestratorConfig = {
     socket: asString(orc.socket, "orchestrator.socket", plat.defaultSocketPath()),
     state_file: asString(orc.state_file, "orchestrator.state_file", plat.defaultStatePath()),

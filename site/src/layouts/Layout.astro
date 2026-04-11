@@ -1,0 +1,55 @@
+---
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "operad — cross-platform tmux session orchestrator",
+  description = "Manage tmux sessions with health checks, auto-restart, memory monitoring, and a real-time dashboard. Supports Android/Termux, Linux, and macOS.",
+} = Astro.props;
+
+const siteUrl = "https://operad.stream";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={siteUrl} />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={siteUrl} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+
+    <script type="application/ld+json" set:html={JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "operad",
+      "description": description,
+      "url": siteUrl,
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Android, Linux, macOS",
+      "license": "https://opensource.org/licenses/MIT",
+      "codeRepository": "https://github.com/tribixbite/operad",
+      "programmingLanguage": ["TypeScript"],
+    })} />
+
+    <style is:global>
+      @import "../styles/global.css";
+    </style>
+  </head>
+  <body class="min-h-screen antialiased">
+    <slot />
+  </body>
+</html>
