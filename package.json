@@ -1,0 +1,46 @@
+{
+  "name": "operadic",
+  "version": "0.2.0",
+  "type": "commonjs",
+  "description": "operad — cross-platform tmux session orchestrator. Manages sessions, health checks, auto-restart, and a web dashboard. Supports Android/Termux, Linux, and macOS.",
+  "author": "tribixbite",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tribixbite/operad"
+  },
+  "bin": {
+    "operad": "dist/tmx.js"
+  },
+  "files": [
+    "dist/",
+    "dashboard/dist/",
+    "watchdog.sh"
+  ],
+  "keywords": [
+    "claude",
+    "tmux",
+    "orchestrator",
+    "session-manager",
+    "claude-code",
+    "terminal",
+    "cross-platform"
+  ],
+  "scripts": {
+    "build": "node build.cjs",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/fix-android-binaries.mjs || true"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  },
+  "optionalDependencies": {
+    "@esbuild/android-arm64": "^0.24.0"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0"
+  }
+}
