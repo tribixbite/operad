@@ -29,7 +29,11 @@ import { BatteryMonitor } from "./battery.js";
 import { Registry, parseRecentProjects, findNamedSessions, deriveName, isValidName, nextSuffix } from "./registry.js";
 import type { RecentProject } from "./registry.js";
 import { DashboardServer } from "./http.js";
+import type { WsClientMessage } from "./http.js";
 import { TelemetrySinkServer } from "./telemetry-sink.js";
+import { SdkBridge } from "./sdk-bridge.js";
+import { MemoryDb } from "./memory-db.js";
+import { buildMemoryPrompt, saveMemoriesFromResponse } from "./memory-injector.js";
 import {
   getProjectTokenUsage,
   getConversationPage,
@@ -163,6 +167,8 @@ export class Daemon {
   private registry: Registry;
   private dashboard: DashboardServer | null = null;
   private telemetrySink: TelemetrySinkServer | null = null;
+  private sdkBridge: SdkBridge | null = null;
+  private memoryDb: MemoryDb | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private batteryTimer: ReturnType<typeof setInterval> | null = null;
@@ -452,6 +458,18 @@ export class Daemon {
     this.registry.flush();
 
     // Wake lock intentionally NOT released — Android kills processes without it
+
+    // Detach SDK bridge
+    if (this.sdkBridge?.isAttached) {
+      await this.sdkBridge.detach();
+    }
+    this.sdkBridge = null;
+
+    // Close memory database
+    if (this.memoryDb) {
+      this.memoryDb.close();
+      this.memoryDb = null;
+    }
 
     // Stop telemetry sink
     if (this.telemetrySink) {
@@ -2226,6 +2244,95 @@ export class Daemon {
       this.log.warn(`Dashboard server failed to start: ${err}`);
       this.dashboard = null;
     }
+
+    // Initialize SDK bridge (uses WS broadcast for streaming)
+    if (this.dashboard) {
+      this.sdkBridge = new SdkBridge(
+        this.log,
+        (sessionName, data) => this.dashboard?.broadcastToRoom(sessionName, data),
+      );
+
+      // Wire WS message handler for SDK/permission messages
+      this.dashboard.setWsMessageHandler((ws, msg, rooms) => {
+        this.handleWsMessage(ws, msg).catch((err) => {
+          ws.send(JSON.stringify({ type: "error", message: String(err) }));
+        });
+      });
+    }
+
+    // Initialize memory database
+    try {
+      this.memoryDb = new MemoryDb(this.log);
+      await this.memoryDb.init();
+    } catch (err) {
+      this.log.warn(`Memory database failed to initialize: ${err}`);
+      this.memoryDb = null;
+    }
+  }
+
+  /** Handle incoming WS messages for SDK streaming and permissions */
+  private async handleWsMessage(ws: import("ws").WebSocket, msg: WsClientMessage): Promise<void> {
+    switch (msg.type) {
+      case "attach": {
+        if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
+        const sessionName = msg.sessionName;
+        if (!sessionName) throw new Error("sessionName required");
+        // Resolve session path from config or registry
+        const sessionPath = this.resolveSessionPath(sessionName);
+        if (!sessionPath) throw new Error(`No path for session: ${sessionName}`);
+        const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : undefined;
+        const result = await this.sdkBridge.attach(sessionName, sessionId, sessionPath);
+        ws.send(JSON.stringify({ type: "attach_result", ...result }));
+        break;
+      }
+      case "prompt": {
+        if (!this.sdkBridge?.isAttached) throw new Error("No active SDK session");
+        const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
+        if (!prompt) throw new Error("prompt required");
+        // Inject memories if available
+        let fullPrompt = prompt;
+        if (this.memoryDb && this.sdkBridge.activeSessionName) {
+          const sessionPath = this.resolveSessionPath(this.sdkBridge.activeSessionName);
+          if (sessionPath) {
+            const { prompt: memPrompt } = await buildMemoryPrompt(
+              this.memoryDb, sessionPath, 10, prompt,
+            );
+            if (memPrompt) fullPrompt = memPrompt + "\n\n" + prompt;
+          }
+        }
+        // Send prompt (non-blocking — messages stream via WS broadcast)
+        this.sdkBridge.send(fullPrompt, {
+          effort: typeof msg.effort === "string" ? msg.effort as any : undefined,
+          thinking: msg.thinking as any,
+        }).catch((err) => {
+          ws.send(JSON.stringify({ type: "error", message: String(err) }));
+        });
+        break;
+      }
+      case "permission_response": {
+        if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
+        const id = typeof msg.id === "string" ? msg.id : "";
+        const behavior = msg.behavior === "allow" ? "allow" : "deny";
+        const resolved = this.sdkBridge.resolvePermission(id, behavior);
+        ws.send(JSON.stringify({ type: "permission_resolved", id, resolved }));
+        break;
+      }
+      case "abort": {
+        if (this.sdkBridge?.isAttached) {
+          await this.sdkBridge.interrupt();
+        }
+        break;
+      }
+      case "detach": {
+        if (this.sdkBridge?.isAttached) {
+          await this.sdkBridge.detach();
+        }
+        break;
+      }
+      default:
+        // subscribe/unsubscribe/ping handled by http.ts directly
+        break;
+    }
   }
 
   /** Start telemetry sink server if enabled in config */
@@ -3462,6 +3569,185 @@ export class Daemon {
             return { status: 400, data: { error: "Invalid JSON body" } };
           }
         }
+        // -- SDK endpoints ----------------------------------------------------------
+        case "sdk": {
+          const subCmd = name; // /api/sdk/<subCmd>/<arg>
+          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+
+          if (subCmd === "attach") {
+            if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+            if (!this.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+            if (!arg) return { status: 400, data: { error: "Session name required" } };
+            try {
+              const parsed = body ? JSON.parse(body) as { sessionId?: string; cwd?: string } : {};
+              const sessionPath = parsed.cwd ?? this.resolveSessionPath(arg);
+              if (!sessionPath) return { status: 400, data: { error: `No path for session: ${arg}` } };
+              const result = await this.sdkBridge.attach(arg, parsed.sessionId, sessionPath);
+              return { status: 200, data: result };
+            } catch (err) {
+              return { status: 500, data: { error: `Attach failed: ${err}` } };
+            }
+          }
+
+          if (subCmd === "detach") {
+            if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+            if (this.sdkBridge?.isAttached) await this.sdkBridge.detach();
+            return { status: 200, data: { ok: true } };
+          }
+
+          if (subCmd === "prompt") {
+            if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+            if (!this.sdkBridge?.isAttached) return { status: 400, data: { error: "No active SDK session" } };
+            try {
+              const parsed = JSON.parse(body) as { prompt: string; effort?: string; thinking?: unknown };
+              if (!parsed.prompt) return { status: 400, data: { error: "prompt required" } };
+              // Non-blocking — messages stream via WS
+              this.sdkBridge.send(parsed.prompt, {
+                effort: parsed.effort as any,
+                thinking: parsed.thinking as any,
+              }).catch((err) => this.log.error(`SDK prompt error: ${err}`));
+              return { status: 202, data: { ok: true, message: "Prompt accepted" } };
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+          }
+
+          if (subCmd === "status") {
+            return {
+              status: 200,
+              data: {
+                attached: this.sdkBridge?.isAttached ?? false,
+                activeSession: this.sdkBridge?.activeSessionName ?? null,
+                busy: this.sdkBridge?.isBusy ?? false,
+              },
+            };
+          }
+
+          if (subCmd === "sessions") {
+            // GET /api/sdk/sessions — list CC sessions
+            // GET /api/sdk/sessions/:id/messages — get messages for a session
+            if (arg && segments[3] === "messages") {
+              if (!this.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+              try {
+                const msgs = await this.sdkBridge.getMessages(arg);
+                return { status: 200, data: msgs };
+              } catch (err) {
+                return { status: 500, data: { error: `Failed to get messages: ${err}` } };
+              }
+            }
+            if (!this.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+            try {
+              const dir = queryParams.get("dir") ?? undefined;
+              const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+              const sessions = await this.sdkBridge.listAllSessions(dir, limit);
+              return { status: 200, data: sessions };
+            } catch (err) {
+              return { status: 500, data: { error: `Failed to list sessions: ${err}` } };
+            }
+          }
+
+          if (subCmd === "interrupt") {
+            if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+            if (this.sdkBridge?.isAttached) await this.sdkBridge.interrupt();
+            return { status: 200, data: { ok: true } };
+          }
+
+          return { status: 400, data: { error: `Unknown SDK endpoint: ${subCmd}` } };
+        }
+
+        // -- Memory endpoints -------------------------------------------------------
+        case "memories": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          const projectPath = name ? decodeURIComponent(name) : undefined;
+
+          if (method === "GET" && projectPath) {
+            // GET /api/memories/:projectPath — list memories
+            // GET /api/memories/:projectPath/search?q=... — FTS5 search
+            if (segments[2] === "search") {
+              const q = queryParams.get("q") ?? "";
+              const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 10;
+              const results = this.memoryDb.searchMemories(projectPath, q, limit);
+              return { status: 200, data: results };
+            }
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const memories = this.memoryDb.getTopMemories(projectPath, limit);
+            return { status: 200, data: memories };
+          }
+
+          if (method === "POST" && projectPath) {
+            // POST /api/memories/:projectPath — create memory
+            try {
+              const parsed = JSON.parse(body) as { category: string; content: string; sessionId?: string };
+              if (!parsed.content) return { status: 400, data: { error: "content required" } };
+              const id = this.memoryDb.createMemory(
+                projectPath,
+                (parsed.category ?? "discovery") as any,
+                parsed.content,
+                parsed.sessionId,
+              );
+              return { status: 201, data: { id, duplicate: id === null } };
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+          }
+
+          if (method === "DELETE" && projectPath) {
+            // DELETE /api/memories/:projectPath — delete by ID from body
+            const memId = segments[2] ? Number(segments[2]) : undefined;
+            if (!memId) return { status: 400, data: { error: "Memory ID required" } };
+            const deleted = this.memoryDb.deleteMemory(memId);
+            return { status: deleted ? 200 : 404, data: { ok: deleted } };
+          }
+
+          if (method === "POST" && !projectPath) {
+            // POST /api/memories — trigger decay
+            if (segments[1] === "decay") {
+              let decayed = 0;
+              // Decay all projects
+              const projects = new Set<string>();
+              for (const mem of this.memoryDb.getTopMemories("", 1000)) {
+                projects.add(mem.project_path);
+              }
+              for (const p of projects) {
+                decayed += this.memoryDb.decayMemories(p);
+              }
+              return { status: 200, data: { decayed } };
+            }
+          }
+
+          return { status: 400, data: { error: "Invalid memories request" } };
+        }
+
+        // -- Cost tracking endpoints ------------------------------------------------
+        case "costs": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+
+          if (method === "GET") {
+            // GET /api/costs — aggregate costs
+            // GET /api/costs/:sessionName — per-session costs
+            // GET /api/costs/daily — daily breakdown
+            // GET /api/costs/per-session — per-session breakdown
+            if (name === "daily") {
+              const days = queryParams.has("days") ? Number(queryParams.get("days")) : 30;
+              return { status: 200, data: this.memoryDb.getDailyCosts(days) };
+            }
+            if (name === "per-session") {
+              const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+              return { status: 200, data: this.memoryDb.getPerSessionCosts(limit) };
+            }
+            if (name) {
+              const costs = this.memoryDb.getSessionCosts(name);
+              return { status: 200, data: costs };
+            }
+            // Aggregate
+            const fromEpoch = queryParams.has("from") ? Number(queryParams.get("from")) : undefined;
+            const toEpoch = queryParams.has("to") ? Number(queryParams.get("to")) : undefined;
+            return { status: 200, data: this.memoryDb.getAggregateCosts(fromEpoch, toEpoch) };
+          }
+
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
         default:
           return { status: 404, data: { error: `Unknown endpoint: ${command}` } };
       }

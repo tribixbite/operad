@@ -14,7 +14,7 @@ build({
   outfile: resolve(__dirname, "dist/tmx.js"),
   format: "cjs",
   banner: { js: "#!/usr/bin/env node" },
-  external: ["ws"],
+  external: ["ws", "@anthropic-ai/claude-agent-sdk", "bun:sqlite"],
   // Replace import.meta references with CJS equivalents
   define: {
     "import.meta.url": "import_meta_url",
