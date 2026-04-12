@@ -13,6 +13,8 @@
   let entries: FileEntry[] = $state([]);
   let loading = $state(true);
   let error: string | null = $state(null);
+  /** Track last loaded key to skip redundant fetches */
+  let lastLoadedKey: string = "";
 
   /** Currently viewed file content, null when browsing directories */
   let fileContent: FileContentResponse | null = $state(null);
@@ -46,9 +48,14 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
   }
 
-  /** Load directory listing for the current path */
-  async function loadDir() {
-    loading = true;
+  /** Load directory listing for the current path. Skips if already loaded for same key. */
+  async function loadDir(force = false) {
+    const key = `${sessionName}:${currentPath}`;
+    if (!force && key === lastLoadedKey) return; // skip redundant fetch
+    const isFirstLoad = lastLoadedKey === "";
+    lastLoadedKey = key;
+    // Only show loading indicator on first load or explicit navigation (not SSE re-renders)
+    if (isFirstLoad || force) loading = true;
     error = null;
     // Clear any file view when navigating directories
     fileContent = null;
@@ -68,6 +75,7 @@
   /** Navigate into a directory */
   function navigateInto(dirName: string) {
     pathSegments = [...pathSegments, dirName];
+    lastLoadedKey = ""; // force reload on explicit navigation
   }
 
   /** Navigate to a specific breadcrumb index (-1 = root) */
@@ -77,6 +85,7 @@
     } else {
       pathSegments = pathSegments.slice(0, index + 1);
     }
+    lastLoadedKey = ""; // force reload on explicit navigation
   }
 
   /** Go back one level */
@@ -88,6 +97,7 @@
       fileError = null;
     } else if (inSubdir) {
       pathSegments = pathSegments.slice(0, -1);
+      lastLoadedKey = ""; // force reload on explicit navigation
     }
   }
 

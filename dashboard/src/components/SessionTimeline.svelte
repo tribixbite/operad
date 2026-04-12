@@ -11,6 +11,7 @@
   let loading = $state(true);
   let error: string | null = $state(null);
   let expanded = $state(false);
+  let lastLoadedSession: string = "";
 
   /** Source-based dot color */
   function dotColor(source: string): string {
@@ -31,7 +32,10 @@
   }
 
   async function load() {
-    loading = true;
+    if (sessionName === lastLoadedSession && events.length > 0) return; // skip redundant
+    const isFirstLoad = lastLoadedSession === "";
+    lastLoadedSession = sessionName;
+    if (isFirstLoad) loading = true;
     try {
       events = await fetchTimeline(sessionName, { limit: 50 });
       error = null;

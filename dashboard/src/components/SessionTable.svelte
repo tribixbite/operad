@@ -414,8 +414,11 @@
     margin: 0 0 0.5rem;
     white-space: pre-wrap;
     word-break: break-all;
+    min-height: 2.5rem;
     max-height: 4.5rem;
     overflow: hidden;
+    /* Prevent layout shift when content updates */
+    contain: layout style;
   }
   /* LIVE badge — SDK stream indicator */
   .live-badge {

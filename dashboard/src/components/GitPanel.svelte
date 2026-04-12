@@ -11,6 +11,8 @@
   let info: GitInfo | null = $state(null);
   let loading = $state(true);
   let error: string | null = $state(null);
+  /** Track last loaded session to skip redundant fetches */
+  let lastLoadedSession: string = "";
 
   /** Number of uncommitted (dirty) files */
   const dirtyCount = $derived(info?.dirty_files.length ?? 0);
@@ -19,7 +21,10 @@
   const recentCommits = $derived(info?.recent_commits.slice(0, 5) ?? []);
 
   async function load() {
-    loading = true;
+    if (sessionName === lastLoadedSession) return; // skip redundant fetch
+    const isFirstLoad = lastLoadedSession === "";
+    lastLoadedSession = sessionName;
+    if (isFirstLoad) loading = true;
     error = null;
     try {
       info = await fetchGitInfo(sessionName);

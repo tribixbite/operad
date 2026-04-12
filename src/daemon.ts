@@ -2245,11 +2245,82 @@ export class Daemon {
       this.dashboard = null;
     }
 
+    // Initialize memory database (before SDK bridge so it's available for callbacks)
+    try {
+      this.memoryDb = new MemoryDb(this.log);
+      await this.memoryDb.init();
+    } catch (err) {
+      this.log.warn(`Memory database failed to initialize: ${err}`);
+      this.memoryDb = null;
+    }
+
     // Initialize SDK bridge (uses WS broadcast for streaming)
     if (this.dashboard) {
+      // Accumulate assistant text per session for memory extraction on result
+      const assistantTextBuffer = new Map<string, string>();
+
       this.sdkBridge = new SdkBridge(
         this.log,
-        (sessionName, data) => this.dashboard?.broadcastToRoom(sessionName, data),
+        (sessionName, data) => {
+          // Broadcast to WS clients
+          this.dashboard?.broadcastToRoom(sessionName, data);
+
+          // Intercept messages for memory extraction + cost recording
+          const msg = data as Record<string, unknown>;
+          if (msg.type === "assistant" && msg.message) {
+            // Accumulate assistant text for memory extraction when result arrives
+            const content = (msg.message as any)?.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block?.type === "text" && block.text) {
+                  const prev = assistantTextBuffer.get(sessionName) ?? "";
+                  assistantTextBuffer.set(sessionName, prev + block.text);
+                }
+              }
+            }
+          }
+
+          if (msg.type === "result") {
+            // Extract and save memories from accumulated assistant text
+            const fullText = assistantTextBuffer.get(sessionName);
+            if (fullText && this.memoryDb) {
+              const sessionPath = this.resolveSessionPath(sessionName);
+              if (sessionPath) {
+                const saved = saveMemoriesFromResponse(
+                  this.memoryDb, sessionPath, fullText,
+                  typeof msg.session_id === "string" ? msg.session_id : undefined,
+                );
+                if (saved > 0) this.log.info(`Auto-saved ${saved} memories from ${sessionName}`);
+              }
+            }
+            assistantTextBuffer.delete(sessionName);
+
+            // Record cost from SDK result
+            if (this.memoryDb && typeof msg.total_cost_usd === "number" && msg.total_cost_usd > 0) {
+              try {
+                this.memoryDb.recordCost(
+                  sessionName,
+                  typeof msg.session_id === "string" ? msg.session_id : null,
+                  msg.total_cost_usd as number,
+                  typeof msg.usage === "object" && msg.usage
+                    ? ((msg.usage as any).input_tokens ?? 0)
+                    : 0,
+                  typeof msg.usage === "object" && msg.usage
+                    ? ((msg.usage as any).output_tokens ?? 0)
+                    : 0,
+                  typeof msg.duration_ms === "number" ? msg.duration_ms : 0,
+                  typeof msg.num_turns === "number" ? msg.num_turns : 0,
+                  typeof msg.model_usage === "object" && msg.model_usage
+                    ? Object.keys(msg.model_usage as object)[0] ?? null
+                    : null,
+                );
+                this.log.debug(`Recorded cost $${(msg.total_cost_usd as number).toFixed(4)} for ${sessionName}`);
+              } catch (err) {
+                this.log.warn(`Failed to record cost: ${err}`);
+              }
+            }
+          }
+        },
       );
 
       // Wire WS message handler for SDK/permission messages
@@ -2258,15 +2329,13 @@ export class Daemon {
           ws.send(JSON.stringify({ type: "error", message: String(err) }));
         });
       });
-    }
 
-    // Initialize memory database
-    try {
-      this.memoryDb = new MemoryDb(this.log);
-      await this.memoryDb.init();
-    } catch (err) {
-      this.log.warn(`Memory database failed to initialize: ${err}`);
-      this.memoryDb = null;
+      // Verify SDK is available (non-blocking, log result)
+      import("@anthropic-ai/claude-agent-sdk").then(() => {
+        this.log.info("SDK available for streaming");
+      }).catch(() => {
+        this.log.debug("SDK not installed — streaming features disabled");
+      });
     }
   }
 

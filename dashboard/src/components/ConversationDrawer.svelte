@@ -24,6 +24,10 @@
   let promptText = $state("");
   /** Whether a prompt is currently being processed */
   let sending = $state(false);
+  /** Per-session effort level */
+  let effort = $state<"low" | "medium" | "high" | "max">("high");
+  /** Per-session thinking mode */
+  let thinkingMode = $state<"adaptive" | "enabled" | "disabled">("adaptive");
   /** Live stream messages for display */
   let liveMessages: Array<{ role: string; content: string; timestamp: number }> = $state([]);
   /** Error message from SDK operations */
@@ -161,6 +165,12 @@
       type: "prompt",
       sessionName,
       prompt: text,
+      effort,
+      thinking: thinkingMode === "enabled"
+        ? { type: "enabled", budgetTokens: 16000 }
+        : thinkingMode === "disabled"
+          ? { type: "disabled" }
+          : { type: "adaptive" },
     });
     promptText = "";
     sending = true;
@@ -256,6 +266,27 @@
             {#if sending && !streamText}
               <div class="live-thinking">Thinking...</div>
             {/if}
+          </div>
+
+          <!-- SDK controls -->
+          <div class="sdk-controls">
+            <label class="sdk-control">
+              <span class="sdk-label">Effort</span>
+              <select class="sdk-select" bind:value={effort}>
+                <option value="low">Low</option>
+                <option value="medium">Med</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </label>
+            <label class="sdk-control">
+              <span class="sdk-label">Thinking</span>
+              <select class="sdk-select" bind:value={thinkingMode}>
+                <option value="adaptive">Adaptive</option>
+                <option value="enabled">Enabled</option>
+                <option value="disabled">Off</option>
+              </select>
+            </label>
           </div>
 
           <!-- Prompt input -->
@@ -483,6 +514,42 @@
     font-size: 0.6875rem;
     padding: 0.5rem;
     animation: pulse 1.5s infinite;
+  }
+
+  /* -- SDK controls ------------------------------------------------------- */
+  .sdk-controls {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.375rem 0.625rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+  }
+  .sdk-control {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .sdk-label {
+    font-size: 0.5625rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .sdk-select {
+    font-size: 0.6875rem;
+    font-family: inherit;
+    padding: 0.125rem 0.25rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-primary);
+    outline: none;
+    cursor: pointer;
+  }
+  .sdk-select:focus {
+    border-color: var(--accent-blue);
   }
 
   /* -- Prompt input -------------------------------------------------------- */
