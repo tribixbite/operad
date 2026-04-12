@@ -174,8 +174,8 @@ async function runBoot(): Promise<void> {
     child.unref();
     closeSync(stderrFd);
 
-    // Wait for daemon to be ready (10s max)
-    for (let i = 0; i < 20; i++) {
+    // Wait for daemon to be ready (30s max — registry merge of 100+ sessions is slow)
+    for (let i = 0; i < 60; i++) {
       await sleep(500);
       if (await client.isRunning()) break;
     }

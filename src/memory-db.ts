@@ -70,10 +70,14 @@ interface StmtHandle {
 const DB_DIR = join(homedir(), ".local", "share", "operad");
 const DB_FILE = "memory.db";
 
-/** Schema SQL */
-const SCHEMA = `
-  -- Core memories table
-  CREATE TABLE IF NOT EXISTS memories (
+/**
+ * Schema statements — each string is one complete SQL statement.
+ * Separated into an array because bun:sqlite's exec() only handles
+ * one statement at a time (unlike better-sqlite3).
+ */
+const SCHEMA_STATEMENTS: string[] = [
+  // Core memories table
+  `CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_path TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT 'discovery',
@@ -84,32 +88,32 @@ const SCHEMA = `
     created_at INTEGER DEFAULT (unixepoch()),
     accessed_at INTEGER DEFAULT (unixepoch()),
     expires_at INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_mem_project ON memories(project_path);
-  CREATE INDEX IF NOT EXISTS idx_mem_relevance ON memories(relevance_score DESC);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_hash ON memories(project_path, content_hash);
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_mem_project ON memories(project_path)`,
+  `CREATE INDEX IF NOT EXISTS idx_mem_relevance ON memories(relevance_score DESC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_hash ON memories(project_path, content_hash)`,
 
-  -- FTS5 full-text search
-  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+  // FTS5 full-text search
+  `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
     content='memories',
     content_rowid='id'
-  );
+  )`,
 
-  -- Sync triggers: keep FTS5 in sync with memories table
-  CREATE TRIGGER IF NOT EXISTS mem_ai AFTER INSERT ON memories BEGIN
+  // Sync triggers: keep FTS5 in sync with memories table
+  `CREATE TRIGGER IF NOT EXISTS mem_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
-  END;
-  CREATE TRIGGER IF NOT EXISTS mem_ad AFTER DELETE ON memories BEGIN
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS mem_ad AFTER DELETE ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
-  END;
-  CREATE TRIGGER IF NOT EXISTS mem_au AFTER UPDATE OF content ON memories BEGIN
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS mem_au AFTER UPDATE OF content ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.id, old.content);
     INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
-  END;
+  END`,
 
-  -- Cost tracking table
-  CREATE TABLE IF NOT EXISTS costs (
+  // Cost tracking table
+  `CREATE TABLE IF NOT EXISTS costs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_name TEXT NOT NULL,
     session_id TEXT,
@@ -120,10 +124,10 @@ const SCHEMA = `
     num_turns INTEGER,
     model TEXT,
     created_at INTEGER DEFAULT (unixepoch())
-  );
-  CREATE INDEX IF NOT EXISTS idx_costs_session ON costs(session_name);
-  CREATE INDEX IF NOT EXISTS idx_costs_created ON costs(created_at);
-`;
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_costs_session ON costs(session_name)`,
+  `CREATE INDEX IF NOT EXISTS idx_costs_created ON costs(created_at)`,
+];
 
 /**
  * Open the database, auto-detecting runtime (bun:sqlite vs better-sqlite3).
@@ -214,9 +218,9 @@ export class MemoryDb {
   /** Initialize the database and create tables */
   async init(): Promise<void> {
     this.db = await openDatabase(this.dbPath);
-    // Execute schema — each statement separately for SQLite compatibility
-    for (const stmt of SCHEMA.split(";").map((s) => s.trim()).filter(Boolean)) {
-      this.db.exec(stmt + ";");
+    // Execute schema — each statement separately for bun:sqlite compatibility
+    for (const stmt of SCHEMA_STATEMENTS) {
+      this.db.exec(stmt);
     }
     this.log.info(`Memory database initialized at ${this.dbPath}`);
   }
