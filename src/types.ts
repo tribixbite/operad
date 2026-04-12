@@ -301,7 +301,8 @@ export type IpcCommand =
   | { cmd: "stop"; name?: string }
   | { cmd: "restart"; name?: string }
   | { cmd: "health" }
-  | { cmd: "boot" }
+  | { cmd: "stream" }
+  | { cmd: "boot" } // backwards compat alias
   | { cmd: "shutdown"; kill?: boolean }
   | { cmd: "go"; name: string }
   | { cmd: "send"; name: string; text: string }

@@ -23,16 +23,16 @@ while true; do
   if daemon_alive; then
     echo "[$(date)] Daemon already running, attaching tmux" >> "$LOG_DIR/watchdog.log"
   else
-    echo "[$(date)] Starting operad boot..." >> "$LOG_DIR/watchdog.log"
+    echo "[$(date)] Starting operad stream..." >> "$LOG_DIR/watchdog.log"
 
     # Do NOT delete the socket here — isRunning() handles stale detection.
     # Deleting an active socket causes duplicate daemon spawns.
 
-    "$TMX" boot
+    "$TMX" stream
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -ne 0 ]; then
-      echo "[$(date)] operad boot failed (code=$EXIT_CODE), retrying in 5s..." >> "$LOG_DIR/watchdog.log"
+      echo "[$(date)] operad stream failed (code=$EXIT_CODE), retrying in 5s..." >> "$LOG_DIR/watchdog.log"
       sleep 5
       continue
     fi

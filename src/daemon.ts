@@ -4402,10 +4402,11 @@ export class Daemon {
       case "health":
         return this.cmdHealth();
 
-      case "boot":
+      case "stream":
+      case "boot": // backwards compat alias
         // Run boot async and respond immediately
         this.boot().catch((err) => this.log.error(`Boot failed: ${err}`));
-        return { ok: true, data: "Boot sequence started" };
+        return { ok: true, data: "Stream sequence started" };
 
       case "shutdown":
         // Run shutdown async and respond before exiting

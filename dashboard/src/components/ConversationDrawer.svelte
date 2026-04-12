@@ -3,7 +3,7 @@
   import PermissionModal from "./PermissionModal.svelte";
   import type { SdkPermissionRequest, SdkAssistantMessage, SdkResultMessage } from "../lib/types";
   import { connect, subscribe, unsubscribe, send, on, wsState } from "../lib/ws.svelte";
-  import { sdkAttach, sdkDetach } from "../lib/api";
+  import { sdkAttach, sdkDetach, sdkInterrupt } from "../lib/api";
   import { store } from "../lib/store.svelte";
 
   interface Props {
@@ -32,6 +32,8 @@
   let liveMessages: Array<{ role: string; content: string; timestamp: number }> = $state([]);
   /** Error message from SDK operations */
   let liveError: string | null = $state(null);
+  /** Thinking text (extended thinking block content) */
+  let thinkingText = $state("");
   /** Cleanup functions for WS handlers */
   let cleanupFns: Array<() => void> = [];
 
@@ -75,10 +77,12 @@
       on("assistant", (msg) => {
         const m = msg as unknown as SdkAssistantMessage;
         if (!m.message?.content) return;
-        // Extract text from content blocks
+        // Extract text and thinking from content blocks
         for (const block of m.message.content) {
           if (block.type === "text" && block.text) {
             streamText = block.text;
+          } else if (block.type === "thinking" && block.thinking) {
+            thinkingText = block.thinking;
           }
         }
       }),
@@ -87,6 +91,15 @@
       }),
       on("result", (msg) => {
         const r = msg as unknown as SdkResultMessage;
+        // Finalize thinking text as a collapsed message
+        if (thinkingText) {
+          liveMessages = [...liveMessages, {
+            role: "thinking",
+            content: thinkingText,
+            timestamp: Date.now(),
+          }];
+          thinkingText = "";
+        }
         // Finalize the current stream text as a message
         if (streamText) {
           liveMessages = [...liveMessages, {
@@ -177,6 +190,16 @@
     streamText = "";
   }
 
+  /** Interrupt the active query */
+  async function handleInterrupt() {
+    if (!sending || !sdkAttached) return;
+    try {
+      await sdkInterrupt(sessionName);
+    } catch (err: any) {
+      liveError = err.message ?? "Interrupt failed";
+    }
+  }
+
   /** Handle Enter key in prompt input */
   function handlePromptKeydown(e: KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -248,11 +271,26 @@
 
           <div class="live-messages">
             {#each liveMessages as msg (msg.timestamp)}
-              <div class="live-msg live-msg-{msg.role}">
-                <span class="live-msg-role">{msg.role}</span>
-                <div class="live-msg-content">{msg.content}</div>
-              </div>
+              {#if msg.role === "thinking"}
+                <details class="live-msg live-msg-thinking">
+                  <summary class="live-msg-role">thinking</summary>
+                  <div class="live-msg-content">{msg.content}</div>
+                </details>
+              {:else}
+                <div class="live-msg live-msg-{msg.role}">
+                  <span class="live-msg-role">{msg.role}</span>
+                  <div class="live-msg-content">{msg.content}</div>
+                </div>
+              {/if}
             {/each}
+
+            <!-- Thinking text (extended thinking, collapsible) -->
+            {#if thinkingText}
+              <details class="live-msg live-msg-thinking" open>
+                <summary class="live-msg-role">thinking</summary>
+                <div class="live-msg-content">{thinkingText}</div>
+              </details>
+            {/if}
 
             <!-- Streaming text (partial, in progress) -->
             {#if streamText}
@@ -263,7 +301,7 @@
               </div>
             {/if}
 
-            {#if sending && !streamText}
+            {#if sending && !streamText && !thinkingText}
               <div class="live-thinking">Thinking...</div>
             {/if}
           </div>
@@ -299,14 +337,24 @@
               disabled={sending || !sdkAttached}
               rows="2"
             ></textarea>
-            <button
-              class="prompt-send"
-              onclick={handleSendPrompt}
-              disabled={sending || !promptText.trim() || !sdkAttached}
-              title="Send (Enter)"
-            >
-              &#x25B6;
-            </button>
+            {#if sending}
+              <button
+                class="prompt-stop"
+                onclick={handleInterrupt}
+                title="Interrupt (stop query)"
+              >
+                &#x25A0;
+              </button>
+            {:else}
+              <button
+                class="prompt-send"
+                onclick={handleSendPrompt}
+                disabled={!promptText.trim() || !sdkAttached}
+                title="Send (Enter)"
+              >
+                &#x25B6;
+              </button>
+            {/if}
           </div>
         </div>
       {:else}
@@ -489,6 +537,31 @@
   }
   .live-msg-system .live-msg-role { color: var(--text-muted); }
 
+  .live-msg-thinking {
+    background: rgba(188, 140, 255, 0.06);
+    border: 1px solid rgba(188, 140, 255, 0.15);
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+  }
+  .live-msg-thinking .live-msg-role {
+    color: var(--accent-purple, #bc8cff);
+    cursor: pointer;
+    list-style: none;
+  }
+  .live-msg-thinking .live-msg-role::marker { content: ""; }
+  .live-msg-thinking .live-msg-role::before {
+    content: "▸ ";
+    font-size: 0.5rem;
+    vertical-align: middle;
+  }
+  .live-msg-thinking[open] .live-msg-role::before { content: "▾ "; }
+  .live-msg-thinking .live-msg-content {
+    margin-top: 0.25rem;
+    font-size: 0.625rem;
+    max-height: 150px;
+    overflow-y: auto;
+  }
+
   .live-msg-streaming {
     border-color: rgba(34, 197, 94, 0.3);
   }
@@ -607,6 +680,26 @@
   .prompt-send:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .prompt-stop {
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(248, 81, 73, 0.15);
+    border: 1px solid var(--accent-red, #f85149);
+    border-radius: 5px;
+    color: var(--accent-red, #f85149);
+    font-size: 0.75rem;
+    cursor: pointer;
+    align-self: flex-end;
+    font-family: inherit;
+    transition: background 0.1s;
+  }
+  .prompt-stop:hover {
+    background: rgba(248, 81, 73, 0.25);
   }
 
   /* Mobile: full width */

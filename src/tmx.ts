@@ -65,8 +65,9 @@ async function main(): Promise<void> {
     case "daemon":
       return runDaemon();
 
-    case "boot":
-      return runBoot();
+    case "stream":
+    case "boot": // backwards compat alias
+      return runStream();
 
     case "config":
       return runConfig();
@@ -127,8 +128,8 @@ async function runDaemon(): Promise<void> {
   await daemon.start();
 }
 
-/** Boot sequence: start daemon if needed, then boot all sessions */
-async function runBoot(): Promise<void> {
+/** Stream: start daemon if needed, then boot all sessions */
+async function runStream(): Promise<void> {
   const configPath = getConfigFlag();
   const client = getClient(configPath);
 
@@ -189,18 +190,18 @@ async function runBoot(): Promise<void> {
     console.log(`${GREEN}Daemon started${RESET}`);
   }
 
-  // Send boot command — use extended timeout because boot runs ADB connect
+  // Send stream command — use extended timeout because boot runs ADB connect
   // (spawnSync, up to 50s) which blocks the event loop before the response is flushed.
   const bootTimeoutMs = 90_000;
-  const resp = await client.send({ cmd: "boot" }, bootTimeoutMs);
+  const resp = await client.send({ cmd: "stream" }, bootTimeoutMs);
   if (resp.ok) {
-    console.log(`${GREEN}Boot sequence initiated${RESET}`);
+    console.log(`${GREEN}Stream sequence initiated${RESET}`);
   } else {
-    console.error(`${RED}Boot failed: ${resp.error}${RESET}`);
+    console.error(`${RED}Stream failed: ${resp.error}${RESET}`);
     process.exit(1);
   }
 
-  // --attach: exec into tmux after boot so this terminal becomes a tmux client.
+  // --attach: exec into tmux after stream so this terminal becomes a tmux client.
   // Used by watchdog.sh to make its Termux tab interactive after boot.
   // The daemon's auto-tabs create dedicated tabs via TermuxService; this flag
   // makes the watchdog's own tab usable as an additional tmux client.
@@ -329,18 +330,18 @@ async function runUpgrade(): Promise<void> {
         return;
       }
     }
-    console.error(`${YELLOW}Watchdog didn't restart daemon within 20s — try 'operad boot'${RESET}`);
+    console.error(`${YELLOW}Watchdog didn't restart daemon within 20s — try 'operad stream'${RESET}`);
     return;
   }
 
   // No watchdog — restart daemon directly
   console.log(`${CYAN}No watchdog — restarting daemon directly...${RESET}`);
-  const bootArgs = ["boot"];
-  if (configPath) bootArgs.push("--config", configPath);
+  const streamArgs = ["stream"];
+  if (configPath) streamArgs.push("--config", configPath);
 
-  // Re-use runBoot logic by running operad boot as a subprocess
+  // Re-use runStream logic by running operad stream as a subprocess
   const bunPath = resolveBunPath();
-  const bootResult = spawnSync(bunPath, [process.argv[1], ...bootArgs], {
+  const bootResult = spawnSync(bunPath, [process.argv[1], ...streamArgs], {
     encoding: "utf-8",
     timeout: 120_000,
     stdio: "inherit",
@@ -572,7 +573,7 @@ async function runIpcCommand(): Promise<void> {
   // Check daemon is running
   const running = await client.isRunning();
   if (!running) {
-    console.error(`${RED}Daemon not running. Start with: operad boot${RESET}`);
+    console.error(`${RED}Daemon not running. Start with: operad stream${RESET}`);
     process.exit(1);
   }
 
@@ -590,7 +591,7 @@ async function runIpcCommand(): Promise<void> {
       if (existsSync(socketPath)) break;
     }
     if (!existsSync(socketPath)) {
-      console.error(`${RED}Socket not re-created. Try: operad shutdown && operad boot${RESET}`);
+      console.error(`${RED}Socket not re-created. Try: operad shutdown && operad stream${RESET}`);
       process.exit(1);
     }
     console.log(`${GREEN}Socket re-created${RESET}`);
@@ -989,7 +990,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}start${RESET} [name]          Start all or one session (resolves dependencies)
   ${CYAN}stop${RESET} [name]           Graceful stop (reverse dependency order)
   ${CYAN}restart${RESET} [name]        Stop then start
-  ${CYAN}boot${RESET}                  Full sequence: daemon + ADB fix + start all + cron
+  ${CYAN}stream${RESET}                Full sequence: daemon + ADB fix + start all + cron
   ${CYAN}health${RESET}                Run health sweep now
   ${CYAN}memory${RESET}                System memory + per-session RSS + pressure level
   ${CYAN}logs${RESET} [name]           Tail structured logs
@@ -1017,7 +1018,7 @@ ${BOLD}OPTIONS${RESET}
   -v, --version        Show version
 
 ${BOLD}EXAMPLES${RESET}
-  operad boot              # Start everything after device boot
+  operad stream            # Start everything (daemon + sessions + dashboard)
   operad status clev       # Fuzzy match → cleverkeys status
   operad go clev           # Send "go" to cleverkeys
   operad restart play      # Restart playwright
