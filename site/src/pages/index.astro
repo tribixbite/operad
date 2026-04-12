@@ -20,11 +20,12 @@ import Layout from "../layouts/Layout.astro";
         </h1>
 
         <p class="mx-auto mb-2 max-w-2xl text-xl text-terminal-text sm:text-2xl">
-          Cross-platform tmux session orchestrator
+          Manage all your Claude Code sessions from one dashboard
         </p>
 
-        <p class="mb-4 text-sm text-terminal-dim">
-          Health checks &middot; memory monitoring &middot; auto-restart &middot; real-time dashboard
+        <p class="mb-4 max-w-2xl mx-auto text-sm text-terminal-dim">
+          Web UI for skills, memories, and prompt history across every project.
+          Auto-boots all saved projects on startup. Health checks, memory monitoring, and crash recovery keep everything running.
         </p>
 
         <div class="mb-8 flex flex-wrap items-center justify-center gap-2 font-[family-name:var(--font-mono)] text-xs">
@@ -53,11 +54,11 @@ import Layout from "../layouts/Layout.astro";
         <nav class="mt-8 flex flex-wrap justify-center gap-2">
           {[
             { href: "#install", label: "Install" },
-            { href: "#architecture", label: "Architecture" },
+            { href: "#dashboard", label: "Dashboard" },
+            { href: "#cli", label: "CLI" },
             { href: "#platforms", label: "Platforms" },
             { href: "#configuration", label: "Configuration" },
-            { href: "#cli", label: "CLI" },
-            { href: "#dashboard", label: "Dashboard" },
+            { href: "#architecture", label: "Architecture" },
             { href: "#rest-api", label: "REST API" },
             { href: "#lifecycle", label: "Lifecycle" },
             { href: "#resilience", label: "Resilience" },
@@ -68,6 +69,38 @@ import Layout from "../layouts/Layout.astro";
             </a>
           ))}
         </nav>
+      </div>
+    </section>
+
+    <!-- Key Features -->
+    <section class="px-4 py-16 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <div class="grid gap-6 sm:grid-cols-3">
+          <div class="rounded-lg border border-terminal-green/20 bg-terminal-surface p-5">
+            <div class="mb-3 font-[family-name:var(--font-mono)] text-lg text-terminal-green">01</div>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">Unified dashboard</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim leading-relaxed">
+              Browse and manage skills, memories, and CLAUDE.md files across all your repos from one web interface.
+              Start, stop, restart any session with a click.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-amber/20 bg-terminal-surface p-5">
+            <div class="mb-3 font-[family-name:var(--font-mono)] text-lg text-terminal-amber">02</div>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">Prompt history + search</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim leading-relaxed">
+              Full conversation history across every project with search, starring, and token usage tracking.
+              Never lose a useful prompt or solution again.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-cyan/20 bg-terminal-surface p-5">
+            <div class="mb-3 font-[family-name:var(--font-mono)] text-lg text-terminal-cyan">03</div>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">Auto-boot on startup</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim leading-relaxed">
+              All saved projects start automatically in dependency order.
+              Health checks, auto-restart, and memory pressure management keep them running 24/7.
+            </p>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -325,33 +358,57 @@ import Layout from "../layouts/Layout.astro";
         </h2>
 
         <p class="mb-6 text-sm text-terminal-dim">
-          Astro 5 + Svelte 5 static site served by the daemon on port <code class="text-terminal-green">18970</code>.
-          Real-time updates via Server-Sent Events.
+          Web dashboard on port <code class="text-terminal-green">18970</code> with real-time SSE updates.
+          Manage everything from your browser — sessions, skills, memories, prompt history.
         </p>
 
-        <div class="grid gap-4 sm:grid-cols-3">
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
-            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-green">Overview</h3>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-green">Sessions</h3>
             <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
+              Start/stop/restart any session.<br>
               System gauges (memory, battery, ADB).<br>
-              Session table with start/stop controls.<br>
-              Recent projects with search + play.
+              Recent projects with search + quick open.
             </p>
           </div>
           <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
-            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-amber">Memory</h3>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-amber">Prompt History</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
+              Full conversation history across all projects.<br>
+              Search by content, project, or date.<br>
+              Star and save important prompts. Token tracking.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-cyan">Skills &amp; Memories</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
+              Browse skills and CLAUDE.md across repos.<br>
+              View and edit auto-memories per project.<br>
+              Unified config management.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-bright">Memory Monitor</h3>
             <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
               System memory breakdown.<br>
               Per-session RSS usage.<br>
-              Process manager (Android).
+              Process manager (force-stop on Android).
             </p>
           </div>
           <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
-            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-cyan">Logs</h3>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-bright">Logs</h3>
             <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
-              Real-time log tail via SSE.<br>
+              Real-time structured log tail via SSE.<br>
               Filter by level and session.<br>
               Auto-scroll with pause on hover.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-medium text-terminal-bright">Settings</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
+              Edit operad config from the browser.<br>
+              Manage notification preferences.<br>
+              ADB and wake lock controls.
             </p>
           </div>
         </div>

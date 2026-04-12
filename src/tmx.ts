@@ -5,9 +5,9 @@
  * See `operad --help` for available commands.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { IpcClient } from "./ipc.js";
 import { Daemon } from "./daemon.js";
 import { loadConfig, findConfigPath, validateConfigFile } from "./config.js";
@@ -254,7 +254,8 @@ async function runUpgrade(): Promise<void> {
   }
 
   // Step 1a: Build orchestrator bundle
-  const orcDir = join(process.env.HOME ?? "", "git/termux-tools/orchestrator");
+  // Resolve repo root from the running script (dist/tmx.js → repo root)
+  const orcDir = join(dirname(realpathSync(__filename)), "..");
   console.log(`${CYAN}Building orchestrator...${RESET}`);
   const buildResult = spawnSync("bun", ["run", "build"], {
     cwd: orcDir,

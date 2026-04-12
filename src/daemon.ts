@@ -2887,9 +2887,9 @@ export class Daemon {
 
             // Find bridge script and runtime (same logic as detached spawn below)
             const bridgeCandidates = [
-              join(home, "git/termux-tools/claude-chrome-bridge.ts"),
               join(home, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
               join(home, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
+              join(home, "git/termux-tools/bridge/dist/cli.js"),
             ];
             const bridgeScript = bridgeCandidates.find(p => existsSync(p)) ?? bridgeCandidates[0];
             const bunPath = existsSync(join(home, ".bun/bin/bun")) ? join(home, ".bun/bin/bun") : "bun";
@@ -2954,9 +2954,9 @@ export class Daemon {
             // Find the bridge script
             const home = homedir();
             const bridgeCandidates = [
-              join(home, "git/termux-tools/claude-chrome-bridge.ts"),
               join(home, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
               join(home, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
+              join(home, "git/termux-tools/bridge/dist/cli.js"),
             ];
             const bridgeScript = bridgeCandidates.find(p => existsSync(p));
             if (!bridgeScript) {
@@ -3902,10 +3902,10 @@ export class Daemon {
 
   /** Initiate ADB wireless connection using the adbc script */
   private adbWirelessConnect(): { status: number; data: unknown } {
-    const script = join(
-      homedir(),
-      "git/termux-tools/tools/adb-wireless-connect.sh",
-    );
+    const script = this.config.adb.connect_script;
+    if (!script) {
+      return { status: 400, data: { error: "adb.connect_script not configured" } };
+    }
     try {
       // Run the connect script with a reasonable timeout (15s for port scanning)
       const result = spawnSync("bash", [script], {

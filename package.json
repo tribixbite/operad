@@ -2,7 +2,7 @@
   "name": "operadic",
   "version": "0.2.0",
   "type": "commonjs",
-  "description": "operad — cross-platform tmux session orchestrator. Manages sessions, health checks, auto-restart, and a web dashboard. Supports Android/Termux, Linux, and macOS.",
+  "description": "operad — manage all your Claude Code sessions from one dashboard. Web UI for skills, memories, and prompt history across projects. Auto-boots saved projects with health checks and crash recovery.",
   "author": "tribixbite",
   "license": "MIT",
   "repository": {

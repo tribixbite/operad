@@ -204,7 +204,7 @@ function validateConfig(raw: Record<string, unknown>): TmxConfig {
   const adb: AdbConfig = {
     enabled: asBool(adbRaw.enabled, "adb.enabled", true),
     connect_script: asString(adbRaw.connect_script, "adb.connect_script",
-      `${process.env.HOME}/git/termux-tools/tools/adb-wireless-connect.sh`),
+      ""),
     connect_timeout_s: asNumber(adbRaw.connect_timeout_s, "adb.connect_timeout_s", 45),
     retry_interval_s: asNumber(adbRaw.retry_interval_s, "adb.retry_interval_s", 300),
     phantom_fix: asBool(adbRaw.phantom_fix, "adb.phantom_fix", true),
