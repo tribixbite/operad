@@ -2,9 +2,10 @@
   import {
     startSession, stopSession, restartSession, goSession,
     openTab, closeSession, suspendSession, resumeSession,
+    fetchSdkStatus,
   } from "../lib/api";
   import { store, refreshStatus } from "../lib/store.svelte";
-  import type { DaemonStatus, SessionState } from "../lib/types";
+  import type { DaemonStatus, SessionState, SdkBridgeStatus } from "../lib/types";
   import SessionCard from "./SessionCard.svelte";
   import ScriptRunner from "./ScriptRunner.svelte";
   import SessionTimeline from "./SessionTimeline.svelte";
@@ -18,6 +19,19 @@
   let drawerSession: string | null = $state(null);
   /** Search filter for sessions */
   let sessionFilter = $state("");
+  /** SDK bridge status (which session is LIVE) */
+  let sdkStatus: SdkBridgeStatus | null = $state(null);
+
+  /** Poll SDK status periodically */
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    const load = async () => {
+      try { sdkStatus = await fetchSdkStatus(); } catch { /* ignore */ }
+    };
+    load();
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  });
 
   /** Derived from shared store — no own SSE/fetch needed */
   const status = $derived<DaemonStatus | null>(store.daemon);
@@ -151,6 +165,9 @@
     </td>
     <td class="td-actions" onclick={(e) => e.stopPropagation()}>
       {#if session.type === "claude"}
+        {#if sdkStatus?.attached && sdkStatus.sessionName === session.name}
+          <span class="live-badge" title="SDK stream active">LIVE</span>
+        {/if}
         <button class="btn-icon chat" onclick={(e) => openDrawer(e, session.name)} title="Conversation">&#x2709;</button>
       {/if}
       {#if session.status === "running" || session.status === "degraded"}
@@ -399,6 +416,25 @@
     word-break: break-all;
     max-height: 4.5rem;
     overflow: hidden;
+  }
+  /* LIVE badge — SDK stream indicator */
+  .live-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.5rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 0.0625rem 0.25rem;
+    border-radius: 3px;
+    background: rgba(34, 197, 94, 0.15);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    animation: live-pulse 2s infinite;
+    vertical-align: middle;
+  }
+  @keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
   }
   /* Chat button */
   .td-actions :global(.btn-icon.chat) { color: var(--accent-blue); opacity: 0.6; }

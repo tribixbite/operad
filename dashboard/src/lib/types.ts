@@ -392,3 +392,120 @@ export interface CustomizationResponse {
   marketplace: MarketplaceInfo;
   projectPath?: string;
 }
+
+// -- SDK streaming types ------------------------------------------------------
+
+/** SDK bridge status from /api/sdk/status */
+export interface SdkBridgeStatus {
+  attached: boolean;
+  sessionName: string | null;
+  busy: boolean;
+}
+
+/** SDK permission request sent via WS */
+export interface SdkPermissionRequest {
+  type: "permission_request";
+  id: string;
+  tool: string;
+  input: unknown;
+  timeout_ms: number;
+}
+
+/** SDK assistant message sent via WS */
+export interface SdkAssistantMessage {
+  type: "assistant";
+  uuid: string;
+  session_id: string;
+  message: {
+    role: string;
+    content: Array<{
+      type: string;
+      text?: string;
+      thinking?: string;
+      name?: string;
+      input?: unknown;
+      id?: string;
+    }>;
+    stop_reason?: string;
+  };
+  parent_tool_use_id: string | null;
+}
+
+/** SDK result message sent via WS */
+export interface SdkResultMessage {
+  type: "result";
+  subtype: string;
+  session_id: string;
+  duration_ms: number;
+  num_turns: number;
+  total_cost_usd: number;
+  usage: { input_tokens: number; output_tokens: number };
+  is_error: boolean;
+  result_text?: string;
+}
+
+/** SDK system message sent via WS */
+export interface SdkSystemMessage {
+  type: "system";
+  subtype: string;
+  session_id: string;
+  tools?: string[];
+  model?: string;
+  version?: string;
+}
+
+/** Union of SDK WS messages */
+export type SdkWsMessage =
+  | SdkPermissionRequest
+  | SdkAssistantMessage
+  | SdkResultMessage
+  | SdkSystemMessage
+  | { type: "attached"; sessionName: string; sessionId: string }
+  | { type: "detached"; sessionName: string }
+  | { type: "interrupted" }
+  | { type: "prompt_start"; prompt: string }
+  | { type: "error"; message: string };
+
+// -- Memory types -------------------------------------------------------------
+
+/** Memory category */
+export type MemoryCategory = "convention" | "decision" | "discovery" | "warning" | "user_preference";
+
+/** Memory record from /api/memories */
+export interface MemoryRecord {
+  id: number;
+  project_path: string;
+  category: MemoryCategory;
+  content: string;
+  relevance_score: number;
+  source_session_id: string | null;
+  created_at: number;
+  accessed_at: number;
+  expires_at: number | null;
+}
+
+// -- SDK cost tracking --------------------------------------------------------
+
+/** Aggregate cost data from /api/costs */
+export interface SdkCostAggregate {
+  total_cost_usd: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_duration_ms: number;
+  total_turns: number;
+  query_count: number;
+}
+
+/** Daily cost from SDK cost tracking */
+export interface SdkDailyCost {
+  date: string;
+  cost_usd: number;
+  queries: number;
+}
+
+/** Per-session cost from SDK cost tracking */
+export interface SdkSessionCost {
+  session_name: string;
+  total_cost: number;
+  queries: number;
+}

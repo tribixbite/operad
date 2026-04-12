@@ -43,6 +43,15 @@
     claudeMd: false,
     marketplace: false,
     hooks: false,
+    sdk: false,
+  });
+
+  /** SDK configuration state */
+  let sdkDefaults = $state({
+    effort: "high" as "low" | "medium" | "high" | "max",
+    thinking: "adaptive" as "adaptive" | "enabled" | "disabled",
+    maxBudgetUsd: 0,
+    model: "",
   });
 
   /** Which item is expanded for detail view (keyed by path or id) */
@@ -837,6 +846,59 @@ Example usage or output
       {/if}
     </div>
 
+    <!-- Section 7: SDK Configuration -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("sdk")}>
+        <span class="chevron">{sections.sdk ? "▾" : "▸"}</span>
+        <span class="section-title">SDK Streaming</span>
+        <span class="badge badge-green">config</span>
+      </button>
+      {#if sections.sdk}
+        <div class="section-body">
+          <div class="sdk-grid">
+            <label class="sdk-label" for="sdk-effort">Default Effort</label>
+            <select id="sdk-effort" class="sdk-select" bind:value={sdkDefaults.effort}>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="max">Max (Opus only)</option>
+            </select>
+
+            <label class="sdk-label" for="sdk-thinking">Thinking Mode</label>
+            <select id="sdk-thinking" class="sdk-select" bind:value={sdkDefaults.thinking}>
+              <option value="adaptive">Adaptive</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </select>
+
+            <label class="sdk-label" for="sdk-budget">Max Budget (USD)</label>
+            <input
+              id="sdk-budget"
+              type="number"
+              class="sdk-input"
+              bind:value={sdkDefaults.maxBudgetUsd}
+              min="0"
+              step="0.10"
+              placeholder="0 = unlimited"
+            />
+
+            <label class="sdk-label" for="sdk-model">Model Override</label>
+            <input
+              id="sdk-model"
+              type="text"
+              class="sdk-input"
+              bind:value={sdkDefaults.model}
+              placeholder="Default (from CLI)"
+            />
+          </div>
+          <p class="sdk-hint">
+            These defaults apply to new SDK streaming sessions started from the dashboard.
+            Per-session overrides are available in the conversation drawer.
+          </p>
+        </div>
+      {/if}
+    </div>
+
   {/if}
 
   {#if error && data}
@@ -1162,6 +1224,42 @@ Example usage or output
   .mp-author { color: var(--text-muted); }
   .mp-meta { display: flex; align-items: center; gap: 0.375rem; }
   .mp-installs { color: var(--text-muted); }
+
+  /* SDK Configuration */
+  .sdk-grid {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: 0.5rem 0.75rem;
+    align-items: center;
+  }
+  .sdk-label {
+    font-size: 0.6875rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+  .sdk-select, .sdk-input {
+    font-size: 0.6875rem;
+    font-family: inherit;
+    padding: 0.3rem 0.5rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    outline: none;
+  }
+  .sdk-select:focus, .sdk-input:focus {
+    border-color: var(--accent-blue);
+  }
+  .sdk-hint {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    margin: 0.75rem 0 0;
+    line-height: 1.4;
+  }
+  .badge-green {
+    background: rgba(34, 197, 94, 0.15);
+    color: #22c55e;
+  }
 
   /* Error card */
   .error-card {

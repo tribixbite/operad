@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { fetchTokens } from "../lib/api";
-  import type { ProjectTokenUsage } from "../lib/types";
+  import { fetchTokens, fetchSdkCosts } from "../lib/api";
+  import type { ProjectTokenUsage, SdkCostAggregate } from "../lib/types";
   import CostChart from "./CostChart.svelte";
 
   let expanded = $state(false);
@@ -8,6 +8,9 @@
   let loading = $state(true);
   let error: string | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** SDK-tracked aggregate costs (from SQLite) */
+  let sdkCosts: SdkCostAggregate | null = $state(null);
 
   /** Format cost as dollar string */
   function fmtCost(usd: number): string {
@@ -36,7 +39,12 @@
 
   async function load() {
     try {
-      projects = await fetchTokens();
+      const [tokenData, costData] = await Promise.all([
+        fetchTokens(),
+        fetchSdkCosts().catch(() => null),
+      ]);
+      projects = tokenData;
+      sdkCosts = costData;
       error = null;
     } catch (e: any) {
       error = e.message;
@@ -114,6 +122,20 @@
             {/each}
           </tbody>
         </table>
+
+        <!-- SDK cost aggregate (from SQLite, supplements JSONL data) -->
+        {#if sdkCosts && sdkCosts.query_count > 0}
+          <div class="sdk-costs">
+            <div class="sdk-costs-header">SDK Streaming</div>
+            <div class="sdk-costs-row">
+              <span class="sdk-stat">{fmtCost(sdkCosts.total_cost_usd)}<span class="unit">total</span></span>
+              <span class="sdk-stat">{sdkCosts.total_turns}<span class="unit">turns</span></span>
+              <span class="sdk-stat">{sdkCosts.query_count}<span class="unit">queries</span></span>
+              <span class="sdk-stat">{fmtTokens(sdkCosts.total_input_tokens)}<span class="unit">in</span></span>
+              <span class="sdk-stat">{fmtTokens(sdkCosts.total_output_tokens)}<span class="unit">out</span></span>
+            </div>
+          </div>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -205,5 +227,30 @@
     font-size: 0.5625rem;
     color: var(--text-muted);
     padding-left: 0.75rem;
+  }
+
+  /* SDK cost aggregate */
+  .sdk-costs {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+  }
+  .sdk-costs-header {
+    font-size: 0.5625rem;
+    font-weight: 600;
+    color: #22c55e;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.25rem;
+  }
+  .sdk-costs-row {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .sdk-stat {
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
   }
 </style>

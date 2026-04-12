@@ -569,3 +569,119 @@ export function downloadFile(filename: string, content: string): void {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// -- SDK bridge REST API ------------------------------------------------------
+
+/** Get SDK bridge status */
+export async function fetchSdkStatus(): Promise<import("./types").SdkBridgeStatus> {
+  const res = await fetch("/api/sdk/status");
+  return checkedJson(res);
+}
+
+/** Attach SDK bridge to a session */
+export async function sdkAttach(
+  name: string,
+  opts: { sessionId?: string; cwd: string },
+): Promise<{ sessionId: string }> {
+  const res = await fetch(`/api/sdk/attach/${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  return checkedJson(res);
+}
+
+/** Detach SDK bridge from a session */
+export async function sdkDetach(name: string): Promise<void> {
+  await checkedPost(`/api/sdk/detach/${encodeURIComponent(name)}`);
+}
+
+/** Send a prompt to the active SDK session */
+export async function sdkPrompt(
+  name: string,
+  prompt: string,
+  opts?: { effort?: string; thinking?: object },
+): Promise<void> {
+  await checkedPost(
+    `/api/sdk/prompt/${encodeURIComponent(name)}`,
+    JSON.stringify({ prompt, ...opts }),
+  );
+}
+
+/** Interrupt the active SDK query */
+export async function sdkInterrupt(name: string): Promise<void> {
+  await checkedPost(`/api/sdk/interrupt/${encodeURIComponent(name)}`);
+}
+
+// -- Memory API ---------------------------------------------------------------
+
+/** Fetch memories for a project */
+export async function fetchMemories(
+  projectPath: string,
+): Promise<import("./types").MemoryRecord[]> {
+  const res = await fetch(`/api/memories/${encodeURIComponent(projectPath)}`);
+  return checkedJson(res);
+}
+
+/** Create a memory entry */
+export async function createMemory(
+  projectPath: string,
+  category: string,
+  content: string,
+): Promise<{ id: number | null }> {
+  const res = await fetch(`/api/memories/${encodeURIComponent(projectPath)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ category, content }),
+  });
+  return checkedJson(res);
+}
+
+/** Delete a memory entry */
+export async function deleteMemory(id: number): Promise<void> {
+  const res = await fetch(`/api/memories/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+/** Search memories for a project */
+export async function searchMemories(
+  projectPath: string,
+  query: string,
+): Promise<import("./types").MemoryRecord[]> {
+  const res = await fetch(
+    `/api/memories/${encodeURIComponent(projectPath)}/search?q=${encodeURIComponent(query)}`,
+  );
+  return checkedJson(res);
+}
+
+/** Trigger memory relevance decay */
+export async function decayMemories(projectPath: string): Promise<{ decayed: number }> {
+  const res = await fetch(`/api/memories/${encodeURIComponent(projectPath)}/decay`, {
+    method: "POST",
+  });
+  return checkedJson(res);
+}
+
+// -- SDK cost tracking API ----------------------------------------------------
+
+/** Fetch aggregate SDK costs */
+export async function fetchSdkCosts(): Promise<import("./types").SdkCostAggregate> {
+  const res = await fetch("/api/costs");
+  return checkedJson(res);
+}
+
+/** Fetch daily SDK costs */
+export async function fetchSdkDailyCosts(
+  days = 30,
+): Promise<import("./types").SdkDailyCost[]> {
+  const res = await fetch(`/api/costs/daily?days=${days}`);
+  return checkedJson(res);
+}
+
+/** Fetch per-session SDK costs */
+export async function fetchSdkSessionCosts(
+  limit = 20,
+): Promise<import("./types").SdkSessionCost[]> {
+  const res = await fetch(`/api/costs/sessions?limit=${limit}`);
+  return checkedJson(res);
+}
