@@ -1,11 +1,26 @@
 <script lang="ts">
   import { fetchMemories, searchMemories, createMemory, deleteMemory, decayMemories } from "../lib/api";
   import type { MemoryRecord, MemoryCategory } from "../lib/types";
+  import { store } from "../lib/store.svelte";
 
   interface Props {
-    projectPath: string;
+    projectPath?: string;
   }
-  let { projectPath }: Props = $props();
+  let { projectPath: propPath }: Props = $props();
+
+  /** Available project paths from active sessions */
+  const availableProjects = $derived(() => {
+    if (!store.daemon?.sessions) return [];
+    return store.daemon.sessions
+      .filter((s) => s.path)
+      .map((s) => ({ name: s.name, path: s.path! }));
+  });
+
+  /** Selected project path (prop overrides selector) */
+  let selectedPath = $state(propPath ?? "");
+
+  /** Resolve active path — prop takes priority, then user selection */
+  const projectPath = $derived(propPath ?? selectedPath);
 
   let memories: MemoryRecord[] = $state([]);
   let loading = $state(true);
@@ -51,6 +66,10 @@
 
   /** Load memories for the project */
   async function loadMemories() {
+    if (!projectPath) {
+      loading = false;
+      return;
+    }
     loading = true;
     error = null;
     try {
@@ -152,6 +171,22 @@
       </button>
     </div>
   </div>
+
+  <!-- Project selector (only shown when no projectPath prop) -->
+  {#if !propPath}
+    <div class="memory-search">
+      <select
+        class="search-input"
+        bind:value={selectedPath}
+        onchange={() => { memories = []; loading = true; loadMemories(); }}
+      >
+        <option value="">Select project...</option>
+        {#each availableProjects() as proj (proj.path)}
+          <option value={proj.path}>{proj.name}</option>
+        {/each}
+      </select>
+    </div>
+  {/if}
 
   <!-- Search bar -->
   <div class="memory-search">

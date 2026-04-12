@@ -2,6 +2,7 @@
 import Layout from "../layouts/Layout.astro";
 import MemoryGauge from "../components/MemoryGauge.svelte";
 import ProcessManager from "../components/ProcessManager.svelte";
+import MemoryPanel from "../components/MemoryPanel.svelte";
 ---
 
 <Layout title="Memory | operad" active="memory">
@@ -15,6 +16,11 @@ import ProcessManager from "../components/ProcessManager.svelte";
     <div id="rss-table">
       <p class="text-xs text-[var(--text-muted)]">Loading...</p>
     </div>
+  </div>
+
+  <!-- AI persistent memory (cross-session, SQLite + FTS5) -->
+  <div class="card mb-4">
+    <MemoryPanel client:load />
   </div>
 
   <!-- Android app process manager -->
