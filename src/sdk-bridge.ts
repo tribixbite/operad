@@ -6,20 +6,37 @@
  * dashboard clients and handles permission callbacks.
  */
 
-import {
-  query as sdkQuery,
-  listSessions,
-  getSessionMessages,
-  getSessionInfo,
-  type SDKMessage,
-  type SDKResultMessage,
-  type SDKSessionInfo,
-} from "@anthropic-ai/claude-agent-sdk";
+/**
+ * SDK imports are LAZY — loaded on first use via getSdk().
+ * This prevents the daemon from crashing at startup when
+ * @anthropic-ai/claude-agent-sdk is not installed.
+ */
 import { existsSync, readlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { detectPlatform } from "./platform/platform.js";
 import type { Logger } from "./log.js";
+
+/** Cached lazy SDK module */
+let _sdk: typeof import("@anthropic-ai/claude-agent-sdk") | null = null;
+
+/** Lazy-load the Claude Agent SDK (throws descriptive error if not installed) */
+async function getSdk() {
+  if (_sdk) return _sdk;
+  try {
+    _sdk = await import("@anthropic-ai/claude-agent-sdk");
+    return _sdk;
+  } catch (err) {
+    throw new Error(
+      `@anthropic-ai/claude-agent-sdk not installed. Run: bun add @anthropic-ai/claude-agent-sdk\n${err}`,
+    );
+  }
+}
+
+/** SDK message type (re-exported for consumers that reference it) */
+type SDKMessage = Awaited<ReturnType<typeof getSdk>> extends { SDKMessage: infer T } ? T : any;
+type SDKResultMessage = any;
+type SDKSessionInfo = any;
 
 /** Broadcast callback — sends a message to all WS clients subscribed to a session room */
 export type BroadcastFn = (sessionName: string, data: unknown) => void;
@@ -41,7 +58,7 @@ interface ActiveQuery {
   sessionName: string;
   sessionId: string | undefined;
   cwd: string;
-  query: ReturnType<typeof sdkQuery>;
+  query: any; // ReturnType of sdk.query() — typed as any since SDK is lazy-loaded
   /** Whether the query is currently processing a prompt */
   busy: boolean;
 }
@@ -149,8 +166,9 @@ export class SdkBridge {
     }
 
     const env = this.platform.cleanEnv();
+    const sdk = await getSdk();
 
-    const q = sdkQuery({
+    const q = sdk.query({
       prompt: "", // Empty initial prompt — we'll send prompts via send()
       options: {
         cwd,
@@ -302,17 +320,20 @@ export class SdkBridge {
 
   /** List Claude Code sessions, optionally filtered by directory */
   async listAllSessions(dir?: string, limit?: number): Promise<SDKSessionInfo[]> {
-    return listSessions({ dir, limit: limit ?? 50 });
+    const sdk = await getSdk();
+    return sdk.listSessions({ dir, limit: limit ?? 50 });
   }
 
   /** Get messages for a specific session */
   async getMessages(sessionId: string) {
-    return getSessionMessages(sessionId);
+    const sdk = await getSdk();
+    return sdk.getSessionMessages(sessionId);
   }
 
   /** Get metadata for a specific session */
   async getInfo(sessionId: string) {
-    return getSessionInfo(sessionId);
+    const sdk = await getSdk();
+    return sdk.getSessionInfo(sessionId);
   }
 
   // -- Internal ----------------------------------------------------------------
@@ -320,7 +341,7 @@ export class SdkBridge {
   /** Consume messages from the query stream and broadcast to WS clients */
   private async consumeMessages(
     sessionName: string,
-    q: ReturnType<typeof sdkQuery>,
+    q: any, // SDK query async iterable
   ): Promise<void> {
     try {
       for await (const msg of q) {
