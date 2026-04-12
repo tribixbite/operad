@@ -80,10 +80,18 @@
   async function handleScan() {
     actionMsg = null;
     formBusy = true;
+    const prevCount = projects.length;
     try {
       const result = await registerProjects();
-      actionMsg = `Registered ${result.registered.length} projects (${result.skipped} skipped)`;
       await loadRecent();
+      const newCount = projects.length - prevCount;
+      if (result.registered.length > 0) {
+        actionMsg = `Registered ${result.registered.length} new project${result.registered.length === 1 ? "" : "s"}`;
+        if (result.skipped > 0) actionMsg += ` (${result.skipped} already known)`;
+      } else {
+        actionMsg = "No new projects found";
+        if (result.skipped > 0) actionMsg += ` (${result.skipped} already registered)`;
+      }
     } catch (err) {
       actionMsg = `Scan failed: ${(err as Error).message}`;
     } finally {

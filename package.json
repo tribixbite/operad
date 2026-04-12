@@ -31,7 +31,11 @@
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/fix-android-binaries.mjs || true"
   },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
   "devDependencies": {
+    "@types/ws": "^8.5.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"

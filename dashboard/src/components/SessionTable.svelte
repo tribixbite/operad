@@ -16,6 +16,8 @@
   let actionError: string | null = $state(null);
   /** Session name for the conversation drawer (null = closed) */
   let drawerSession: string | null = $state(null);
+  /** Search filter for sessions */
+  let sessionFilter = $state("");
 
   /** Derived from shared store — no own SSE/fetch needed */
   const status = $derived<DaemonStatus | null>(store.daemon);
@@ -26,13 +28,23 @@
   /** Active = running/degraded/starting/waiting/stopping */
   const ACTIVE_STATUSES = new Set(["running", "degraded", "starting", "waiting", "stopping"]);
 
+  /** Apply search filter then split into active/inactive */
+  const filteredSessions = $derived(() => {
+    if (!sessionFilter) return allSessions;
+    const q = sessionFilter.toLowerCase();
+    return allSessions.filter((s) => s.name.toLowerCase().includes(q));
+  });
+
   /** Sorted: active sessions first (by name), then inactive (by name) */
   const activeSessions = $derived(
-    allSessions.filter((s) => ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
+    filteredSessions().filter((s) => ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
   );
   const inactiveSessions = $derived(
-    allSessions.filter((s) => !ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
+    filteredSessions().filter((s) => !ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
   );
+
+  /** Only show search when there are enough sessions to warrant filtering */
+  const showSearch = $derived(allSessions.length > 5);
 
   /** Whether the inactive group is expanded */
   let showInactive: boolean = $state(false);
@@ -191,6 +203,14 @@
 {/if}
 
 {#if status}
+  {#if showSearch}
+    <input
+      type="text"
+      class="session-search"
+      placeholder="Filter sessions..."
+      bind:value={sessionFilter}
+    />
+  {/if}
   <table class="session-table">
     <thead>
       <tr>
@@ -233,6 +253,21 @@
 {/if}
 
 <style>
+  .session-search {
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.75rem;
+    font-family: inherit;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    outline: none;
+  }
+  .session-search::placeholder { color: var(--text-muted); }
+  .session-search:focus { border-color: var(--accent-blue); }
+
   .session-table {
     width: 100%;
     border-collapse: collapse;

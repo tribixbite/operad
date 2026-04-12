@@ -8,6 +8,7 @@
 import * as http from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, extname, resolve } from "node:path";
+import { WebSocketServer, type WebSocket } from "ws";
 import type { Logger } from "./log.js";
 
 /** MIME types for static file serving */
@@ -31,6 +32,20 @@ export type ApiHandler = (
   body: string,
 ) => Promise<{ status: number; data: unknown }>;
 
+/** WebSocket message handler — receives parsed JSON messages from clients */
+export type WsMessageHandler = (
+  ws: WebSocket,
+  msg: WsClientMessage,
+  rooms: ReadonlyMap<string, ReadonlySet<WebSocket>>,
+) => void;
+
+/** Client -> Server WS message types */
+export interface WsClientMessage {
+  type: "subscribe" | "unsubscribe" | "ping" | "prompt" | "permission_response" | "abort" | "attach" | "detach";
+  sessionName?: string;
+  [key: string]: unknown;
+}
+
 /** SSE client connection */
 interface SseClient {
   res: http.ServerResponse;
@@ -46,11 +61,27 @@ export class DashboardServer {
   private sseClients = new Set<SseClient>();
   private sseIdCounter = 0;
 
+  /** WebSocket server for bidirectional streaming */
+  private wss: WebSocketServer | null = null;
+  /** Session room registry — maps session name to subscribed clients */
+  private wsRooms = new Map<string, Set<WebSocket>>();
+  /** All connected WS clients */
+  private wsClients = new Set<WebSocket>();
+  /** Optional handler for incoming WS messages (set by daemon) */
+  private wsMessageHandler: WsMessageHandler | null = null;
+  /** Ping interval for WS keepalive */
+  private wsPingInterval: ReturnType<typeof setInterval> | null = null;
+
   constructor(port: number, staticDir: string, apiHandler: ApiHandler, log: Logger) {
     this.port = port;
     this.log = log;
     this.staticDir = staticDir;
     this.apiHandler = apiHandler;
+  }
+
+  /** Set handler for incoming WS messages */
+  setWsMessageHandler(handler: WsMessageHandler): void {
+    this.wsMessageHandler = handler;
   }
 
   /** Start the HTTP server, retrying if port is in TIME_WAIT from previous daemon */
@@ -78,6 +109,33 @@ export class DashboardServer {
     return new Promise((resolve, reject) => {
       this.server = http.createServer((req, res) => this.handleRequest(req, res));
 
+      // Attach WebSocket server on /ws path
+      this.wss = new WebSocketServer({ noServer: true });
+      this.wss.on("connection", (ws) => this.handleWsConnection(ws));
+
+      this.server.on("upgrade", (req, socket, head) => {
+        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+        if (url.pathname === "/ws" && this.wss) {
+          this.wss.handleUpgrade(req, socket, head, (ws) => {
+            this.wss!.emit("connection", ws, req);
+          });
+        } else {
+          socket.destroy();
+        }
+      });
+
+      // WS keepalive: ping every 30s, terminate unresponsive clients
+      this.wsPingInterval = setInterval(() => {
+        for (const ws of this.wsClients) {
+          if ((ws as any).__alive === false) {
+            ws.terminate();
+            continue;
+          }
+          (ws as any).__alive = false;
+          ws.ping();
+        }
+      }, 30_000);
+
       this.server.on("error", (err) => {
         try { this.server?.close(); } catch { /* already closed */ }
         this.server = null;
@@ -98,6 +156,21 @@ export class DashboardServer {
       client.res.end();
     }
     this.sseClients.clear();
+
+    // Close all WS connections
+    if (this.wsPingInterval) {
+      clearInterval(this.wsPingInterval);
+      this.wsPingInterval = null;
+    }
+    for (const ws of this.wsClients) {
+      ws.close(1001, "Server shutting down");
+    }
+    this.wsClients.clear();
+    this.wsRooms.clear();
+    if (this.wss) {
+      this.wss.close();
+      this.wss = null;
+    }
 
     if (this.server) {
       // Force-close all open connections so port is released immediately
@@ -125,6 +198,100 @@ export class DashboardServer {
   /** Get number of connected SSE clients */
   get sseClientCount(): number {
     return this.sseClients.size;
+  }
+
+  /** Get number of connected WS clients */
+  get wsClientCount(): number {
+    return this.wsClients.size;
+  }
+
+  /** Broadcast data to all WS clients subscribed to a session room */
+  broadcastToRoom(sessionName: string, data: unknown): void {
+    const room = this.wsRooms.get(sessionName);
+    if (!room?.size) return;
+    const payload = JSON.stringify(data);
+    for (const ws of room) {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(payload);
+      }
+    }
+  }
+
+  /** Broadcast data to all connected WS clients */
+  broadcastWs(data: unknown): void {
+    const payload = JSON.stringify(data);
+    for (const ws of this.wsClients) {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(payload);
+      }
+    }
+  }
+
+  /** Handle new WebSocket connection */
+  private handleWsConnection(ws: WebSocket): void {
+    (ws as any).__alive = true;
+    this.wsClients.add(ws);
+    this.log.debug(`WS client connected (total=${this.wsClients.size})`);
+
+    ws.on("pong", () => { (ws as any).__alive = true; });
+
+    ws.on("message", (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString()) as WsClientMessage;
+        switch (msg.type) {
+          case "ping":
+            ws.send(JSON.stringify({ type: "pong" }));
+            break;
+          case "subscribe":
+            if (msg.sessionName) {
+              let room = this.wsRooms.get(msg.sessionName);
+              if (!room) {
+                room = new Set();
+                this.wsRooms.set(msg.sessionName, room);
+              }
+              room.add(ws);
+              ws.send(JSON.stringify({ type: "subscribed", sessionName: msg.sessionName }));
+              this.log.debug(`WS subscribed to room: ${msg.sessionName}`);
+            }
+            break;
+          case "unsubscribe":
+            if (msg.sessionName) {
+              const room = this.wsRooms.get(msg.sessionName);
+              if (room) {
+                room.delete(ws);
+                if (room.size === 0) this.wsRooms.delete(msg.sessionName);
+              }
+              ws.send(JSON.stringify({ type: "unsubscribed", sessionName: msg.sessionName }));
+            }
+            break;
+          default:
+            // Forward to daemon's message handler for SDK/permission messages
+            if (this.wsMessageHandler) {
+              this.wsMessageHandler(ws, msg, this.wsRooms);
+            }
+            break;
+        }
+      } catch {
+        ws.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
+      }
+    });
+
+    ws.on("close", () => {
+      this.wsClients.delete(ws);
+      // Remove from all rooms
+      for (const [name, room] of this.wsRooms) {
+        room.delete(ws);
+        if (room.size === 0) this.wsRooms.delete(name);
+      }
+      this.log.debug(`WS client disconnected (remaining=${this.wsClients.size})`);
+    });
+
+    ws.on("error", (err) => {
+      this.log.warn(`WS client error: ${err.message}`);
+    });
+
+    // Send connected confirmation
+    ws.send(JSON.stringify({ type: "connected", timestamp: Date.now() }));
   }
 
   // -- Request handling -------------------------------------------------------

@@ -14,7 +14,7 @@ build({
   outfile: resolve(__dirname, "dist/tmx.js"),
   format: "cjs",
   banner: { js: "#!/usr/bin/env node" },
-  external: [],
+  external: ["ws"],
   // Replace import.meta references with CJS equivalents
   define: {
     "import.meta.url": "import_meta_url",

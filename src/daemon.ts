@@ -1904,7 +1904,24 @@ export class Daemon {
       };
     });
 
-    return { ok: true, data: results };
+    // Merge registry-only entries that don't appear in history.jsonl
+    const existingPaths = new Set(results.map((r) => r.path));
+    for (const entry of this.registry.entries()) {
+      if (existingPaths.has(entry.path)) continue;
+      const status: RecentProject["status"] = runningNames.has(entry.name) ? "running" : "registered";
+      results.push({
+        name: entry.name,
+        path: entry.path,
+        last_active: entry.last_active,
+        session_id: entry.session_id ?? "",
+        status,
+      });
+    }
+
+    // Re-sort combined list by last_active descending
+    results.sort((a, b) => new Date(b.last_active).getTime() - new Date(a.last_active).getTime());
+
+    return { ok: true, data: results.slice(0, count) };
   }
 
   /** Register projects by scanning a directory (default ~/git) */
