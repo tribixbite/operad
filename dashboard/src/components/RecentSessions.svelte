@@ -144,7 +144,7 @@
     <h2 class="text-xs font-medium text-[var(--text-secondary)] uppercase tracking-wide">
       Recent Projects
     </h2>
-    <span class="chevron" class:open={expanded}>&#x25B8;</span>
+    <span class="chevron" class:open={expanded}><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M6 3L12 8L6 13Z"/></svg></span>
   </button>
 
   {#if expanded}
@@ -211,7 +211,7 @@
                     class="btn-icon primary"
                     onclick={(e) => handleOpen(e, project)}
                     title="Open session"
-                  >&#x25B6;</button>
+                  ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
                 {:else}
                   <span class="dot dot-green"></span>
                 {/if}

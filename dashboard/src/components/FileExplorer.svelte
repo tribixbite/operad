@@ -140,7 +140,7 @@
   <div class="breadcrumb-bar">
     {#if inSubdir || viewingFile}
       <button class="btn-back" onclick={goBack} title="Go back">
-        &larr;
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2L4 8L10 14"/></svg>
       </button>
     {/if}
     <div class="breadcrumbs">
@@ -199,7 +199,11 @@
       {#each sortedEntries as entry (entry.name)}
         <button class="entry-row" onclick={() => handleEntryClick(entry)}>
           <span class="entry-icon">
-            {entry.type === "directory" ? "\u{1F4C1}" : "\u{1F4C4}"}
+            {#if entry.type === "directory"}
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M1.5 3C1.5 2.45 1.95 2 2.5 2H6.5L8 3.5H13.5C14.05 3.5 14.5 3.95 14.5 4.5V12.5C14.5 13.05 14.05 13.5 13.5 13.5H2.5C1.95 13.5 1.5 13.05 1.5 12.5V3Z"/></svg>
+            {:else}
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M4 1.5H10L13 4.5V14.5H3V1.5Z"/><path d="M10 1.5V5H13"/></svg>
+            {/if}
           </span>
           <span class="entry-name" class:entry-dir={entry.type === "directory"}>
             {entry.name}

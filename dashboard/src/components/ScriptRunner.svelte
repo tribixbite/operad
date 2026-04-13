@@ -161,14 +161,14 @@
       onclick={handleRunCommand}
       disabled={!commandInput.trim() || running}
       title="Run"
-    >&#x25B6;</button>
+    ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
     <button
       class="btn-icon"
       onclick={handleSave}
       disabled={!commandInput.trim()}
       title="Save as script"
       style={saving ? "border-color: var(--accent-yellow); color: var(--accent-yellow)" : ""}
-    >&#x1F4BE;</button>
+    ><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2H11L14 5V13C14 13.5 13.5 14 13 14H3C2.5 14 2 13.5 2 13V3C2 2.5 2.5 2 3 2Z"/><path d="M5 2V6H10V2"/><path d="M5 14V9H11V14"/></svg></button>
   </div>
 
   <!-- Inline save name input -->
@@ -217,7 +217,7 @@
             onclick={() => handleRunScript(entry)}
             disabled={running}
             title="Run {entry.name}"
-          >&#x25B6;</button>
+          ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
         </div>
       {/each}
       {#if filtered.length === 0}

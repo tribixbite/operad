@@ -77,7 +77,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="perm-modal" onclick={(e) => e.stopPropagation()}>
     <div class="perm-header">
-      <span class="perm-icon">&#x1f512;</span>
+      <span class="perm-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg></span>
       <span class="perm-title">Permission Request</span>
       <span class="perm-timer" class:perm-timer-warn={remainingSec < 30}>
         {fmtTime(remainingSec)}

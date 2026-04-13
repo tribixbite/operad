@@ -163,7 +163,7 @@
           <input type="text" bind:value={row.key} placeholder="KEY" class="env-key" />
           <span class="env-eq">=</span>
           <input type="text" bind:value={row.value} placeholder="value" class="env-val" />
-          <button class="btn-icon-sm" onclick={() => removeEnvRow(idx)} title="Remove">&times;</button>
+          <button class="btn-icon-sm" onclick={() => removeEnvRow(idx)} title="Remove"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
         </div>
       {/each}
       <button class="btn-link" onclick={addEnvRow}>+ Add variable</button>

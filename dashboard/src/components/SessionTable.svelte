@@ -376,6 +376,8 @@
   .td-expand {
     padding: 0.25rem 0.375rem 0.75rem;
     border-top: none;
+    max-height: 70vh;
+    overflow-y: auto;
   }
   .session-name {
     font-weight: 600;

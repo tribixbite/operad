@@ -275,7 +275,7 @@
       class:active={showLibrary}
       onclick={() => showLibrary = !showLibrary}
       title="Prompt Library"
-    >&#x1F4D6;</button>
+    ><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2V14L8 11L14 14V2H2Z"/></svg></button>
   </div>
 
   <!-- Prompt library dropdown -->
@@ -347,7 +347,7 @@
               {#if fmtCost(entry.usage)}
                 <span class="cost-badge">{fmtCost(entry.usage)}</span>
               {/if}
-              <button class="branch-btn" onclick={() => handleBranch(entry)} title="Branch from here">&#x2387;</button>
+              <button class="branch-btn" onclick={() => handleBranch(entry)} title="Branch from here"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="4" r="2"/><circle cx="11" cy="4" r="2"/><circle cx="5" cy="12" r="2"/><path d="M5 6V10M11 6V8C11 9.1 10.1 10 9 10H5"/></svg></button>
             </div>
           </div>
         {:else if entry.type === "tool_result"}
@@ -394,7 +394,7 @@
         onclick={sendPrompt}
         disabled={!promptText.trim() || sending}
         title="Send (Enter)"
-      >&#x2191;</button>
+      ><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M4 7L8 3L12 7"/></svg></button>
     {/if}
   </div>
 </div>

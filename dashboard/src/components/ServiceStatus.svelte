@@ -91,12 +91,12 @@
             {/if}
             <span class="detail-actions">
               {#if svc.status === "running" || svc.status === "degraded"}
-                <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", svc.name)} title="Stop">&#x25A0;</button>
-                <button class="btn-icon" onclick={(e) => handleAction(e, "restart", svc.name)} title="Restart">&#x21BB;</button>
+                <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", svc.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
+                <button class="btn-icon" onclick={(e) => handleAction(e, "restart", svc.name)} title="Restart"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8A5.5 5.5 0 0 1 13 5.5M13.5 8A5.5 5.5 0 0 1 3 10.5"/><path d="M12 1V5H9M4 15V12H7"/></svg></button>
               {:else if svc.status === "starting" || svc.status === "waiting" || svc.status === "stopping"}
-                <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", svc.name)} title="Stop">&#x25A0;</button>
+                <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", svc.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
               {:else if svc.status === "stopped" || svc.status === "failed" || svc.status === "pending"}
-                <button class="btn-icon primary" onclick={(e) => handleAction(e, "start", svc.name)} title="Start">&#x25B6;</button>
+                <button class="btn-icon primary" onclick={(e) => handleAction(e, "start", svc.name)} title="Start"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
               {/if}
             </span>
           </div>
