@@ -1517,8 +1517,11 @@ export class Daemon {
     const toggleAction = `${curlBin} -sX POST ${apiBase}/${toggleEndpoint} >/dev/null 2>&1`;
     const stopAction = `${curlBin} -sX POST ${apiBase}/stop >/dev/null 2>&1`;
     // Dashboard: use env to inject LD_PRELOAD for am command.
-    // FLAG_ACTIVITY_CLEAR_TOP (0x04000000) reuses existing tab.
-    const dashboardAction = `LD_PRELOAD=${ldPreload} ${amBin} start -a android.intent.action.VIEW -f 0x04000000 -d http://127.0.0.1:${port}`;
+    // Explicit Edge Canary component avoids new-tab-per-intent behavior.
+    // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TOP (0x14000000)
+    // reuses the existing Edge activity instead of stacking a new one.
+    const edgeComponent = "com.microsoft.emmx.canary/com.google.android.apps.chrome.IntentDispatcher";
+    const dashboardAction = `LD_PRELOAD=${ldPreload} ${amBin} start -a android.intent.action.VIEW -n ${edgeComponent} -f 0x14000000 -d http://127.0.0.1:${port}`;
 
     notifyWithArgs([
       "--ongoing",
