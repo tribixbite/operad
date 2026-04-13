@@ -61,7 +61,6 @@
     }
 
     liveError = null;
-    liveMessages = [];
     streamText = "";
 
     // Connect WS if not already connected
@@ -145,10 +144,10 @@
       await sdkAttach(sessionName, { cwd: path });
       liveMode = true;
       sdkAttached = true;
-      // Show connection status so the live view isn't blank
-      liveMessages = [{
+      // Append connection status (don't overwrite existing messages)
+      liveMessages = [...liveMessages, {
         role: "system",
-        content: `Connected to ${sessionName} — send a prompt to start`,
+        content: `Connected to ${sessionName}`,
         timestamp: Date.now(),
       }];
     } catch (err: any) {
