@@ -100,6 +100,10 @@ export class LinuxPlatform implements Platform {
     // notify-send is fire-and-forget; no dismiss/remove API exists
   }
 
+  killTrackedNotifyProcesses(): void {
+    // No-op on Linux desktop — notify-send doesn't hang
+  }
+
   // -- Battery ---------------------------------------------------------------
 
   /**

@@ -496,6 +496,10 @@ export class Daemon {
       removeNotification(`operad-${session.name}`);
     }
 
+    // Kill any tracked termux-api notification processes to prevent
+    // orphaned process pile-up after daemon exit
+    detectPlatform().killTrackedNotifyProcesses();
+
     this.running = false;
     this.shutdownResolve?.();
     this.log.info("Shutdown complete");

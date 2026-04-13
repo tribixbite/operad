@@ -75,29 +75,87 @@ function termuxApiEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * Active notification PIDs — keyed by notification --id.
+ * Before spawning a new notification for the same id, we SIGKILL the previous
+ * process to prevent pile-up when Termux:API service is unresponsive.
+ * Processes stuck in D-state (uninterruptible sleep) won't respond to SIGKILL
+ * but at least we avoid spawning duplicates on top of them.
+ */
+const activeNotifyPids = new Map<string, number>();
+
+/**
+ * Extract the notification --id from args, if present.
+ * Used to track and dedup spawned termux-notification processes.
+ */
+function extractNotifyId(args: string[]): string | null {
+  const idx = args.indexOf("--id");
+  return (idx >= 0 && idx + 1 < args.length) ? args[idx + 1] : null;
+}
+
+/**
  * Spawn a Termux:API command non-blocking with a hard kill timeout.
  * termux-notification (and friends) can hang indefinitely when Termux:API
  * service is unresponsive — using spawnSync would freeze the event loop.
- * Spawns detached so it doesn't keep the daemon process alive.
+ *
+ * For notifications with --id, tracks the spawned PID and kills the previous
+ * process for the same id before spawning a new one. This prevents the
+ * 10,000+ process pile-up that was exhausting the PID table and crashing
+ * system_server.
  */
 function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
   try {
+    // Kill previous stuck process for the same notification id
+    const notifyId = extractNotifyId(args);
+    if (notifyId) {
+      const prevPid = activeNotifyPids.get(notifyId);
+      if (prevPid !== undefined) {
+        try { process.kill(prevPid, "SIGKILL"); } catch { /* already dead */ }
+        activeNotifyPids.delete(notifyId);
+      }
+    }
+
     const child = spawn(bin, args, {
       stdio: "ignore",
       env: termuxApiEnv(),
       detached: true,
     });
+
+    // Track the PID for this notification id
+    if (notifyId && child.pid) {
+      activeNotifyPids.set(notifyId, child.pid);
+    }
+
     // Hard kill if it hasn't exited after timeout
     const timer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch { /* already dead */ }
+      if (notifyId) activeNotifyPids.delete(notifyId);
     }, timeoutMs);
-    child.on("exit", () => clearTimeout(timer));
-    child.on("error", () => clearTimeout(timer));
+
+    child.on("exit", () => {
+      clearTimeout(timer);
+      if (notifyId) activeNotifyPids.delete(notifyId);
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      if (notifyId) activeNotifyPids.delete(notifyId);
+    });
+
     // Detach so child doesn't block parent shutdown
     child.unref();
   } catch {
     // Non-fatal — notification loss is acceptable
   }
+}
+
+/**
+ * Kill ALL tracked notification processes. Called during daemon shutdown
+ * to prevent orphaned termux-api processes from piling up.
+ */
+export function killAllNotifyProcesses(): void {
+  for (const [id, pid] of activeNotifyPids) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  }
+  activeNotifyPids.clear();
 }
 
 // Pre-resolve common binary paths at module load time
@@ -170,6 +228,11 @@ export class AndroidPlatform implements Platform {
   /** Remove a notification by id (non-blocking) */
   removeNotification(id: string): void {
     spawnTermuxApi(resolveTermuxBin("termux-notification-remove"), [id]);
+  }
+
+  /** Kill all tracked notification processes to prevent orphan pile-up on shutdown */
+  killTrackedNotifyProcesses(): void {
+    killAllNotifyProcesses();
   }
 
   // -- Battery ----------------------------------------------------------------
@@ -273,30 +336,22 @@ export class AndroidPlatform implements Platform {
    * plus a termux-toast for immediate on-screen visibility.
    */
   sendBatteryAlert(pct: number): void {
-    const env = termuxApiEnv();
-    const notifyBin = resolveTermuxBin("termux-notification");
-    const toastBin = resolveTermuxBin("termux-toast");
-
-    try {
-      spawnSync(notifyBin, [
-        "--title", "LOW BATTERY",
-        "--content", `Battery at ${pct}% and not charging. WiFi & mobile data disabled to conserve power. Plug in to restore.`,
-        "--priority", "max",
-        "--id", "tmx-battery-low",
-        "--vibrate", "500,200,500",
-      ], { timeout: 8000, stdio: "ignore", env });
-    } catch {
-      // Non-fatal — the battery event itself is already logged
-    }
+    // Use non-blocking spawnTermuxApi instead of spawnSync to avoid
+    // blocking the event loop for 8s when Termux:API service is unresponsive
+    spawnTermuxApi(resolveTermuxBin("termux-notification"), [
+      "--title", "LOW BATTERY",
+      "--content", `Battery at ${pct}% and not charging. WiFi & mobile data disabled to conserve power. Plug in to restore.`,
+      "--priority", "max",
+      "--id", "tmx-battery-low",
+      "--vibrate", "500,200,500",
+    ]);
 
     // Also show a termux-toast for immediate visibility (appears as a brief overlay)
-    try {
-      spawnSync(toastBin, [
-        "-b", "red",
-        "-c", "white",
-        `BATTERY ${pct}% — radios disabled`,
-      ], { timeout: 5000, stdio: "ignore", env });
-    } catch { /* non-fatal */ }
+    spawnTermuxApi(resolveTermuxBin("termux-toast"), [
+      "-b", "red",
+      "-c", "white",
+      `BATTERY ${pct}% — radios disabled`,
+    ]);
   }
 
   // -- Wake lock --------------------------------------------------------------

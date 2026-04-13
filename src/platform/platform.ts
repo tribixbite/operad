@@ -82,6 +82,9 @@ export interface Platform {
   /** Remove a notification by id */
   removeNotification(id: string): void;
 
+  /** Kill all tracked notification processes (cleanup for shutdown). No-op on non-Android. */
+  killTrackedNotifyProcesses(): void;
+
   // -- Battery (battery.ts) -------------------------------------------------
 
   /** Read current battery status, or null if unavailable */

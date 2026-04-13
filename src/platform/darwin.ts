@@ -286,6 +286,10 @@ export class DarwinPlatform implements Platform {
     // macOS has no straightforward API to remove a specific notification
   }
 
+  killTrackedNotifyProcesses(): void {
+    // No-op on macOS — osascript doesn't hang
+  }
+
   // -- Battery --------------------------------------------------------------
 
   /**
