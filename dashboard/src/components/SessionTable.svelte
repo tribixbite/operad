@@ -141,6 +141,16 @@
     e.stopPropagation();
     drawerSession = name;
   }
+
+  /** Lock body scroll when drawer is open to prevent background scrolling */
+  $effect(() => {
+    if (drawerSession) {
+      document.body.classList.add("drawer-open");
+    } else {
+      document.body.classList.remove("drawer-open");
+    }
+    return () => document.body.classList.remove("drawer-open");
+  });
 </script>
 
 {#snippet sessionRow(session: SessionState)}
@@ -166,24 +176,24 @@
     <td class="td-actions" onclick={(e) => e.stopPropagation()}>
       {#if session.type === "claude"}
         {#if sdkStatus?.attached && sdkStatus.sessionName === session.name}
-          <span class="live-badge" title="SDK stream active">LIVE</span>
+          <span class="live-badge" title="SDK stream active"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg></span>
         {/if}
-        <button class="btn-icon chat" onclick={(e) => openDrawer(e, session.name)} title="Conversation">&#x2709;</button>
+        <button class="btn-icon chat" onclick={(e) => openDrawer(e, session.name)} title="Conversation"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3H14V11H9L6 14V11H2Z"/></svg></button>
       {/if}
       {#if session.status === "running" || session.status === "degraded"}
-        <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop">&#x25A0;</button>
-        <button class="btn-icon" onclick={(e) => handleAction(e, "restart", session.name)} title="Restart">&#x21BB;</button>
+        <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
+        <button class="btn-icon" onclick={(e) => handleAction(e, "restart", session.name)} title="Restart"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8A5.5 5.5 0 0 1 12 3.5M13.5 8A5.5 5.5 0 0 1 4 12.5"/><path d="M12 1V4H9M4 15V12H7"/></svg></button>
         {#if session.suspended}
-          <button class="btn-icon success" onclick={(e) => handleResume(e, session.name)} title="Resume">&#x25B6;</button>
+          <button class="btn-icon success" onclick={(e) => handleResume(e, session.name)} title="Resume"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
         {:else}
-          <button class="btn-icon success" onclick={(e) => handleAction(e, "go", session.name)} title="Go">&#x25B6;</button>
-          <button class="btn-icon muted" onclick={(e) => handleSuspend(e, session.name)} title="Pause">&#x23F8;</button>
+          <button class="btn-icon success" onclick={(e) => handleAction(e, "go", session.name)} title="Go"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
+          <button class="btn-icon muted" onclick={(e) => handleSuspend(e, session.name)} title="Pause"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2.5" width="3.5" height="11" rx="1"/><rect x="9.5" y="2.5" width="3.5" height="11" rx="1"/></svg></button>
         {/if}
       {:else if session.status === "starting" || session.status === "waiting" || session.status === "stopping"}
-        <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop">&#x25A0;</button>
+        <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
       {:else if session.status === "stopped" || session.status === "failed" || session.status === "pending"}
-        <button class="btn-icon primary" onclick={(e) => handleAction(e, "start", session.name)} title="Start">&#x25B6;</button>
-        <button class="btn-icon danger" onclick={(e) => handleClose(e, session.name)} title="Remove">&#x2715;</button>
+        <button class="btn-icon primary" onclick={(e) => handleAction(e, "start", session.name)} title="Start"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
+        <button class="btn-icon danger" onclick={(e) => handleClose(e, session.name)} title="Remove"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
       {/if}
     </td>
   </tr>
@@ -420,25 +430,17 @@
     /* Prevent layout shift when content updates */
     contain: layout style;
   }
-  /* LIVE badge — SDK stream indicator */
+  /* LIVE badge — SDK stream indicator (broadcast icon) */
   .live-badge {
     display: inline-flex;
     align-items: center;
-    font-size: 0.5rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    padding: 0.0625rem 0.25rem;
-    border-radius: 3px;
-    background: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
-    border: 1px solid rgba(34, 197, 94, 0.3);
-    animation: live-pulse 2s infinite;
+    justify-content: center;
+    padding: 0.125rem;
+    color: var(--text-primary);
     vertical-align: middle;
+    opacity: 0.8;
   }
-  @keyframes live-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
-  }
+  .live-badge svg { display: block; }
   /* Chat button */
   .td-actions :global(.btn-icon.chat) { color: var(--accent-blue); opacity: 0.6; }
   .td-actions :global(.btn-icon.chat:hover) { opacity: 1; background: rgba(88, 166, 255, 0.1); }

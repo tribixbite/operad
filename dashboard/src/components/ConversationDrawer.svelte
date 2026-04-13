@@ -145,6 +145,12 @@
       await sdkAttach(sessionName, { cwd: path });
       liveMode = true;
       sdkAttached = true;
+      // Show connection status so the live view isn't blank
+      liveMessages = [{
+        role: "system",
+        content: `Connected to ${sessionName} — send a prompt to start`,
+        timestamp: Date.now(),
+      }];
     } catch (err: any) {
       liveError = err.message ?? "Failed to attach SDK";
       cleanupHandlers();
@@ -254,10 +260,10 @@
           onclick={toggleLive}
           title={liveMode ? "Disconnect SDK stream" : "Connect SDK stream"}
         >
-          <span class="live-dot" class:live-dot-on={liveMode && sdkAttached}></span>
-          {liveMode ? "LIVE" : "Live"}
+          <svg class="live-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg>
+          {liveMode ? "LIVE" : "Stream"}
         </button>
-        <button class="drawer-close" onclick={onclose} title="Close (Esc)">&times;</button>
+        <button class="drawer-close" onclick={onclose} title="Close (Esc)"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
       </div>
     </div>
 
@@ -343,7 +349,7 @@
                 onclick={handleInterrupt}
                 title="Interrupt (stop query)"
               >
-                &#x25A0;
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/></svg>
               </button>
             {:else}
               <button
@@ -352,7 +358,7 @@
                 disabled={!promptText.trim() || !sdkAttached}
                 title="Send (Enter)"
               >
-                &#x25B6;
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M4 7L8 3L12 7"/></svg>
               </button>
             {/if}
           </div>
@@ -415,12 +421,12 @@
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: 1.125rem;
     cursor: pointer;
     border-radius: 4px;
     font-family: inherit;
   }
   .drawer-close:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+  .drawer-close svg { display: block; }
   .drawer-body {
     flex: 1;
     min-height: 0;
@@ -438,7 +444,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     background: var(--bg-tertiary);
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-size: 0.6875rem;
     font-weight: 600;
     cursor: pointer;
@@ -447,28 +453,14 @@
   }
   .live-toggle:hover {
     border-color: var(--text-muted);
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
   .live-active {
-    border-color: #22c55e;
-    color: #22c55e;
-    background: rgba(34, 197, 94, 0.1);
+    border-color: var(--text-primary);
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
   }
-  .live-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--text-muted);
-  }
-  .live-dot-on {
-    background: #22c55e;
-    box-shadow: 0 0 4px #22c55e;
-    animation: pulse 2s infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-  }
+  .live-icon { display: block; flex-shrink: 0; }
 
   /* -- Live container ------------------------------------------------------ */
   .live-container {
@@ -668,7 +660,6 @@
     border: 1px solid var(--accent-blue);
     border-radius: 5px;
     color: var(--accent-blue);
-    font-size: 0.75rem;
     cursor: pointer;
     align-self: flex-end;
     font-family: inherit;
@@ -681,6 +672,7 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
+  .prompt-send svg, .prompt-stop svg { display: block; }
 
   .prompt-stop {
     width: 2rem;
@@ -692,7 +684,6 @@
     border: 1px solid var(--accent-red, #f85149);
     border-radius: 5px;
     color: var(--accent-red, #f85149);
-    font-size: 0.75rem;
     cursor: pointer;
     align-self: flex-end;
     font-family: inherit;

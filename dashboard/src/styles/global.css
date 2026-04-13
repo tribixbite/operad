@@ -158,16 +158,24 @@ body {
   transition: width 0.5s ease, background-color 0.3s;
 }
 
-/* Nav */
+/* Nav — icon buttons */
 nav a {
   color: var(--text-secondary);
   text-decoration: none;
-  padding: 0.5rem 0.75rem;
+  padding: 0.4rem;
   border-radius: 6px;
-  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 nav a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
 nav a.active { color: var(--accent-blue); background: rgba(88, 166, 255, 0.1); }
+nav a svg { display: block; }
+
+/* Scroll lock when drawer overlay is open */
+body.drawer-open {
+  overflow: hidden !important;
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -187,6 +195,7 @@ nav a.active { color: var(--accent-blue); background: rgba(88, 166, 255, 0.1); }
   .btn-sm { padding: 0.1875rem 0.375rem; font-size: 0.625rem; }
   .badge { padding: 0.0625rem 0.375rem; font-size: 0.625rem; }
   .dot { width: 6px; height: 6px; }
-  nav a { padding: 0.375rem 0.5rem; font-size: 0.75rem; }
+  nav a { padding: 0.3rem; }
+  nav a svg { width: 16px; height: 16px; }
   .card { padding: 0.625rem; }
 }
