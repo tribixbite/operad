@@ -179,14 +179,8 @@ export class Daemon {
   private autoTabsTimer: ReturnType<typeof setTimeout> | null = null;
   /** PIDs of adopted bare (non-tmux) Claude sessions, keyed by session name */
   private adoptedPids = new Map<string, number>();
-  /** Session names from last notification cycle — used to remove stale per-session notifications */
-  private _prevNotifiedSessions: string[] = [];
-  /** Content hash per session from last notification — only re-emit when changed */
-  private _prevNotifContent = new Map<string, string>();
   /** Summary notification content from last cycle — skip re-emit if unchanged */
   private _prevSummaryContent = "";
-  /** One-shot flag: service notifications cleaned up on first cycle */
-  private _serviceNotifsCleared = false;
   /** Last known conversation UUID per session — for delta detection */
   private lastConversationUuids = new Map<string, string>();
   private adbSerial: string | null = null;
@@ -490,10 +484,9 @@ export class Daemon {
     removeNotification("operad-status");
     removeNotification("operad-boot");
     removeNotification("operad-memory");
-    // Clean up per-session and failure notifications
+    // Clean up failure notifications
     for (const session of this.config.sessions) {
       removeNotification(`operad-fail-${session.name}`);
-      removeNotification(`operad-${session.name}`);
     }
 
     // Kill any tracked termux-api notification processes to prevent
@@ -1428,24 +1421,20 @@ export class Daemon {
   }
 
   /**
-   * Update the persistent Android notification with active/total session counts.
-   * Shows "operad ▶ 3/7" title with active/idle session names in the body.
-   * Tapping opens the dashboard. Uses --ongoing + --alert-once for silent updates.
-   */
-  /**
-   * Update the persistent Android notification with session counts + action buttons.
+   * Update the persistent Android notification with session status.
+   *
+   * Single notification only — per-session notifications were removed because:
+   * 1. They jump around in sort order every few seconds (Android sorts by update time)
+   * 2. Button actions (curl-based) silently fail on Termux (missing LD_PRELOAD/PATH)
+   * 3. 7+ notifications are noise, not actionable status
+   *
+   * Button actions use full binary paths + LD_PRELOAD env injection to work
+   * properly on Termux where bun strips LD_PRELOAD from child processes.
    *
    * Button layout (3 max from termux-notification):
    * - Button 1: "Pause All" / "Resume All" (toggles based on current state)
-   * - Button 2: "Stop All" — emergency stop for all sessions
-   * - Button 3: "Dashboard" — opens browser to localhost dashboard
-   *
-   * Actions use curl to hit the daemon's HTTP API — avoids needing operad on PATH.
-   */
-  /**
-   * Emit per-session notifications (one per active non-service session)
-   * and a summary notification. Uses diff-based updates to avoid flickering —
-   * only re-emits a notification when its content actually changes.
+   * - Button 2: "Stop All"
+   * - Button 3: "Dashboard" — opens browser
    */
   private updateStatusNotification(): void {
     const sessions = this.state.getState().sessions;
@@ -1453,11 +1442,6 @@ export class Daemon {
     const idleNames: string[] = [];
     const suspendedNames: string[] = [];
     let totalRunning = 0;
-
-    // Build a set of service session names to exclude from notifications
-    const serviceNames = new Set(
-      this.config.sessions.filter((c) => c.type === "service").map((c) => c.name),
-    );
 
     for (const [name, s] of Object.entries(sessions)) {
       if (s.status === "running" || s.status === "degraded") {
@@ -1475,90 +1459,37 @@ export class Daemon {
     const port = this.config.orchestrator.dashboard_port;
     const apiBase = `http://127.0.0.1:${port}/api`;
 
-    // -- Per-session notifications (skip services, stable alpha order) --
-    const allRunning = [...activeNames, ...idleNames, ...suspendedNames]
-      .filter((n) => !serviceNames.has(n))
-      .sort();
+    // Resolve curl path — bun's PATH stripping means bare `curl` may not be found
+    // in button action shells. Use full prefix path.
+    const curlBin = detectPlatform().resolveBinaryPath("curl");
 
-    for (const name of allRunning) {
-      const s = sessions[name];
-      const statusTag = s?.suspended ? "paused" : s?.activity === "active" ? "active" : "idle";
-      const rss = s?.rss_mb != null ? ` ${s.rss_mb}MB` : "";
-      const contentKey = `${statusTag}|${s?.rss_mb ?? ""}|${s?.suspended}`;
-
-      // Only re-emit notification when content actually changed
-      if (this._prevNotifContent.get(name) === contentKey) continue;
-      this._prevNotifContent.set(name, contentKey);
-
-      const tabAction = `curl -sX POST ${apiBase}/tab/${name} >/dev/null 2>&1`;
-      const suspendAction = s?.suspended
-        ? `curl -sX POST ${apiBase}/resume/${name} >/dev/null 2>&1`
-        : `curl -sX POST ${apiBase}/suspend/${name} >/dev/null 2>&1`;
-      const suspendLabel = s?.suspended ? "Resume" : "Pause";
-      const stopAction = `curl -sX POST ${apiBase}/stop/${name} >/dev/null 2>&1`;
-
-      notifyWithArgs([
-        "--ongoing",
-        "--alert-once",
-        "--id", `operad-${name}`,
-        "--group", "operad-sessions",
-        "--priority", "low",
-        "--title", `${name}`,
-        "--content", `${statusTag}${rss}`,
-        "--icon", "terminal",
-        "--action", tabAction,
-        "--button1", "Tab",
-        "--button1-action", tabAction,
-        "--button2", suspendLabel,
-        "--button2-action", suspendAction,
-        "--button3", "Stop",
-        "--button3-action", stopAction,
-      ]);
-    }
-
-    // Remove notifications for sessions that are no longer running
-    for (const name of this._prevNotifiedSessions) {
-      if (!allRunning.includes(name)) {
-        removeNotification(`operad-${name}`);
-        this._prevNotifContent.delete(name);
-      }
-    }
-    // One-shot: remove stale service notifications lingering from previous daemon cycle
-    if (!this._serviceNotifsCleared) {
-      this._serviceNotifsCleared = true;
-      for (const svcName of serviceNames) {
-        removeNotification(`operad-${svcName}`);
-      }
-    }
-    this._prevNotifiedSessions = allRunning;
-
-    // -- Summary notification (diff-based) --
     const activeCount = activeNames.length;
     const suspendedCount = suspendedNames.length;
     const title = suspendedCount > 0
       ? `operad ▶ ${activeCount}/${totalRunning} (${suspendedCount} paused)`
       : `operad ▶ ${activeCount}/${totalRunning}`;
 
-    const MAX_NAMES = 8;
+    // Compact content: list session names by status, truncated
+    const MAX_NAMES = 6;
     const parts: string[] = [];
     if (activeNames.length > 0) {
       const shown = activeNames.sort().slice(0, MAX_NAMES);
       const extra = activeNames.length - shown.length;
-      parts.push(`active: ${shown.join(", ")}${extra > 0 ? ` (+${extra})` : ""}`);
+      parts.push(`▶ ${shown.join(", ")}${extra > 0 ? ` +${extra}` : ""}`);
     }
     if (idleNames.length > 0) {
       const shown = idleNames.sort().slice(0, MAX_NAMES);
       const extra = idleNames.length - shown.length;
-      parts.push(`idle: ${shown.join(", ")}${extra > 0 ? ` (+${extra})` : ""}`);
+      parts.push(`◇ ${shown.join(", ")}${extra > 0 ? ` +${extra}` : ""}`);
     }
     if (suspendedNames.length > 0) {
       const shown = suspendedNames.sort().slice(0, MAX_NAMES);
       const extra = suspendedNames.length - shown.length;
-      parts.push(`paused: ${shown.join(", ")}${extra > 0 ? ` (+${extra})` : ""}`);
+      parts.push(`⏸ ${shown.join(", ")}${extra > 0 ? ` +${extra}` : ""}`);
     }
-    const content = parts.length > 0 ? parts.join(" | ") : "no sessions running";
+    const content = parts.length > 0 ? parts.join(" | ") : "no sessions";
 
-    // Skip re-emit if summary content hasn't changed
+    // Skip re-emit if nothing changed — prevents unnecessary termux-api spawns
     const summaryKey = `${title}|${content}`;
     if (this._prevSummaryContent === summaryKey) return;
     this._prevSummaryContent = summaryKey;
@@ -1566,18 +1497,24 @@ export class Daemon {
     const anySuspended = suspendedCount > 0;
     const toggleLabel = anySuspended ? "Resume All" : "Pause All";
     const toggleEndpoint = anySuspended ? "resume-all" : "suspend-all";
-    const toggleAction = `curl -sX POST ${apiBase}/${toggleEndpoint} >/dev/null 2>&1`;
-    // Use am start for dashboard — termux-open-url can silently fail on Android.
-    // FLAG_ACTIVITY_CLEAR_TOP (0x04000000) reuses existing tab instead of opening
-    // duplicates. Use 127.0.0.1 consistently (localhost is a different origin).
+
+    // Button actions: use full binary paths for Termux compatibility.
+    // LD_PRELOAD injection is needed for am to work, but button actions
+    // run in a minimal shell where env may not be set. Use env command
+    // to inject it explicitly.
+    const ldPreload = `${process.env.PREFIX ?? "/data/data/com.termux/files/usr"}/lib/libtermux-exec-ld-preload.so`;
     const amBin = detectPlatform().resolveBinaryPath("am");
-    const dashboardAction = `${amBin} start -a android.intent.action.VIEW -f 0x04000000 -d http://127.0.0.1:${port}`;
+
+    const toggleAction = `${curlBin} -sX POST ${apiBase}/${toggleEndpoint} >/dev/null 2>&1`;
+    const stopAction = `${curlBin} -sX POST ${apiBase}/stop >/dev/null 2>&1`;
+    // Dashboard: use env to inject LD_PRELOAD for am command.
+    // FLAG_ACTIVITY_CLEAR_TOP (0x04000000) reuses existing tab.
+    const dashboardAction = `LD_PRELOAD=${ldPreload} ${amBin} start -a android.intent.action.VIEW -f 0x04000000 -d http://127.0.0.1:${port}`;
 
     notifyWithArgs([
       "--ongoing",
       "--alert-once",
       "--id", "operad-status",
-      "--group", "operad-sessions",
       "--priority", "low",
       "--title", title,
       "--content", content,
@@ -1586,7 +1523,7 @@ export class Daemon {
       "--button1", toggleLabel,
       "--button1-action", toggleAction,
       "--button2", "Stop All",
-      "--button2-action", `curl -sX POST ${apiBase}/stop >/dev/null 2>&1`,
+      "--button2-action", stopAction,
       "--button3", "Dashboard",
       "--button3-action", dashboardAction,
     ]);
