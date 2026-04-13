@@ -104,6 +104,10 @@ export class LinuxPlatform implements Platform {
     // No-op on Linux desktop — notify-send doesn't hang
   }
 
+  killStaleNotifyProcesses(): number {
+    return 0; // No-op on Linux desktop
+  }
+
   // -- Battery ---------------------------------------------------------------
 
   /**

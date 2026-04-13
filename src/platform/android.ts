@@ -152,10 +152,64 @@ function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
  * to prevent orphaned termux-api processes from piling up.
  */
 export function killAllNotifyProcesses(): void {
-  for (const [id, pid] of activeNotifyPids) {
+  for (const [, pid] of activeNotifyPids) {
     try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
   }
   activeNotifyPids.clear();
+}
+
+/**
+ * Kill ALL stale termux-api processes and reap zombie children system-wide.
+ * Called on daemon startup to clean up orphans from previous daemon instances
+ * that were SIGKILL'd by Android OOM killer (no cleanup handler fires on SIGKILL).
+ *
+ * Uses `pkill -9 -f` to match the process command line pattern.
+ * This is aggressive but safe — termux-api processes are ephemeral and
+ * the daemon immediately re-emits the current status notification.
+ *
+ * Also kills and restarts crond to reap zombie [crond] children that accumulate
+ * when cron-spawned processes' parents die before reaping them.
+ */
+function killStaleTermuxApiProcesses(): number {
+  let killed = 0;
+
+  // Count stale termux-api processes before killing
+  try {
+    const countResult = spawnSync("sh", ["-c", "ps -e 2>/dev/null | grep -c 'termux-api'"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    killed = parseInt(countResult.stdout?.trim() ?? "0", 10);
+  } catch { /* non-fatal */ }
+
+  // Kill all termux-api processes (Notification, BatteryStatus, etc.)
+  try {
+    spawnSync("pkill", ["-9", "-f", "termux-api"], {
+      timeout: 5000,
+      stdio: "ignore",
+    });
+  } catch { /* non-fatal — pkill returns 1 if no match */ }
+
+  // Reap zombie crond children by restarting crond.
+  // Zombies occur when cron-spawned processes' parents die before wait().
+  // Killing crond causes init to reap its zombie children, then restart crond.
+  try {
+    const zombieCount = spawnSync("sh", ["-c", "ps -e 2>/dev/null | grep -c '\\[crond\\]'"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const zCount = parseInt(zombieCount.stdout?.trim() ?? "0", 10);
+    if (zCount > 0) {
+      spawnSync("pkill", ["-9", "crond"], { timeout: 3000, stdio: "ignore" });
+      // Restart crond after brief delay for cleanup
+      spawnSync("sh", ["-c", "sleep 1 && crond"], { timeout: 5000, stdio: "ignore" });
+      killed += zCount;
+    }
+  } catch { /* non-fatal */ }
+
+  return killed;
 }
 
 // Pre-resolve common binary paths at module load time
@@ -233,6 +287,11 @@ export class AndroidPlatform implements Platform {
   /** Kill all tracked notification processes to prevent orphan pile-up on shutdown */
   killTrackedNotifyProcesses(): void {
     killAllNotifyProcesses();
+  }
+
+  /** Kill stale termux-api processes from previous daemon instances (startup cleanup) */
+  killStaleNotifyProcesses(): number {
+    return killStaleTermuxApiProcesses();
   }
 
   // -- Battery ----------------------------------------------------------------

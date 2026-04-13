@@ -85,6 +85,9 @@ export interface Platform {
   /** Kill all tracked notification processes (cleanup for shutdown). No-op on non-Android. */
   killTrackedNotifyProcesses(): void;
 
+  /** Kill stale termux-api processes from previous daemon instances (startup cleanup). Returns count killed. */
+  killStaleNotifyProcesses(): number;
+
   // -- Battery (battery.ts) -------------------------------------------------
 
   /** Read current battery status, or null if unavailable */

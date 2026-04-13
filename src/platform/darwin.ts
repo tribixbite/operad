@@ -290,6 +290,10 @@ export class DarwinPlatform implements Platform {
     // No-op on macOS — osascript doesn't hang
   }
 
+  killStaleNotifyProcesses(): number {
+    return 0; // No-op on macOS
+  }
+
   // -- Battery --------------------------------------------------------------
 
   /**

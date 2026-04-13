@@ -268,6 +268,15 @@ export class Daemon {
   async start(): Promise<void> {
     trace("daemon:start");
     this.preflight();
+
+    // Kill stale termux-api processes and zombies from previous daemon instances.
+    // When daemon gets SIGKILL'd by Android OOM killer, no cleanup handler fires,
+    // leaving orphaned termux-api processes that pile up across restarts.
+    const staleKilled = detectPlatform().killStaleNotifyProcesses();
+    if (staleKilled > 0) {
+      trace(`startup:cleanup killed ${staleKilled} stale processes`);
+    }
+
     this.running = true;
     this.log.info("Daemon starting", {
       sessions: this.config.sessions.length,
