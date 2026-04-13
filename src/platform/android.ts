@@ -78,10 +78,27 @@ function termuxApiEnv(): NodeJS.ProcessEnv {
  * Active notification PIDs — keyed by notification --id.
  * Before spawning a new notification for the same id, we SIGKILL the previous
  * process to prevent pile-up when Termux:API service is unresponsive.
- * Processes stuck in D-state (uninterruptible sleep) won't respond to SIGKILL
- * but at least we avoid spawning duplicates on top of them.
  */
 const activeNotifyPids = new Map<string, number>();
+
+/** ALL active termux-api child PIDs (with or without --id) for global cap enforcement */
+const allApiPids = new Set<number>();
+
+/**
+ * Circuit breaker for Termux:API calls.
+ * When the service is unresponsive, consecutive timeouts trip the breaker
+ * and all subsequent calls are silently dropped until the service recovers.
+ * This prevents the 190+ process burst during boot when states change rapidly.
+ */
+let circuitBreakerFailCount = 0;
+let circuitBreakerOpenUntil = 0;
+const CIRCUIT_BREAKER_THRESHOLD = 3;  // trip after 3 consecutive timeouts
+const CIRCUIT_BREAKER_COOLDOWN = 30_000; // 30s cooldown before retrying
+/**
+ * Hard cap on concurrent termux-api processes to prevent boot-time burst.
+ * Covers ALL termux-api calls (notifications, removes, battery, toast).
+ */
+const MAX_CONCURRENT_API_PROCS = 5;
 
 /**
  * Extract the notification --id from args, if present.
@@ -97,19 +114,34 @@ function extractNotifyId(args: string[]): string | null {
  * termux-notification (and friends) can hang indefinitely when Termux:API
  * service is unresponsive — using spawnSync would freeze the event loop.
  *
- * For notifications with --id, tracks the spawned PID and kills the previous
- * process for the same id before spawning a new one. This prevents the
- * 10,000+ process pile-up that was exhausting the PID table and crashing
- * system_server.
+ * Three layers of protection against process pile-up:
+ * 1. Per-ID tracking: kills previous stuck process before spawning replacement
+ * 2. Hard timeout: SIGKILL after 8s if process hasn't exited
+ * 3. Circuit breaker: after 3 consecutive timeouts, drops all calls for 30s
  */
 function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
+  // Circuit breaker: skip if Termux:API service is known to be unresponsive
+  if (circuitBreakerOpenUntil > Date.now()) {
+    return;
+  }
+
+  // Hard cap: skip if too many termux-api processes are already pending.
+  // During boot, session states change rapidly and each change triggers
+  // a notification update — without this cap, 190+ processes spawn in seconds.
+  if (allApiPids.size >= MAX_CONCURRENT_API_PROCS) {
+    return;
+  }
+
   try {
-    // Kill previous stuck process for the same notification id
+    // Kill previous stuck process group for the same notification id.
+    // Negative PID kills the entire process group — critical because
+    // termux-notification is a bash wrapper that pipes to /usr/libexec/termux-api.
+    // Killing only the bash wrapper orphans the stuck termux-api to init.
     const notifyId = extractNotifyId(args);
     if (notifyId) {
       const prevPid = activeNotifyPids.get(notifyId);
       if (prevPid !== undefined) {
-        try { process.kill(prevPid, "SIGKILL"); } catch { /* already dead */ }
+        try { process.kill(-prevPid, "SIGKILL"); } catch { /* already dead */ }
         activeNotifyPids.delete(notifyId);
       }
     }
@@ -120,24 +152,65 @@ function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
       detached: true,
     });
 
-    // Track the PID for this notification id
-    if (notifyId && child.pid) {
-      activeNotifyPids.set(notifyId, child.pid);
+    const pid = child.pid;
+
+    // Track the PID globally and per notification id
+    if (pid) allApiPids.add(pid);
+    if (notifyId && pid) {
+      activeNotifyPids.set(notifyId, pid);
     }
 
-    // Hard kill if it hasn't exited after timeout
-    const timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* already dead */ }
+    /** Clean up tracking state for this process */
+    const cleanup = () => {
+      if (pid) allApiPids.delete(pid);
       if (notifyId) activeNotifyPids.delete(notifyId);
+    };
+
+    // Track whether this process was killed by our timeout handler.
+    // When we SIGKILL a stuck process, the "exit" event also fires — without
+    // this flag, the exit handler resets circuitBreakerFailCount to 0,
+    // preventing the circuit breaker from ever tripping.
+    let killedByTimeout = false;
+
+    // Hard kill the entire process group after timeout.
+    // Use -pid (negative) to kill the process group, not just the wrapper.
+    // termux-notification is a bash script that pipes to /usr/libexec/termux-api —
+    // killing only the wrapper PID orphans the stuck termux-api grandchild to init.
+    // With detached: true, child.pid IS the PGID, so -pid kills the group.
+    const timer = setTimeout(() => {
+      killedByTimeout = true;
+      if (pid) { try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ } }
+      // DON'T cleanup() here — leave PID in allApiPids to prevent the slot
+      // from being immediately recycled. The exit handler will clean up
+      // after the SIGKILL takes effect. Only clear the notification id mapping
+      // so the next notification for this id can proceed.
+      if (notifyId) activeNotifyPids.delete(notifyId);
+      // Timeout = Termux:API service likely unresponsive
+      circuitBreakerFailCount++;
+      if (circuitBreakerFailCount >= CIRCUIT_BREAKER_THRESHOLD) {
+        circuitBreakerOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN;
+        // Kill all tracked process groups — they're all stuck
+        for (const p of allApiPids) {
+          try { process.kill(-p, "SIGKILL"); } catch { /* already dead */ }
+        }
+        // Don't clear allApiPids — exit handlers will clean up as processes die.
+        // This prevents new spawns until the slots are actually freed.
+        activeNotifyPids.clear();
+      }
     }, timeoutMs);
 
     child.on("exit", () => {
       clearTimeout(timer);
-      if (notifyId) activeNotifyPids.delete(notifyId);
+      cleanup();
+      // Only reset circuit breaker for processes that exited naturally —
+      // NOT for processes we killed via timeout (they'd undo the breaker trip)
+      if (!killedByTimeout) {
+        circuitBreakerFailCount = 0;
+      }
     });
     child.on("error", () => {
       clearTimeout(timer);
-      if (notifyId) activeNotifyPids.delete(notifyId);
+      cleanup();
     });
 
     // Detach so child doesn't block parent shutdown
@@ -152,9 +225,11 @@ function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
  * to prevent orphaned termux-api processes from piling up.
  */
 export function killAllNotifyProcesses(): void {
-  for (const [, pid] of activeNotifyPids) {
-    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  for (const pid of allApiPids) {
+    // Kill entire process group (bash wrapper + piped termux-api children)
+    try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ }
   }
+  allApiPids.clear();
   activeNotifyPids.clear();
 }
 
@@ -302,14 +377,46 @@ export class AndroidPlatform implements Platform {
    * Fallback: /sys/class/power_supply/battery/* sysfs files (works without Termux:API).
    */
   getBatteryStatus(): BatteryInfo | null {
-    // Try termux-battery-status first (most reliable, needs Termux:API).
-    // Must use full path + LD_PRELOAD — bun's glibc runner strips both PATH
-    // resolution and LD_PRELOAD which termux-api needs for am/app_process.
+    // Prefer sysfs (pure file reads, zero process spawn).
+    // On Android, /sys/class/power_supply/battery/ always exists and provides
+    // all the data we need. Using termux-battery-status spawns a process that
+    // can hang when Termux:API service is unresponsive, leaking orphan processes.
     try {
-      const bin = resolveTermuxBin("termux-battery-status");
-      const result = spawnSync(bin, [], {
+      const base = "/sys/class/power_supply/battery";
+      if (existsSync(base)) {
+        const capacity = parseInt(readFileSync(`${base}/capacity`, "utf-8").trim(), 10);
+        const statusStr = readFileSync(`${base}/status`, "utf-8").trim();
+        let temp = 0;
+        try {
+          // sysfs temperature is in tenths of a degree Celsius
+          temp = parseInt(readFileSync(`${base}/temp`, "utf-8").trim(), 10) / 10;
+        } catch { /* temperature is optional */ }
+        let health = "UNKNOWN";
+        try {
+          health = readFileSync(`${base}/health`, "utf-8").trim();
+        } catch { /* health is optional */ }
+
+        return {
+          percentage: isNaN(capacity) ? 0 : capacity,
+          charging: statusStr === "Charging" || statusStr === "Full",
+          temperature: temp,
+          health,
+        };
+      }
+    } catch { /* fall through to termux-battery-status */ }
+
+    // Fallback: call /usr/libexec/termux-api BatteryStatus directly.
+    // MUST bypass the termux-battery-status bash wrapper because:
+    // - The wrapper forks termux-api as a child process
+    // - spawnSync's timeout SIGTERM only kills the wrapper, not the child
+    // - The orphaned termux-api process leaks to init (PPID=1) forever
+    // By calling termux-api directly, spawnSync's killSignal hits the actual process.
+    try {
+      const bin = join(PREFIX, "libexec", "termux-api");
+      const result = spawnSync(bin, ["BatteryStatus"], {
         encoding: "utf-8",
         timeout: 8000,
+        killSignal: "SIGKILL",  // SIGTERM may not kill process stuck in Binder IPC
         stdio: ["ignore", "pipe", "pipe"],
         env: termuxApiEnv(),
       });
@@ -323,37 +430,15 @@ export class AndroidPlatform implements Platform {
         };
         return {
           percentage: data.percentage,
-          // Charging if status says so, or if plugged in and not explicitly discharging
           charging: data.status === "CHARGING" || data.status === "FULL" ||
             (data.plugged !== "UNPLUGGED" && data.status !== "DISCHARGING"),
           temperature: data.temperature,
           health: data.health ?? "UNKNOWN",
         };
       }
-    } catch { /* fall through to sysfs */ }
+    } catch { /* battery info unavailable */ }
 
-    // Fallback: read from sysfs (works without Termux:API)
-    try {
-      const base = "/sys/class/power_supply/battery";
-      if (!existsSync(base)) return null;
-
-      const capacity = parseInt(readFileSync(`${base}/capacity`, "utf-8").trim(), 10);
-      const statusStr = readFileSync(`${base}/status`, "utf-8").trim();
-      let temp = 0;
-      try {
-        // sysfs temperature is in tenths of a degree Celsius
-        temp = parseInt(readFileSync(`${base}/temp`, "utf-8").trim(), 10) / 10;
-      } catch { /* temperature is optional */ }
-
-      return {
-        percentage: isNaN(capacity) ? 0 : capacity,
-        charging: statusStr === "Charging" || statusStr === "Full",
-        temperature: temp,
-        health: "UNKNOWN",
-      };
-    } catch {
-      return null;
-    }
+    return null;
   }
 
   /** Disable wifi and mobile data to conserve battery */
