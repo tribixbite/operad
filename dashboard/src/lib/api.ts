@@ -874,6 +874,80 @@ export async function updateSwitchboard(patch: Partial<import("./types").Switchb
   return checkedJson(res);
 }
 
+// -- Agent chat API -----------------------------------------------------------
+
+/** Fetch agent conversation history */
+export async function fetchAgentChat(agentName: string, limit = 50): Promise<import("./types").AgentChatMessage[]> {
+  const res = await fetch(`/api/agent-chat/${encodeURIComponent(agentName)}?limit=${limit}`);
+  return checkedJson(res);
+}
+
+/** Clear agent conversation history */
+export async function clearAgentChat(agentName: string): Promise<void> {
+  const res = await fetch(`/api/agent-chat/${encodeURIComponent(agentName)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+// -- Agent messages API -------------------------------------------------------
+
+/** Fetch recent inter-agent messages */
+export async function fetchAgentMessages(limit = 50): Promise<import("./types").AgentMessage[]> {
+  const res = await fetch(`/api/agent-messages?limit=${limit}`);
+  return checkedJson(res);
+}
+
+/** Fetch conversation between two agents */
+export async function fetchAgentConversation(agent1: string, agent2: string, limit = 50): Promise<import("./types").AgentMessage[]> {
+  const res = await fetch(`/api/agent-messages/${encodeURIComponent(agent1)}/${encodeURIComponent(agent2)}?limit=${limit}`);
+  return checkedJson(res);
+}
+
+/** Send a message into the agent bus (from user) */
+export async function sendAgentMessage(from: string, to: string, content: string, type = "info"): Promise<{ id: number }> {
+  const res = await fetch("/api/agent-messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, content, type }),
+  });
+  return checkedJson(res);
+}
+
+/** Fetch agent conversation pairs */
+export async function fetchAgentConversationPairs(): Promise<import("./types").ConversationPair[]> {
+  const res = await fetch("/api/agent-messages/pairs");
+  return checkedJson(res);
+}
+
+// -- Agent growth API ---------------------------------------------------------
+
+/** Fetch agent learnings */
+export async function fetchAgentLearnings(agentName: string, limit = 20): Promise<import("./types").AgentLearning[]> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/learnings?limit=${limit}`);
+  return checkedJson(res);
+}
+
+/** Fetch agent personality snapshot */
+export async function fetchAgentPersonality(agentName: string): Promise<import("./types").PersonalityTrait[]> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/personality`);
+  return checkedJson(res);
+}
+
+/** Fetch agent personality drift */
+export async function fetchAgentDrift(agentName: string): Promise<Array<{
+  trait_name: string; current_value: number; previous_value: number; delta: number; direction: string;
+}>> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/personality/drift`);
+  return checkedJson(res);
+}
+
+/** Fetch decision quality metrics */
+export async function fetchDecisionMetrics(): Promise<Array<{
+  agent_name: string; total_decisions: number; scored_decisions: number; avg_score: number | null;
+}>> {
+  const res = await fetch("/api/cognitive/metrics");
+  return checkedJson(res);
+}
+
 // -- SDK cost tracking API ----------------------------------------------------
 
 /** Fetch aggregate SDK costs */

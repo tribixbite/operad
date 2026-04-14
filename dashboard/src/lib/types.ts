@@ -609,6 +609,61 @@ export interface SdkSessionCost {
   queries: number;
 }
 
+// -- Agent chat ---------------------------------------------------------------
+
+/** Agent conversation message from /api/agent-chat/:name */
+export interface AgentChatMessage {
+  id: number;
+  agent_name: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  session_id: string | null;
+  thinking: string | null;
+  cost_usd: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  created_at: number;
+}
+
+/** Inter-agent message from /api/agent-messages */
+export interface AgentMessage {
+  id: number;
+  from_agent: string;
+  to_agent: string;
+  message_type: string;
+  content: string;
+  metadata: string | null;
+  read_at: number | null;
+  created_at: number;
+}
+
+/** Agent conversation pair summary */
+export interface ConversationPair {
+  agent1: string;
+  agent2: string;
+  message_count: number;
+  last_message_at: number;
+}
+
+/** Agent personality trait */
+export interface PersonalityTrait {
+  trait_name: string;
+  trait_value: number;
+  evidence: string | null;
+}
+
+/** Agent learning record */
+export interface AgentLearning {
+  id: number;
+  agent_name: string;
+  category: string;
+  content: string;
+  confidence: number;
+  reinforcement_count: number;
+  created_at: number;
+  last_reinforced_at: number;
+}
+
 // -- Switchboard --------------------------------------------------------------
 
 /** Switchboard — master control for enabling/disabling subsystems */

@@ -5,6 +5,7 @@
   } from "../lib/api";
   import { connect, on } from "../lib/ws.svelte";
   import type { AgentInfo, AgentRunRecord, AgentCostSummary } from "../lib/types";
+  import AgentChatDrawer from "./AgentChatDrawer.svelte";
 
   // -- State ------------------------------------------------------------------
 
@@ -35,6 +36,9 @@
   /** Standalone run prompt input */
   let runPrompt = $state("");
   let runningAgent: string | null = $state(null);
+
+  /** Chat drawer state */
+  let chatAgent: AgentInfo | null = $state(null);
 
   // -- Loading ----------------------------------------------------------------
 
@@ -245,6 +249,12 @@
                   style="flex:1"
                 />
                 <button
+                  class="btn-chat"
+                  onclick={() => (chatAgent = agent)}
+                >
+                  Chat
+                </button>
+                <button
                   class="btn-run"
                   disabled={!agent.enabled || runningAgent !== null}
                   onclick={() => handleRun(agent.name)}
@@ -313,6 +323,14 @@
     {/if}
   {/if}
 </div>
+
+{#if chatAgent}
+  <AgentChatDrawer
+    agentName={chatAgent.name}
+    agentDescription={chatAgent.description}
+    onclose={() => (chatAgent = null)}
+  />
+{/if}
 
 <style>
   .agent-panel { display: flex; flex-direction: column; gap: 0.5rem; }
@@ -469,6 +487,18 @@
     cursor: pointer;
     flex-shrink: 0;
   }
+  .btn-chat {
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    font: inherit;
+    font-size: 0.6875rem;
+    padding: 0.375rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .btn-chat:hover { background: rgba(168, 85, 247, 0.35); }
   .btn-run:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-danger {
     background: rgba(248, 113, 113, 0.15);

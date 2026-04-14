@@ -227,6 +227,49 @@ const SCHEMA_STATEMENTS: string[] = [
     created_at INTEGER DEFAULT (unixepoch())
   )`,
   `CREATE INDEX IF NOT EXISTS idx_strategy_agent ON agent_strategies(agent_name, active)`,
+
+  // Agent conversation history (persistent chat sessions)
+  `CREATE TABLE IF NOT EXISTS agent_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    session_id TEXT,
+    thinking TEXT,
+    cost_usd REAL,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_conv_agent ON agent_conversations(agent_name, created_at)`,
+
+  // Per-agent accumulated knowledge (persists across runs)
+  `CREATE TABLE IF NOT EXISTS agent_learnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'insight',
+    content TEXT NOT NULL,
+    content_hash TEXT,
+    confidence REAL DEFAULT 0.5,
+    source_run_id INTEGER,
+    reinforcement_count INTEGER DEFAULT 1,
+    created_at INTEGER DEFAULT (unixepoch()),
+    last_reinforced_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_hash ON agent_learnings(agent_name, content_hash)`,
+  `CREATE INDEX IF NOT EXISTS idx_learning_agent ON agent_learnings(agent_name, confidence DESC)`,
+
+  // Per-agent personality trait evolution (versioned for drift tracking)
+  `CREATE TABLE IF NOT EXISTS agent_personality (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    trait_name TEXT NOT NULL,
+    trait_value REAL NOT NULL,
+    evidence TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_personality ON agent_personality(agent_name, trait_name)`,
 ];
 
 /**
@@ -960,5 +1003,227 @@ export class MemoryDb {
     return db.prepare(
       `SELECT * FROM agent_strategies WHERE agent_name = ? ORDER BY version DESC LIMIT ?`,
     ).all(agentName, limit);
+  }
+
+  // -- Agent conversations (persistent chat) -----------------------------------
+
+  /** Append a message to an agent conversation */
+  appendConversation(
+    agentName: string,
+    role: string,
+    content: string,
+    opts?: { sessionId?: string; thinking?: string; costUsd?: number; tokensIn?: number; tokensOut?: number },
+  ): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO agent_conversations (agent_name, role, content, session_id, thinking, cost_usd, tokens_in, tokens_out)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      agentName, role, content, opts?.sessionId ?? null, opts?.thinking ?? null,
+      opts?.costUsd ?? null, opts?.tokensIn ?? null, opts?.tokensOut ?? null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Get conversation history for an agent */
+  getConversationHistory(agentName: string, limit = 50): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_conversations WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?`,
+    ).all(agentName, limit).reverse(); // chronological order
+  }
+
+  /** Clear conversation history for an agent */
+  clearConversation(agentName: string): number {
+    const db = this.requireDb();
+    return db.prepare(`DELETE FROM agent_conversations WHERE agent_name = ?`).run(agentName).changes;
+  }
+
+  // -- Agent learnings (accumulated knowledge) ---------------------------------
+
+  /** Add or reinforce a learning. Deduplicates via content hash — if duplicate, reinforces confidence. */
+  addLearning(
+    agentName: string,
+    category: string,
+    content: string,
+    opts?: { confidence?: number; sourceRunId?: number },
+  ): number | null {
+    const db = this.requireDb();
+    const hash = hashContent(content);
+
+    // Check for existing learning with same hash
+    const existing = db.prepare(
+      `SELECT id, confidence, reinforcement_count FROM agent_learnings WHERE agent_name = ? AND content_hash = ?`,
+    ).get(agentName, hash) as { id: number; confidence: number; reinforcement_count: number } | undefined;
+
+    if (existing) {
+      // Reinforce: bump confidence (capped at 1.0), increment count
+      const newConfidence = Math.min(1.0, existing.confidence + 0.05);
+      db.prepare(
+        `UPDATE agent_learnings SET confidence = ?, reinforcement_count = reinforcement_count + 1, last_reinforced_at = unixepoch() WHERE id = ?`,
+      ).run(newConfidence, existing.id);
+      return existing.id;
+    }
+
+    const result = db.prepare(
+      `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, source_run_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(agentName, category, content, hash, opts?.confidence ?? 0.5, opts?.sourceRunId ?? null);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Get top learnings for an agent, sorted by confidence */
+  getAgentLearnings(agentName: string, limit = 20, category?: string): Record<string, unknown>[] {
+    const db = this.requireDb();
+    if (category) {
+      return db.prepare(
+        `SELECT * FROM agent_learnings WHERE agent_name = ? AND category = ? ORDER BY confidence DESC LIMIT ?`,
+      ).all(agentName, category, limit);
+    }
+    return db.prepare(
+      `SELECT * FROM agent_learnings WHERE agent_name = ? ORDER BY confidence DESC LIMIT ?`,
+    ).all(agentName, limit);
+  }
+
+  /** Decay old learnings with low reinforcement */
+  decayLearnings(agentName: string, olderThanDays = 30): number {
+    const db = this.requireDb();
+    const cutoff = Math.floor(Date.now() / 1000) - olderThanDays * 86400;
+    return db.prepare(
+      `UPDATE agent_learnings SET confidence = MAX(0.1, confidence * 0.95)
+       WHERE agent_name = ? AND last_reinforced_at < ? AND confidence > 0.1`,
+    ).run(agentName, cutoff).changes;
+  }
+
+  /** Get high-confidence learnings from all agents except one (cross-pollination) */
+  getSharedInsights(excludeAgent: string, minConfidence = 0.7, limit = 5): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_learnings WHERE agent_name != ? AND confidence >= ? ORDER BY confidence DESC LIMIT ?`,
+    ).all(excludeAgent, minConfidence, limit);
+  }
+
+  // -- Agent personality (trait evolution) -------------------------------------
+
+  /** Set or update a personality trait. Creates new version for history tracking. */
+  setPersonalityTrait(agentName: string, traitName: string, value: number, evidence?: string): number {
+    const db = this.requireDb();
+    const clampedValue = Math.max(0, Math.min(1, value));
+
+    // Get current version for this trait
+    const current = db.prepare(
+      `SELECT MAX(version) as v FROM agent_personality WHERE agent_name = ? AND trait_name = ?`,
+    ).get(agentName, traitName) as { v: number | null } | undefined;
+    const nextVersion = (current?.v ?? 0) + 1;
+
+    const result = db.prepare(
+      `INSERT INTO agent_personality (agent_name, trait_name, trait_value, evidence, version) VALUES (?, ?, ?, ?, ?)`,
+    ).run(agentName, traitName, clampedValue, evidence ?? null, nextVersion);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Get current personality snapshot for an agent (latest version of each trait) */
+  getPersonalitySnapshot(agentName: string): Array<{ trait_name: string; trait_value: number; evidence: string | null }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT trait_name, trait_value, evidence FROM agent_personality
+       WHERE agent_name = ? AND version = (
+         SELECT MAX(version) FROM agent_personality p2
+         WHERE p2.agent_name = agent_personality.agent_name AND p2.trait_name = agent_personality.trait_name
+       )
+       ORDER BY trait_name`,
+    ).all(agentName) as Array<{ trait_name: string; trait_value: number; evidence: string | null }>;
+  }
+
+  /** Get trait evolution history for drift tracking */
+  getPersonalityHistory(agentName: string, traitName: string, limit = 20): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_personality WHERE agent_name = ? AND trait_name = ? ORDER BY version DESC LIMIT ?`,
+    ).all(agentName, traitName, limit);
+  }
+
+  /** Detect significant trait changes (drift) */
+  getPersonalityDrift(agentName: string, windowDays = 7): Array<{
+    trait_name: string;
+    current_value: number;
+    previous_value: number;
+    delta: number;
+    direction: "increased" | "decreased" | "stable";
+  }> {
+    const db = this.requireDb();
+    const cutoff = Math.floor(Date.now() / 1000) - windowDays * 86400;
+
+    // Get current values
+    const current = this.getPersonalitySnapshot(agentName);
+    const drift: Array<{ trait_name: string; current_value: number; previous_value: number; delta: number; direction: "increased" | "decreased" | "stable" }> = [];
+
+    for (const trait of current) {
+      // Find the oldest value within the window
+      const older = db.prepare(
+        `SELECT trait_value FROM agent_personality
+         WHERE agent_name = ? AND trait_name = ? AND created_at <= ?
+         ORDER BY version DESC LIMIT 1`,
+      ).get(agentName, trait.trait_name, cutoff) as { trait_value: number } | undefined;
+
+      if (older) {
+        const delta = trait.trait_value - older.trait_value;
+        if (Math.abs(delta) > 0.05) { // threshold for "significant" change
+          drift.push({
+            trait_name: trait.trait_name,
+            current_value: trait.trait_value,
+            previous_value: older.trait_value,
+            delta,
+            direction: delta > 0.05 ? "increased" : delta < -0.05 ? "decreased" : "stable",
+          });
+        }
+      }
+    }
+    return drift;
+  }
+
+  // -- Recent agent messages (for dashboard) -----------------------------------
+
+  /** Get all recent agent messages */
+  getRecentAgentMessages(limit = 50): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_messages ORDER BY created_at DESC LIMIT ?`,
+    ).all(limit);
+  }
+
+  /** Get unique agent conversation pairs with metadata */
+  getAgentConversationPairs(): Array<{ agent1: string; agent2: string; message_count: number; last_message_at: number }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT
+         MIN(from_agent, to_agent) as agent1,
+         MAX(from_agent, to_agent) as agent2,
+         COUNT(*) as message_count,
+         MAX(created_at) as last_message_at
+       FROM agent_messages
+       WHERE to_agent != '*'
+       GROUP BY MIN(from_agent, to_agent), MAX(from_agent, to_agent)
+       ORDER BY last_message_at DESC`,
+    ).all() as Array<{ agent1: string; agent2: string; message_count: number; last_message_at: number }>;
+  }
+
+  /** Get per-agent decision quality metrics */
+  getDecisionMetrics(): Array<{
+    agent_name: string;
+    total_decisions: number;
+    scored_decisions: number;
+    avg_score: number | null;
+  }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT agent_name,
+              COUNT(*) as total_decisions,
+              COUNT(score) as scored_decisions,
+              AVG(score) as avg_score
+       FROM agent_decisions
+       GROUP BY agent_name
+       ORDER BY agent_name`,
+    ).all() as Array<{ agent_name: string; total_decisions: number; scored_decisions: number; avg_score: number | null }>;
   }
 }

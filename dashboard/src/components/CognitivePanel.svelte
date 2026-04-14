@@ -2,9 +2,15 @@
   import {
     fetchCognitiveState, fetchGoals, createGoal, updateGoal,
     fetchDecisions, triggerOoda,
+    fetchAgentMessages, fetchAgentConversationPairs, sendAgentMessage,
+    fetchAgentLearnings, fetchAgentPersonality, fetchAgentDrift,
+    fetchDecisionMetrics, fetchAgents,
   } from "../lib/api";
   import { connect, on } from "../lib/ws.svelte";
-  import type { GoalRecord, DecisionRecord } from "../lib/types";
+  import type {
+    GoalRecord, DecisionRecord,
+    AgentMessage, ConversationPair, PersonalityTrait, AgentLearning, AgentInfo,
+  } from "../lib/types";
 
   // -- State ------------------------------------------------------------------
 
@@ -15,8 +21,8 @@
   let error: string | null = $state(null);
   let actionMsg: string | null = $state(null);
 
-  /** Active tab: goals | decisions | strategy */
-  let tab: "goals" | "decisions" | "strategy" = $state("goals");
+  /** Active tab */
+  let tab: "goals" | "decisions" | "strategy" | "messages" | "growth" = $state("goals");
 
   /** Expanded goal for detail view */
   let expandedGoal: number | null = $state(null);
@@ -32,6 +38,54 @@
 
   /** OODA cycle running */
   let oodaRunning = $state(false);
+
+  // -- Messages tab state -----------------------------------------------------
+
+  /** Agent conversation pairs for sidebar */
+  let msgPairs: ConversationPair[] = $state([]);
+  /** All recent inter-agent messages */
+  let allMessages: AgentMessage[] = $state([]);
+  /** Selected conversation pair filter */
+  let selectedPair: string | null = $state(null);
+  /** Filtered messages based on selected pair */
+  let filteredMessages = $derived(
+    selectedPair
+      ? allMessages.filter(m => {
+          const [a, b] = selectedPair!.split("|");
+          return (m.from_agent === a && m.to_agent === b) ||
+                 (m.from_agent === b && m.to_agent === a);
+        })
+      : allMessages,
+  );
+  /** User-inject message form */
+  let injectFrom = $state("");
+  let injectTo = $state("");
+  let injectContent = $state("");
+  /** Available agent names for inject form dropdowns */
+  let agentNames: string[] = $state([]);
+
+  // -- Growth tab state -------------------------------------------------------
+
+  /** Per-agent personality snapshots */
+  let personalities: Map<string, PersonalityTrait[]> = $state(new Map());
+  /** Per-agent learnings */
+  let learnings: Map<string, AgentLearning[]> = $state(new Map());
+  /** Per-agent decision metrics */
+  let decisionMetrics: Array<{
+    agent_name: string;
+    avg_score: number | null;
+    scored_count: number;
+    total_count: number;
+    trend: string;
+  }> = $state([]);
+  /** Selected agent for growth detail */
+  let growthAgent: string | null = $state(null);
+  /** Derived personality traits for selected growth agent */
+  let growthTraits = $derived(growthAgent ? (personalities.get(growthAgent) ?? []) : []);
+  /** Derived learnings for selected growth agent */
+  let growthLearnings = $derived(growthAgent ? (learnings.get(growthAgent) ?? []) : []);
+  /** Derived decision metric for selected growth agent */
+  let growthMetric = $derived(growthAgent ? decisionMetrics.find(m => m.agent_name === growthAgent) ?? null : null);
 
   // -- Load data --------------------------------------------------------------
 
@@ -63,12 +117,76 @@
     const offOoda = on("ooda_status", (msg) => {
       oodaRunning = !!msg.running;
       if (!msg.running) {
-        // Reload after OODA completes to pick up new goals/decisions/strategy
         loadAll();
       }
     });
 
-    return () => { offOoda(); };
+    // Live inter-agent message feed
+    const offMsg = on("agent_message", (msg) => {
+      const entry: AgentMessage = {
+        id: msg.id as number,
+        from_agent: msg.from_agent as string,
+        to_agent: msg.to_agent as string,
+        message_type: msg.message_type as string ?? "info",
+        content: msg.content as string,
+        metadata: null,
+        read_at: null,
+        created_at: msg.created_at as number ?? Math.floor(Date.now() / 1000),
+      };
+      allMessages = [entry, ...allMessages].slice(0, 100);
+    });
+
+    return () => { offOoda(); offMsg(); };
+  });
+
+  /** Load messages tab data */
+  async function loadMessages() {
+    try {
+      const [msgs, pairs, agents] = await Promise.all([
+        fetchAgentMessages(100),
+        fetchAgentConversationPairs(),
+        fetchAgents(),
+      ]);
+      allMessages = msgs;
+      msgPairs = pairs;
+      agentNames = agents.map((a: AgentInfo) => a.name);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  /** Load growth tab data for all agents */
+  async function loadGrowth() {
+    try {
+      const [agents, metrics] = await Promise.all([
+        fetchAgents(),
+        fetchDecisionMetrics(),
+      ]);
+      agentNames = agents.map((a: AgentInfo) => a.name);
+      decisionMetrics = metrics;
+
+      // Load personality + learnings for each agent in parallel
+      const pMap = new Map<string, PersonalityTrait[]>();
+      const lMap = new Map<string, AgentLearning[]>();
+      await Promise.all(agents.map(async (a: AgentInfo) => {
+        const [p, l] = await Promise.all([
+          fetchAgentPersonality(a.name),
+          fetchAgentLearnings(a.name, 10),
+        ]);
+        pMap.set(a.name, p);
+        lMap.set(a.name, l);
+      }));
+      personalities = pMap;
+      learnings = lMap;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Load tab-specific data when tab changes
+  $effect(() => {
+    if (tab === "messages") loadMessages();
+    if (tab === "growth") loadGrowth();
   });
 
   // -- Goal actions -----------------------------------------------------------
@@ -120,6 +238,20 @@
     setTimeout(() => actionMsg = null, 5000);
   }
 
+  /** Send a user-injected message into the agent bus */
+  async function handleInjectMessage() {
+    if (!injectFrom || !injectTo || !injectContent.trim()) return;
+    try {
+      await sendAgentMessage(injectFrom, injectTo, injectContent.trim());
+      actionMsg = `Message sent: ${injectFrom} → ${injectTo}`;
+      injectContent = "";
+      await loadMessages();
+    } catch (e) {
+      error = String(e);
+    }
+    setTimeout(() => actionMsg = null, 3000);
+  }
+
   // -- Helpers ----------------------------------------------------------------
 
   function formatTs(epoch: number): string {
@@ -143,6 +275,11 @@
     if (p <= 6) return "medium";
     if (p <= 8) return "low";
     return "nice-to-have";
+  }
+
+  /** Look up decision metric for a given agent */
+  function getMetric(name: string) {
+    return decisionMetrics.find(m => m.agent_name === name) ?? null;
   }
 
   function scoreBar(score: number | null): string {
@@ -186,6 +323,12 @@
       </button>
       <button class="tab" class:active={tab === "strategy"} onclick={() => tab = "strategy"}>
         Strategy
+      </button>
+      <button class="tab" class:active={tab === "messages"} onclick={() => tab = "messages"}>
+        Messages
+      </button>
+      <button class="tab" class:active={tab === "growth"} onclick={() => tab = "growth"}>
+        Growth
       </button>
     </div>
     <button
@@ -391,6 +534,198 @@
         <pre class="strategy-text">{strategy}</pre>
       {:else}
         <div class="empty">No active strategy. The master controller will evolve one during OODA cycles.</div>
+      {/if}
+    </div>
+
+  {:else if tab === "messages"}
+    <!-- Inter-agent message viewer -->
+    <div class="messages-section">
+      <div class="msg-layout">
+        <!-- Pair sidebar -->
+        <div class="pair-sidebar">
+          <button
+            class="pair-item"
+            class:active={selectedPair === null}
+            onclick={() => selectedPair = null}
+          >
+            <span class="pair-label">All Messages</span>
+            <span class="pair-count">{allMessages.length}</span>
+          </button>
+          {#each msgPairs as pair}
+            {@const key = `${pair.agent1}|${pair.agent2}`}
+            <button
+              class="pair-item"
+              class:active={selectedPair === key}
+              onclick={() => selectedPair = key}
+            >
+              <span class="pair-label">{pair.agent1} / {pair.agent2}</span>
+              <span class="pair-count">{pair.message_count}</span>
+            </button>
+          {/each}
+        </div>
+
+        <!-- Message thread -->
+        <div class="msg-thread">
+          {#if filteredMessages.length === 0}
+            <div class="empty">No inter-agent messages yet. Trigger an OODA cycle to generate activity.</div>
+          {:else}
+            {#each filteredMessages as msg}
+              <div class="agent-msg">
+                <div class="agent-msg-header">
+                  <span class="from-badge">{msg.from_agent}</span>
+                  <span class="arrow-icon">→</span>
+                  <span class="to-badge">{msg.to_agent}</span>
+                  <span class="msg-type-badge">{msg.message_type}</span>
+                  <span class="spacer"></span>
+                  <span class="ts">{formatTs(msg.created_at)}</span>
+                </div>
+                <div class="agent-msg-content">{msg.content}</div>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      </div>
+
+      <!-- Inject message form -->
+      <div class="inject-form">
+        <select class="select" bind:value={injectFrom}>
+          <option value="">From...</option>
+          {#each agentNames as name}
+            <option value={name}>{name}</option>
+          {/each}
+          <option value="user">user</option>
+        </select>
+        <select class="select" bind:value={injectTo}>
+          <option value="">To...</option>
+          {#each agentNames as name}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+        <input
+          class="input"
+          bind:value={injectContent}
+          placeholder="Message content..."
+          style="flex:1"
+        />
+        <button
+          class="submit-btn"
+          onclick={handleInjectMessage}
+          disabled={!injectFrom || !injectTo || !injectContent.trim()}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+
+  {:else if tab === "growth"}
+    <!-- Growth: personality, learnings, decision quality -->
+    <div class="growth-section">
+      <!-- Agent selector row -->
+      <div class="growth-agents">
+        {#each agentNames as name}
+          <button
+            class="growth-agent-btn"
+            class:active={growthAgent === name}
+            onclick={() => growthAgent = growthAgent === name ? null : name}
+          >
+            <span class="agent-name-sm">{name}</span>
+            {#if getMetric(name)}
+              <span class="metric-pill" class:improving={getMetric(name)?.trend === "improving"} class:declining={getMetric(name)?.trend === "declining"}>
+                {getMetric(name)?.avg_score != null ? `${Math.round(getMetric(name)!.avg_score! * 100)}%` : "—"}
+                {#if getMetric(name)?.trend === "improving"}↑{:else if getMetric(name)?.trend === "declining"}↓{/if}
+              </span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+
+      {#if !growthAgent}
+        <!-- Overview: all agents decision metrics -->
+        <div class="metrics-grid">
+          {#each decisionMetrics as m}
+            <div class="metric-card">
+              <div class="metric-name">{m.agent_name}</div>
+              <div class="metric-stats">
+                <span class="metric-score" class:good={m.avg_score != null && m.avg_score >= 0.7} class:mid={m.avg_score != null && m.avg_score >= 0.4 && m.avg_score < 0.7} class:bad={m.avg_score != null && m.avg_score < 0.4}>
+                  {m.avg_score != null ? `${Math.round(m.avg_score * 100)}%` : "—"}
+                </span>
+                <span class="metric-detail">{m.scored_count}/{m.total_count} scored</span>
+                <span class="metric-trend" class:improving={m.trend === "improving"} class:declining={m.trend === "declining"}>
+                  {m.trend}
+                </span>
+              </div>
+            </div>
+          {/each}
+          {#if decisionMetrics.length === 0}
+            <div class="empty">No decision metrics yet. Run OODA cycles to generate data.</div>
+          {/if}
+        </div>
+      {:else}
+        <!-- Agent detail: personality + learnings -->
+        <div class="agent-growth-detail">
+          <!-- Personality traits -->
+          <div class="growth-card">
+            <h4 class="growth-card-title">Personality</h4>
+            {#if growthTraits.length === 0}
+              <div class="empty-sm">No personality traits recorded yet.</div>
+            {:else}
+              <div class="trait-list">
+                {#each growthTraits as t}
+                  <div class="trait-row">
+                    <span class="trait-name">{t.trait_name}</span>
+                    <div class="trait-bar-wrap">
+                      <div class="trait-bar" style="width: {Math.round(t.trait_value * 100)}%"></div>
+                    </div>
+                    <span class="trait-value">{t.trait_value.toFixed(2)}</span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <!-- Learnings -->
+          <div class="growth-card">
+            <h4 class="growth-card-title">Knowledge Base</h4>
+            {#if growthLearnings.length === 0}
+              <div class="empty-sm">No learnings accumulated yet.</div>
+            {:else}
+              <div class="learning-list">
+                {#each growthLearnings as l}
+                  <div class="learning-row">
+                    <span class="learning-cat" class:insight={l.category === "insight"} class:mistake={l.category === "mistake"} class:pattern={l.category === "pattern"} class:preference={l.category === "preference"}>
+                      {l.category}
+                    </span>
+                    <span class="learning-content">{l.content}</span>
+                    <span class="learning-meta">
+                      {(l.confidence * 100).toFixed(0)}%
+                      {#if l.reinforcement_count > 1}
+                        · {l.reinforcement_count}x
+                      {/if}
+                    </span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <!-- Decision quality for this agent -->
+          {#if growthMetric}
+            <div class="growth-card">
+              <h4 class="growth-card-title">Decision Quality</h4>
+              <div class="quality-summary">
+                <span class="quality-score" class:good={growthMetric.avg_score != null && growthMetric.avg_score >= 0.7} class:mid={growthMetric.avg_score != null && growthMetric.avg_score >= 0.4 && growthMetric.avg_score < 0.7} class:bad={growthMetric.avg_score != null && growthMetric.avg_score < 0.4}>
+                  {growthMetric.avg_score != null ? `${Math.round(growthMetric.avg_score * 100)}%` : "—"}
+                </span>
+                <span class="quality-detail">
+                  {growthMetric.scored_count} scored / {growthMetric.total_count} total
+                </span>
+                <span class="quality-trend" class:improving={growthMetric.trend === "improving"} class:declining={growthMetric.trend === "declining"}>
+                  {growthMetric.trend}
+                </span>
+              </div>
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   {/if}
@@ -699,4 +1034,258 @@
     max-height: 24rem;
     overflow-y: auto;
   }
+
+  /* -- Messages ------------------------------------------------------------- */
+  .messages-section { display: flex; flex-direction: column; gap: 0.5rem; }
+  .msg-layout {
+    display: flex;
+    gap: 0.5rem;
+    min-height: 200px;
+    max-height: 400px;
+  }
+  .pair-sidebar {
+    width: 140px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    padding-right: 0.5rem;
+  }
+  .pair-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.3rem 0.4rem;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.65rem;
+    cursor: pointer;
+    text-align: left;
+  }
+  .pair-item:hover { background: var(--bg-hover); }
+  .pair-item.active { background: var(--accent-blue); color: white; }
+  .pair-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pair-count { font-size: 0.55rem; opacity: 0.7; flex-shrink: 0; }
+
+  .msg-thread {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding-right: 0.25rem;
+  }
+  .agent-msg {
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+  }
+  .agent-msg-header {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.65rem;
+    margin-bottom: 0.2rem;
+  }
+  .from-badge {
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    background: rgba(96, 165, 250, 0.2);
+    color: #60a5fa;
+    font-weight: 600;
+    font-size: 0.6rem;
+  }
+  .to-badge {
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
+    font-weight: 600;
+    font-size: 0.6rem;
+  }
+  .arrow-icon { color: var(--text-muted); font-size: 0.6rem; }
+  .msg-type-badge {
+    font-size: 0.55rem;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: rgba(156, 163, 175, 0.15);
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .agent-msg-content {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .inject-form {
+    display: flex;
+    gap: 0.25rem;
+    align-items: center;
+    padding-top: 0.25rem;
+    border-top: 1px solid var(--border);
+  }
+  .inject-form .select { font-size: 0.65rem; min-width: 0; max-width: 100px; }
+  .inject-form .input { font-size: 0.65rem; }
+  .inject-form .submit-btn { font-size: 0.65rem; padding: 0.3rem 0.5rem; flex-shrink: 0; }
+
+  /* -- Growth --------------------------------------------------------------- */
+  .growth-section { display: flex; flex-direction: column; gap: 0.75rem; }
+  .growth-agents {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+  .growth-agent-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .growth-agent-btn:hover { background: var(--bg-hover); }
+  .growth-agent-btn.active {
+    background: rgba(168, 85, 247, 0.15);
+    border-color: rgba(168, 85, 247, 0.4);
+    color: #c084fc;
+  }
+  .agent-name-sm { font-weight: 600; }
+  .metric-pill {
+    font-size: 0.6rem;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: rgba(156, 163, 175, 0.15);
+    color: var(--text-muted);
+  }
+  .metric-pill.improving { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+  .metric-pill.declining { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.5rem;
+  }
+  .metric-card {
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+  }
+  .metric-name { font-size: 0.75rem; font-weight: 600; color: var(--text-primary); margin-bottom: 0.3rem; }
+  .metric-stats { display: flex; align-items: center; gap: 0.4rem; font-size: 0.7rem; }
+  .metric-score { font-weight: 700; font-size: 0.85rem; }
+  .metric-score.good { color: #4ade80; }
+  .metric-score.mid { color: #eab308; }
+  .metric-score.bad { color: #f87171; }
+  .metric-detail { color: var(--text-muted); font-size: 0.6rem; }
+  .metric-trend {
+    font-size: 0.6rem;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: rgba(156, 163, 175, 0.15);
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .metric-trend.improving { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+  .metric-trend.declining { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+  .agent-growth-detail { display: flex; flex-direction: column; gap: 0.5rem; }
+  .growth-card {
+    padding: 0.5rem 0.625rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+  }
+  .growth-card-title {
+    margin: 0 0 0.4rem;
+    font-size: 0.75rem;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .empty-sm { color: var(--text-muted); font-size: 0.7rem; padding: 0.5rem 0; }
+
+  /* Personality trait bars */
+  .trait-list { display: flex; flex-direction: column; gap: 0.3rem; }
+  .trait-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.7rem; }
+  .trait-name { width: 100px; color: var(--text-secondary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; flex-shrink: 0; }
+  .trait-bar-wrap {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .trait-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #6c3fa0, #a855f7);
+    border-radius: 3px;
+  }
+  .trait-value { font-family: monospace; font-size: 0.6rem; color: var(--text-muted); width: 2rem; text-align: right; flex-shrink: 0; }
+
+  /* Learnings */
+  .learning-list { display: flex; flex-direction: column; gap: 0.3rem; }
+  .learning-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    font-size: 0.7rem;
+    padding: 0.2rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .learning-row:last-child { border-bottom: none; }
+  .learning-cat {
+    font-size: 0.55rem;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .learning-cat.insight { background: rgba(96, 165, 250, 0.2); color: #60a5fa; }
+  .learning-cat.mistake { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+  .learning-cat.pattern { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+  .learning-cat.preference { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+  .learning-content { flex: 1; color: var(--text-secondary); line-height: 1.3; }
+  .learning-meta {
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    font-family: monospace;
+    flex-shrink: 0;
+  }
+
+  /* Decision quality in growth detail */
+  .quality-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+  }
+  .quality-score { font-weight: 700; font-size: 1rem; }
+  .quality-score.good { color: #4ade80; }
+  .quality-score.mid { color: #eab308; }
+  .quality-score.bad { color: #f87171; }
+  .quality-detail { color: var(--text-muted); font-size: 0.7rem; }
+  .quality-trend {
+    font-size: 0.6rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-weight: 600;
+    background: rgba(156, 163, 175, 0.15);
+    color: var(--text-muted);
+  }
+  .quality-trend.improving { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+  .quality-trend.declining { background: rgba(239, 68, 68, 0.15); color: #f87171; }
 </style>

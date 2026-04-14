@@ -39,6 +39,21 @@ export interface DecisionQualityTrend {
   trend: "improving" | "declining" | "stable" | "insufficient_data";
 }
 
+/** Agent personality trait for prompt injection */
+export interface PersonalityTraitSnapshot {
+  trait_name: string;
+  trait_value: number;
+  evidence: string | null;
+}
+
+/** Agent learning entry for prompt injection */
+export interface LearningEntry {
+  category: string;
+  content: string;
+  confidence: number;
+  reinforcement_count: number;
+}
+
 /** Full OODA context assembled for the master controller */
 export interface OodaContext {
   observations: SystemObservation;
@@ -48,6 +63,12 @@ export interface OodaContext {
   inbox: Record<string, unknown>[];
   strategy: string | null;
   userProfile: ProfileSnapshot;
+  /** Master controller's personality traits */
+  personality: PersonalityTraitSnapshot[];
+  /** Master controller's accumulated learnings */
+  agentLearnings: LearningEntry[];
+  /** High-confidence insights from other agents */
+  sharedInsights: Array<{ agent_name: string; content: string; confidence: number }>;
 }
 
 /** Parsed action from master controller response */
@@ -106,7 +127,25 @@ export function buildOodaContext(
   // User profile
   const userProfile = buildProfileSnapshot(db);
 
-  return { observations, goals, decisionHistory, decisionTrend, inbox, strategy, userProfile };
+  // Personality + learnings for master controller
+  const personality = (db.getPersonalitySnapshot("master-controller") ?? []).map((t: Record<string, unknown>) => ({
+    trait_name: t.trait_name as string,
+    trait_value: t.trait_value as number,
+    evidence: t.evidence as string | null,
+  }));
+  const agentLearnings = (db.getAgentLearnings("master-controller", 10) ?? []).map((l: Record<string, unknown>) => ({
+    category: l.category as string,
+    content: l.content as string,
+    confidence: l.confidence as number,
+    reinforcement_count: l.reinforcement_count as number,
+  }));
+  const sharedInsights = (db.getSharedInsights("master-controller", 0.7, 5) ?? []).map((s: Record<string, unknown>) => ({
+    agent_name: s.agent_name as string,
+    content: s.content as string,
+    confidence: s.confidence as number,
+  }));
+
+  return { observations, goals, decisionHistory, decisionTrend, inbox, strategy, userProfile, personality, agentLearnings, sharedInsights };
 }
 
 /** Build cost observation from recent data */
@@ -213,6 +252,36 @@ export function buildOodaPrompt(ctx: OodaContext): string {
       ctx.decisionTrend.trend === "declining" ? " ↓" : "";
     sections.push(`\n## Decision Quality\n`);
     sections.push(`**Average**: ${ctx.decisionTrend.avg_score?.toFixed(2) ?? "n/a"} (${ctx.decisionTrend.scored_count} scored / ${ctx.decisionTrend.total_count} total) | **Trend**: ${ctx.decisionTrend.trend}${trendArrow}`);
+  }
+
+  // 3c. Your personality
+  if (ctx.personality.length > 0) {
+    sections.push(`\n## Your Personality\n`);
+    for (const t of ctx.personality) {
+      sections.push(`- **${t.trait_name}**: ${t.trait_value.toFixed(2)}${t.evidence ? ` (${t.evidence})` : ""}`);
+    }
+  }
+
+  // 3d. Your knowledge base
+  if (ctx.agentLearnings.length > 0) {
+    const catCounts = new Map<string, number>();
+    for (const l of ctx.agentLearnings) {
+      catCounts.set(l.category, (catCounts.get(l.category) ?? 0) + 1);
+    }
+    const catSummary = Array.from(catCounts.entries()).map(([k, v]) => `${v} ${k}s`).join(", ");
+    sections.push(`\n## Your Knowledge Base (${ctx.agentLearnings.length} learnings: ${catSummary})\n`);
+    for (const l of ctx.agentLearnings) {
+      const reinforced = l.reinforcement_count > 1 ? `, reinforced ${l.reinforcement_count}x` : "";
+      sections.push(`- [${l.category}] ${l.content} (confidence: ${l.confidence.toFixed(2)}${reinforced})`);
+    }
+  }
+
+  // 3e. Cross-agent insights
+  if (ctx.sharedInsights.length > 0) {
+    sections.push(`\n## Insights from Other Agents\n`);
+    for (const s of ctx.sharedInsights) {
+      sections.push(`- [${s.agent_name}] ${s.content} (${s.confidence.toFixed(2)})`);
+    }
   }
 
   // 4. Inbox

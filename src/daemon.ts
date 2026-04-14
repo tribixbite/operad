@@ -2556,6 +2556,31 @@ export class Daemon {
         ws.send(JSON.stringify({ type: "switchboard_update", ...updated }));
         break;
       }
+      case "agent_chat": {
+        // Persistent conversation with a specific agent
+        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
+        const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
+        if (!agentName || !prompt) {
+          ws.send(JSON.stringify({ type: "error", message: "agentName and prompt required" }));
+          break;
+        }
+        this.handleAgentChat(agentName, prompt, ws).catch((err) => {
+          ws.send(JSON.stringify({ type: "agent_chat_error", agentName, message: String(err) }));
+        });
+        break;
+      }
+      case "agent_chat_history": {
+        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
+        const history = this.memoryDb?.getConversationHistory(agentName, 50) ?? [];
+        ws.send(JSON.stringify({ type: "agent_chat_history", agentName, messages: history }));
+        break;
+      }
+      case "agent_chat_clear": {
+        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
+        const cleared = this.memoryDb?.clearConversation(agentName) ?? 0;
+        ws.send(JSON.stringify({ type: "agent_chat_cleared", agentName, cleared }));
+        break;
+      }
       default:
         // subscribe/unsubscribe/ping handled by http.ts directly
         break;
@@ -2673,6 +2698,9 @@ export class Daemon {
         });
       }
 
+      // Extract learnings and personality updates from response
+      this.extractAgentActions(agentName, result.responseText);
+
       this.log.info(`Agent run completed: ${agentName} cost=$${result.costUsd.toFixed(4)}`);
       this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
       return { ok: true, runId, ...result };
@@ -2699,6 +2727,32 @@ export class Daemon {
     const now = new Date();
     parts.push(`## Current Time\n${now.toISOString()} (${now.toLocaleString()})`);
 
+    // Personality snapshot — who you are
+    const personality = this.memoryDb.getPersonalitySnapshot(agentName);
+    if (personality.length > 0) {
+      parts.push("## Your Personality Profile");
+      for (const t of personality) {
+        parts.push(`- ${t.trait_name}: ${t.trait_value.toFixed(2)}${t.evidence ? ` — ${t.evidence}` : ""}`);
+      }
+    }
+
+    // Accumulated learnings — what you know
+    const learnings = this.memoryDb.getAgentLearnings(agentName, 10);
+    if (learnings.length > 0) {
+      parts.push("## Your Accumulated Knowledge");
+      for (const l of learnings) {
+        const conf = (l.confidence as number).toFixed(2);
+        const reinforced = (l.reinforcement_count as number) > 1 ? ` (reinforced ${l.reinforcement_count}x)` : "";
+        parts.push(`- [${l.category}] ${l.content} (confidence: ${conf}${reinforced})`);
+      }
+    }
+
+    // Active strategy
+    const strategy = this.memoryDb.getActiveStrategy(agentName);
+    if (strategy) {
+      parts.push(`## Your Current Strategy (v${strategy.version})\n${strategy.strategy_text}`);
+    }
+
     // Recent scored decisions — self-reflection on past performance
     const decisions = this.memoryDb.getRecentDecisions(5, agentName);
     const scored = decisions.filter((d) => d.score != null);
@@ -2717,7 +2771,134 @@ export class Daemon {
       parts.push(`\n**Decision trend**: ${trend.trend}${arrow} (avg ${trend.avg_score?.toFixed(2)})`);
     }
 
+    // Cross-agent insights — wisdom from other agents
+    const shared = this.memoryDb.getSharedInsights(agentName, 0.7, 5);
+    if (shared.length > 0) {
+      parts.push("## Insights from Other Agents");
+      for (const s of shared) {
+        parts.push(`- [${s.agent_name}] ${s.content} (confidence: ${(s.confidence as number).toFixed(2)})`);
+      }
+    }
+
     return parts.join("\n");
+  }
+
+  /**
+   * Handle a persistent chat conversation with a specific agent.
+   * Replays conversation history for multi-turn context.
+   */
+  private async handleAgentChat(agentName: string, userPrompt: string, ws: import("ws").WebSocket): Promise<void> {
+    if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
+    if (!this.memoryDb) throw new Error("Memory DB not initialized");
+    if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) throw new Error("SDK bridge busy — try again shortly");
+
+    const agent = this.agentConfigs.find((a) => a.name === agentName);
+    if (!agent) throw new Error(`Agent not found: ${agentName}`);
+
+    // Save user message to conversation history
+    this.memoryDb.appendConversation(agentName, "user", userPrompt);
+
+    // Build the full prompt with context
+    const agentContext = this.buildAgentContext(agentName);
+    const history = this.memoryDb.getConversationHistory(agentName, 20);
+
+    // Replay conversation history for multi-turn context
+    const historyText = history.slice(0, -1).map((m) => { // exclude the message we just appended
+      const role = (m.role as string).toUpperCase();
+      return `[${role}]: ${m.content}`;
+    }).join("\n\n");
+
+    const promptParts: string[] = [agent.prompt];
+    if (agentContext) promptParts.push(agentContext);
+    if (historyText) promptParts.push(`## Conversation History\n${historyText}`);
+
+    // Self-improvement instructions
+    promptParts.push(`## Self-Improvement
+You accumulate knowledge across conversations. Use these blocks to record what you learn:
+
+\`\`\`learning
+category: insight|mistake|pattern|preference
+content: what you learned
+confidence: 0.0-1.0
+\`\`\`
+
+\`\`\`personality
+trait: trait_name (e.g., risk_tolerance, verbosity, creativity, thoroughness)
+value: 0.0-1.0
+evidence: why you're setting this value
+\`\`\``);
+
+    promptParts.push(`## Current Message\n${userPrompt}`);
+
+    const fullPrompt = promptParts.join("\n\n---\n\n");
+
+    // Resolve cwd and run
+    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
+    const sdkDef = toSdkAgentMap([agent])[agentName];
+    const runId = this.memoryDb.startAgentRun(agentName, "chat", "manual");
+
+    ws.send(JSON.stringify({ type: "agent_chat_start", agentName }));
+    this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "running" });
+
+    try {
+      const result = await this.sdkBridge.runStandaloneAgent(
+        agentName, sdkDef, cwd, fullPrompt, agent.max_budget_usd,
+      );
+
+      // Save assistant response
+      this.memoryDb.appendConversation(agentName, "assistant", result.responseText, {
+        sessionId: result.sessionId,
+        costUsd: result.costUsd,
+        tokensIn: result.inputTokens,
+        tokensOut: result.outputTokens,
+      });
+
+      // Extract learnings and personality updates from response
+      this.extractAgentActions(agentName, result.responseText);
+
+      // Complete run tracking
+      this.memoryDb.completeAgentRun(runId, "completed", {
+        sessionId: result.sessionId,
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        turns: result.turns,
+      });
+
+      ws.send(JSON.stringify({
+        type: "agent_chat_result",
+        agentName,
+        content: result.responseText,
+        cost: result.costUsd,
+        tokens: { input: result.inputTokens, output: result.outputTokens },
+      }));
+      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
+
+    } catch (err) {
+      this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
+      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "failed", error: String(err) });
+      throw err;
+    }
+  }
+
+  /**
+   * Extract learning and personality action blocks from agent response text.
+   * Used after agent chat responses and standalone runs.
+   */
+  private extractAgentActions(agentName: string, responseText: string): void {
+    if (!this.memoryDb || !responseText) return;
+    const actions = parseOodaResponse(responseText);
+    for (const action of actions) {
+      if (action.type === "learning") {
+        this.memoryDb.addLearning(agentName, action.category, action.content, {
+          confidence: action.confidence,
+        });
+        this.log.info(`Agent ${agentName} learned: [${action.category}] ${action.content.slice(0, 60)}`);
+      } else if (action.type === "personality") {
+        this.memoryDb.setPersonalityTrait(agentName, action.trait, action.value, action.evidence);
+        this.log.info(`Agent ${agentName} personality: ${action.trait}=${action.value}`);
+      }
+    }
   }
 
   /**
@@ -2849,16 +3030,35 @@ export class Daemon {
             this.log.info(`OODA: recorded decision "${action.action}"`);
             break;
 
-          case "message":
-            this.memoryDb.sendAgentMessage("master-controller", action.to, action.content, {
+          case "message": {
+            const msgId = this.memoryDb.sendAgentMessage("master-controller", action.to, action.content, {
               messageType: action.messageType,
+            });
+            // Broadcast to dashboard for real-time message viewer
+            this.broadcastSwitchboard("agent_message", {
+              id: msgId, from_agent: "master-controller", to_agent: action.to,
+              message_type: action.messageType, content: action.content,
+              created_at: Math.floor(Date.now() / 1000),
             });
             this.log.info(`OODA: sent message to ${action.to}`);
             break;
+          }
 
           case "strategy":
             this.memoryDb.evolveStrategy("master-controller", action.text, action.rationale);
             this.log.info(`OODA: evolved strategy`);
+            break;
+
+          case "learning":
+            this.memoryDb.addLearning("master-controller", action.category, action.content, {
+              confidence: action.confidence,
+            });
+            this.log.info(`OODA: learned [${action.category}] ${action.content.slice(0, 60)}`);
+            break;
+
+          case "personality":
+            this.memoryDb.setPersonalityTrait("master-controller", action.trait, action.value, action.evidence);
+            this.log.info(`OODA: personality ${action.trait}=${action.value}`);
             break;
 
           case "schedule": {
@@ -4282,8 +4482,8 @@ export class Daemon {
             }
           }
 
-          if (subCmd && method === "GET") {
-            // GET /api/agents/:name — get single agent
+          if (subCmd && !arg && method === "GET") {
+            // GET /api/agents/:name — get single agent (no sub-route)
             const agent = this.agentConfigs.find((a) => a.name === subCmd);
             if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
             return { status: 200, data: agent };
@@ -4308,7 +4508,7 @@ export class Daemon {
             }
           }
 
-          if (subCmd && method === "DELETE") {
+          if (subCmd && !arg && method === "DELETE") {
             // DELETE /api/agents/:name — delete user-level agent (403 for builtins)
             const agent = this.agentConfigs.find((a) => a.name === subCmd);
             if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
@@ -4348,7 +4548,94 @@ export class Daemon {
             }
           }
 
+          if (subCmd && arg === "learnings" && method === "GET") {
+            // GET /api/agents/:name/learnings — accumulated knowledge
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const category = queryParams.get("category") ?? undefined;
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            return { status: 200, data: this.memoryDb.getAgentLearnings(subCmd, limit, category) };
+          }
+
+          if (subCmd && arg === "personality" && method === "GET") {
+            // GET /api/agents/:name/personality — current personality snapshot
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const traitName = segments[3] ? decodeURIComponent(segments[3]) : undefined;
+            if (traitName === "history") {
+              // GET /api/agents/:name/personality/history?trait=X
+              const trait = queryParams.get("trait") ?? "";
+              return { status: 200, data: this.memoryDb.getPersonalityHistory(subCmd, trait) };
+            }
+            if (traitName === "drift") {
+              return { status: 200, data: this.memoryDb.getPersonalityDrift(subCmd) };
+            }
+            return { status: 200, data: this.memoryDb.getPersonalitySnapshot(subCmd) };
+          }
+
           return { status: 400, data: { error: `Unknown agents endpoint: ${subCmd ?? "(root)"}` } };
+        }
+
+        // -- Agent chat endpoints ---------------------------------------------------
+        case "agent-chat": {
+          const agentName = name ? decodeURIComponent(name) : undefined;
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+
+          if (agentName && method === "GET") {
+            // GET /api/agent-chat/:agentName — conversation history
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            return { status: 200, data: this.memoryDb.getConversationHistory(agentName, limit) };
+          }
+          if (agentName && method === "DELETE") {
+            // DELETE /api/agent-chat/:agentName — clear conversation
+            const cleared = this.memoryDb.clearConversation(agentName);
+            return { status: 200, data: { ok: true, cleared } };
+          }
+          return { status: 400, data: { error: "Use WS agent_chat for sending messages" } };
+        }
+
+        // -- Agent messages endpoints -----------------------------------------------
+        case "agent-messages": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+
+          if (!name && method === "GET") {
+            // GET /api/agent-messages — recent messages
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            return { status: 200, data: this.memoryDb.getRecentAgentMessages(limit) };
+          }
+
+          if (name && segments[1] && method === "GET") {
+            // GET /api/agent-messages/:agent1/:agent2 — conversation between two
+            const agent1 = decodeURIComponent(name);
+            const agent2 = decodeURIComponent(segments[1]);
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            return { status: 200, data: this.memoryDb.getConversation(agent1, agent2, limit) };
+          }
+
+          if (!name && method === "POST") {
+            // POST /api/agent-messages — user sends a message into the bus
+            try {
+              const parsed = JSON.parse(body) as { from: string; to: string; content: string; type?: string };
+              if (!parsed.from || !parsed.to || !parsed.content) {
+                return { status: 400, data: { error: "from, to, and content required" } };
+              }
+              const msgId = this.memoryDb.sendAgentMessage(parsed.from, parsed.to, parsed.content, {
+                messageType: parsed.type,
+              });
+              this.broadcastSwitchboard("agent_message", {
+                id: msgId, from_agent: parsed.from, to_agent: parsed.to,
+                message_type: parsed.type ?? "info", content: parsed.content,
+                created_at: Math.floor(Date.now() / 1000),
+              });
+              return { status: 200, data: { ok: true, id: msgId } };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+
+          if (name === "pairs" && method === "GET") {
+            return { status: 200, data: this.memoryDb.getAgentConversationPairs() };
+          }
+
+          return { status: 400, data: { error: "Unknown agent-messages endpoint" } };
         }
 
         // -- Cognitive endpoints ----------------------------------------------------
@@ -4427,6 +4714,11 @@ export class Daemon {
             // GET /api/cognitive/messages?agent=... — unread messages
             const agentFilter = queryParams.get("agent") ?? "master-controller";
             return { status: 200, data: this.memoryDb.getUnreadMessages(agentFilter) };
+          }
+
+          if (subCmd === "metrics" && method === "GET") {
+            // GET /api/cognitive/metrics — per-agent decision quality metrics
+            return { status: 200, data: this.memoryDb.getDecisionMetrics() };
           }
 
           return { status: 400, data: { error: `Unknown cognitive endpoint: ${subCmd ?? "(root)"}` } };

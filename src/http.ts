@@ -41,7 +41,7 @@ export type WsMessageHandler = (
 
 /** Client -> Server WS message types */
 export interface WsClientMessage {
-  type: "subscribe" | "unsubscribe" | "ping" | "prompt" | "permission_response" | "abort" | "attach" | "detach" | "agent_run" | "switchboard_get" | "switchboard_update";
+  type: "subscribe" | "unsubscribe" | "ping" | "prompt" | "permission_response" | "abort" | "attach" | "detach" | "agent_run" | "switchboard_get" | "switchboard_update" | "agent_chat" | "agent_chat_history" | "agent_chat_clear";
   sessionName?: string;
   [key: string]: unknown;
 }
