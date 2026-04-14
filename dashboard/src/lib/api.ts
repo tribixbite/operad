@@ -314,6 +314,12 @@ export async function toggleAutoStop(pkg: string): Promise<{ pkg: string; autost
   return checkedJson(res);
 }
 
+/** Fetch list of all auto-stop flagged packages */
+export async function fetchAutoStopList(): Promise<{ packages: string[] }> {
+  const res = await fetch("/api/autostop");
+  return checkedJson(res);
+}
+
 /** Fetch ADB device list */
 export async function fetchAdbDevices(): Promise<import("./types").AdbDevice[]> {
   try {
