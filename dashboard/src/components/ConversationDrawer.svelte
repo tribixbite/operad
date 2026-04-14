@@ -3,7 +3,7 @@
   import PermissionModal from "./PermissionModal.svelte";
   import type { SdkPermissionRequest, SdkAssistantMessage, SdkResultMessage } from "../lib/types";
   import { connect, subscribe, unsubscribe, send, on, wsState } from "../lib/ws.svelte";
-  import { sdkAttach, sdkDetach, sdkInterrupt } from "../lib/api";
+  import { sdkAttach, sdkDetach, sdkInterrupt, fetchConversation } from "../lib/api";
   import { store } from "../lib/store.svelte";
 
   interface Props {
@@ -62,6 +62,23 @@
 
     liveError = null;
     streamText = "";
+
+    // Load existing conversation history into live messages
+    try {
+      const page = await fetchConversation(sessionName, { limit: 50 });
+      if (page.entries.length > 0) {
+        liveMessages = page.entries.map(e => ({
+          role: e.type === "user" ? "user" : e.type === "assistant" ? "assistant" : "system",
+          content: e.type === "assistant" && e.blocks?.length
+            ? e.blocks
+                .filter(b => b.type === "text")
+                .map(b => b.text)
+                .join("\n")
+            : e.content ?? "",
+          timestamp: new Date(e.timestamp).getTime(),
+        })).filter(m => m.content);
+      }
+    } catch { /* proceed without history */ }
 
     // Connect WS if not already connected
     if (wsState.status !== "connected") {
