@@ -175,9 +175,11 @@
     </td>
     <td class="td-actions" onclick={(e) => e.stopPropagation()}>
       {#if session.type === "claude"}
+        <!-- TODO: LIVE badge — hidden until SDK bridge is functional
         {#if sdkStatus?.attached && sdkStatus.sessionName === session.name}
           <span class="live-badge" title="SDK stream active"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg></span>
         {/if}
+        -->
         <button class="btn-icon chat" onclick={(e) => openDrawer(e, session.name)} title="Conversation"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3H14V11H9L6 14V11H2Z"/></svg></button>
       {/if}
       {#if session.status === "running" || session.status === "degraded"}
