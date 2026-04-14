@@ -483,6 +483,12 @@ export async function fetchPrompts(opts?: {
   return checkedJson(res);
 }
 
+/** Fetch all unique project paths from prompt history */
+export async function fetchPromptProjects(): Promise<string[]> {
+  const res = await fetch("/api/prompts/projects");
+  return checkedJson(res);
+}
+
 /** Star a prompt */
 export async function starPrompt(id: string): Promise<void> {
   await checkedPost(`/api/prompts/${encodeURIComponent(id)}/star`);

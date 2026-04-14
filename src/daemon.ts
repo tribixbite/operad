@@ -47,6 +47,7 @@ import {
   searchPrompts,
   starPrompt,
   unstarPrompt,
+  getPromptProjects,
 } from "./prompts.js";
 import {
   appendNotification,
@@ -3493,6 +3494,10 @@ export class Daemon {
           // POST /api/prompts/:id/star — star a prompt
           // DELETE /api/prompts/:id/star — unstar a prompt
           const promptAction = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          // GET /api/prompts/projects — unique project paths for filter dropdown
+          if (name === "projects" && method === "GET") {
+            return { status: 200, data: getPromptProjects() };
+          }
           if (promptAction === "star" && name) {
             if (method === "POST") {
               starPrompt(name);

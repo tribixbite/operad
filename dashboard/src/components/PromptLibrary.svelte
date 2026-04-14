@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fetchPrompts, starPrompt, unstarPrompt } from "../lib/api";
+  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt } from "../lib/api";
   import type { PromptSearchResult, PromptEntry } from "../lib/types";
 
   interface Props {
@@ -32,19 +32,8 @@
 
   const PAGE_SIZE = 20;
 
-  /** Unique project basenames extracted from loaded prompts */
-  const projectOptions = $derived.by(() => {
-    const seen = new Set<string>();
-    const list: string[] = [];
-    for (const p of prompts) {
-      const base = projectBasename(p.project);
-      if (base && !seen.has(base)) {
-        seen.add(base);
-        list.push(base);
-      }
-    }
-    return list.sort();
-  });
+  /** All unique projects from prompt history (loaded once from API) */
+  let projectOptions = $state<Array<{ path: string; name: string }>>([]);
 
   const hasMore = $derived(offset + PAGE_SIZE < total);
 
@@ -73,6 +62,18 @@
     // Reset offset and reload
     offset = 0;
     loadPrompts(0, _q, _starred, _proj || _filterProj || "");
+  });
+
+  // Load all project names once for the filter dropdown
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    fetchPromptProjects().then((paths) => {
+      projectOptions = paths
+        .filter(Boolean)
+        .map((p) => ({ path: p, name: projectBasename(p) }))
+        .filter((p) => p.name)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }).catch(() => { /* non-critical */ });
   });
 
   async function loadPrompts(
@@ -185,7 +186,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const tag = selectedProject || (filterProject ? projectBasename(filterProject) : "all");
+      const tag = projectBasename(selectedProject || filterProject || "") || "all";
       a.download = `prompts-${tag}${showStarred ? "-starred" : ""}${debouncedQuery ? `-${debouncedQuery.slice(0, 20)}` : ""}.txt`;
       a.click();
       URL.revokeObjectURL(url);
@@ -265,8 +266,8 @@
         bind:value={selectedProject}
       >
         <option value="">All projects</option>
-        {#each projectOptions as proj (proj)}
-          <option value={proj}>{proj}</option>
+        {#each projectOptions as proj (proj.path)}
+          <option value={proj.path}>{proj.name}</option>
         {/each}
       </select>
     {/if}
