@@ -31,11 +31,20 @@ export interface ProfileSnapshot {
   chat_export_count: number;
 }
 
+/** Decision quality trend analysis */
+export interface DecisionQualityTrend {
+  avg_score: number | null;
+  scored_count: number;
+  total_count: number;
+  trend: "improving" | "declining" | "stable" | "insufficient_data";
+}
+
 /** Full OODA context assembled for the master controller */
 export interface OodaContext {
   observations: SystemObservation;
   goals: Record<string, unknown>[];
   decisionHistory: Record<string, unknown>[];
+  decisionTrend: DecisionQualityTrend;
   inbox: Record<string, unknown>[];
   strategy: string | null;
   userProfile: ProfileSnapshot;
@@ -47,7 +56,9 @@ export type OodaAction =
   | { type: "decision"; action: string; rationale: string; alternatives?: string; expectedOutcome?: string; goalId?: number }
   | { type: "message"; to: string; messageType: string; content: string }
   | { type: "strategy"; text: string; rationale: string }
-  | { type: "schedule"; delayMinutes: number; trigger: string; reason: string };
+  | { type: "schedule"; delayMinutes: number; trigger: string; reason: string }
+  | { type: "learning"; content: string; category: string; confidence?: number }
+  | { type: "personality"; trait: string; value: number; evidence: string };
 
 // -- Context assembly ---------------------------------------------------------
 
@@ -87,6 +98,7 @@ export function buildOodaContext(
   // Orient: goals, decisions, inbox, strategy
   const goals = db.getGoalTree();
   const decisionHistory = db.getRecentDecisions(10, "master-controller");
+  const decisionTrend = db.getDecisionQualityTrend("master-controller");
   const inbox = db.getUnreadMessages("master-controller");
   const strategyRecord = db.getActiveStrategy("master-controller");
   const strategy = strategyRecord?.strategy_text as string | null ?? null;
@@ -94,7 +106,7 @@ export function buildOodaContext(
   // User profile
   const userProfile = buildProfileSnapshot(db);
 
-  return { observations, goals, decisionHistory, inbox, strategy, userProfile };
+  return { observations, goals, decisionHistory, decisionTrend, inbox, strategy, userProfile };
 }
 
 /** Build cost observation from recent data */
@@ -142,8 +154,17 @@ function buildProfileSnapshot(db: MemoryDb): ProfileSnapshot {
 export function buildOodaPrompt(ctx: OodaContext): string {
   const sections: string[] = [];
 
+  // 0. Current time — agents must know when they are
+  const now = new Date();
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const weekNumber = getISOWeekNumber(now);
+  sections.push("## Current Time\n");
+  sections.push(`**UTC**: ${now.toISOString()}`);
+  sections.push(`**Local**: ${now.toLocaleString()}`);
+  sections.push(`**Day**: ${dayNames[now.getDay()]} | **Week**: ${weekNumber}`);
+
   // 1. System state
-  sections.push("## System State\n");
+  sections.push("\n## System State\n");
   sections.push(`**Sessions** (${ctx.observations.sessions.length} total):`);
   for (const s of ctx.observations.sessions) {
     const mem = s.rss_mb != null ? ` | ${s.rss_mb}MB` : "";
@@ -184,6 +205,14 @@ export function buildOodaPrompt(ctx: OodaContext): string {
       const outcome = d.actual_outcome ? ` | outcome: ${d.actual_outcome}` : "";
       sections.push(`- **${d.action}**: ${d.rationale}${outcome}${score}`);
     }
+  }
+
+  // 3b. Decision quality trend
+  if (ctx.decisionTrend.trend !== "insufficient_data") {
+    const trendArrow = ctx.decisionTrend.trend === "improving" ? " ↑" :
+      ctx.decisionTrend.trend === "declining" ? " ↓" : "";
+    sections.push(`\n## Decision Quality\n`);
+    sections.push(`**Average**: ${ctx.decisionTrend.avg_score?.toFixed(2) ?? "n/a"} (${ctx.decisionTrend.scored_count} scored / ${ctx.decisionTrend.total_count} total) | **Trend**: ${ctx.decisionTrend.trend}${trendArrow}`);
   }
 
   // 4. Inbox
@@ -240,6 +269,8 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   sections.push("- `message` — Send message to another agent");
   sections.push("- `strategy` — Evolve your strategy");
   sections.push("- `schedule` — Schedule your next run");
+  sections.push("- `learning` — Record something you've learned (persists across runs)");
+  sections.push("- `personality` — Update a personality trait based on evidence");
 
   return sections.join("\n");
 }
@@ -254,7 +285,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
   const actions: OodaAction[] = [];
 
   // Match fenced code blocks: ```type\n...\n```
-  const blockPattern = /```(goal|decision|message|strategy|schedule)\s*\n([\s\S]*?)```/g;
+  const blockPattern = /```(goal|decision|message|strategy|schedule|learning|personality)\s*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
 
   while ((match = blockPattern.exec(text)) !== null) {
@@ -318,6 +349,28 @@ export function parseOodaResponse(text: string): OodaAction[] {
           });
         }
         break;
+
+      case "learning":
+        if (fields.content && fields.category) {
+          actions.push({
+            type: "learning",
+            content: fields.content,
+            category: fields.category,
+            confidence: fields.confidence ? parseFloat(fields.confidence) : undefined,
+          });
+        }
+        break;
+
+      case "personality":
+        if (fields.trait && fields.value && fields.evidence) {
+          actions.push({
+            type: "personality",
+            trait: fields.trait,
+            value: parseFloat(fields.value),
+            evidence: fields.evidence,
+          });
+        }
+        break;
     }
   }
 
@@ -354,4 +407,13 @@ function parseBlockFields(body: string): Record<string, string> {
   }
 
   return fields;
+}
+
+/** ISO 8601 week number */
+function getISOWeekNumber(date: Date): number {
+  const d = new Date(date.getTime());
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+  const week1 = new Date(d.getFullYear(), 0, 4);
+  return 1 + Math.round(((d.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7);
 }

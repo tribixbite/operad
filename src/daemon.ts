@@ -2648,6 +2648,10 @@ export class Daemon {
     const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
     const sdkDef = toSdkAgentMap([agent])[agentName];
 
+    // Inject agent context: datetime, past decisions, learnings, personality
+    const contextPrefix = this.buildAgentContext(agentName);
+    const enrichedPrompt = contextPrefix ? `${contextPrefix}\n\n---\n\n${prompt}` : prompt;
+
     // Track the run in DB
     const runId = this.memoryDb?.startAgentRun(agentName, "standalone", "standalone") ?? 0;
 
@@ -2656,7 +2660,7 @@ export class Daemon {
 
     try {
       const result = await this.sdkBridge.runStandaloneAgent(
-        agentName, sdkDef, cwd, prompt, agent.max_budget_usd,
+        agentName, sdkDef, cwd, enrichedPrompt, agent.max_budget_usd,
       );
 
       if (this.memoryDb && runId > 0) {
@@ -2680,6 +2684,40 @@ export class Daemon {
       this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "failed", error: String(err) });
       throw err;
     }
+  }
+
+  /**
+   * Build rich context for any agent run: datetime, past decisions, learnings, personality.
+   * Prepended to agent prompts for contextual awareness and self-reflection.
+   */
+  private buildAgentContext(agentName: string): string {
+    if (!this.memoryDb) return "";
+
+    const parts: string[] = [];
+
+    // Current datetime
+    const now = new Date();
+    parts.push(`## Current Time\n${now.toISOString()} (${now.toLocaleString()})`);
+
+    // Recent scored decisions — self-reflection on past performance
+    const decisions = this.memoryDb.getRecentDecisions(5, agentName);
+    const scored = decisions.filter((d) => d.score != null);
+    if (scored.length > 0) {
+      parts.push("## Your Recent Decision Outcomes");
+      for (const d of scored) {
+        const outcome = d.actual_outcome ? ` | ${d.actual_outcome}` : "";
+        parts.push(`- ${d.action}: score=${d.score}${outcome}`);
+      }
+    }
+
+    // Decision quality trend
+    const trend = this.memoryDb.getDecisionQualityTrend(agentName);
+    if (trend.trend !== "insufficient_data") {
+      const arrow = trend.trend === "improving" ? " ↑" : trend.trend === "declining" ? " ↓" : "";
+      parts.push(`\n**Decision trend**: ${trend.trend}${arrow} (avg ${trend.avg_score?.toFixed(2)})`);
+    }
+
+    return parts.join("\n");
   }
 
   /**

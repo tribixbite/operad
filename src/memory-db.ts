@@ -742,6 +742,35 @@ export class MemoryDb {
     ).all(limit);
   }
 
+  /** Get rolling decision quality trend for an agent */
+  getDecisionQualityTrend(agentName: string, windowSize = 10): {
+    avg_score: number | null;
+    scored_count: number;
+    total_count: number;
+    trend: "improving" | "declining" | "stable" | "insufficient_data";
+  } {
+    const db = this.requireDb();
+    const rows = db.prepare(
+      `SELECT score FROM agent_decisions WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?`,
+    ).all(agentName, windowSize) as Array<{ score: number | null }>;
+
+    const total = rows.length;
+    const scored = rows.filter((r) => r.score != null);
+    if (scored.length < 3) {
+      return { avg_score: null, scored_count: scored.length, total_count: total, trend: "insufficient_data" };
+    }
+
+    const avg = scored.reduce((sum, r) => sum + r.score!, 0) / scored.length;
+    // Compare first half (recent) vs second half (older) for trend
+    const mid = Math.floor(scored.length / 2);
+    const recentAvg = scored.slice(0, mid).reduce((s, r) => s + r.score!, 0) / mid;
+    const olderAvg = scored.slice(mid).reduce((s, r) => s + r.score!, 0) / (scored.length - mid);
+    const delta = recentAvg - olderAvg;
+    const trend = delta > 0.1 ? "improving" : delta < -0.1 ? "declining" : "stable";
+
+    return { avg_score: avg, scored_count: scored.length, total_count: total, trend };
+  }
+
   /** Get decisions for a specific goal */
   getDecisionsByGoal(goalId: number): Record<string, unknown>[] {
     const db = this.requireDb();
