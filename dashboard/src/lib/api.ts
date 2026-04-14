@@ -674,6 +674,188 @@ export async function decayMemories(projectPath: string): Promise<{ decayed: num
   return checkedJson(res);
 }
 
+// -- Agent system API ---------------------------------------------------------
+
+/** Fetch all agent definitions */
+export async function fetchAgents(): Promise<import("./types").AgentInfo[]> {
+  const res = await fetch("/api/agents");
+  return checkedJson(res);
+}
+
+/** Create a new user-level agent */
+export async function createAgent(agent: Partial<import("./types").AgentInfo>): Promise<{ ok: boolean; name?: string }> {
+  const res = await fetch("/api/agents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(agent),
+  });
+  return checkedJson(res);
+}
+
+/** Update an agent */
+export async function updateAgent(name: string, updates: Partial<import("./types").AgentInfo>): Promise<void> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({} as Record<string, unknown>));
+    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
+/** Delete a user-level agent */
+export async function deleteAgent(name: string): Promise<void> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({} as Record<string, unknown>));
+    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
+/** Toggle agent enabled/disabled */
+export async function toggleAgent(name: string): Promise<{ enabled: boolean }> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(name)}/toggle`, { method: "POST" });
+  return checkedJson(res);
+}
+
+/** Trigger a standalone agent run */
+export async function runAgent(name: string, prompt?: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(name)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  return checkedJson(res);
+}
+
+/** Fetch agent run history */
+export async function fetchAgentRuns(opts?: { agent?: string; limit?: number }): Promise<import("./types").AgentRunRecord[]> {
+  const params = new URLSearchParams();
+  if (opts?.agent) params.set("agent", opts.agent);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await fetch(`/api/agents/runs${qs ? `?${qs}` : ""}`);
+  return checkedJson(res);
+}
+
+/** Fetch per-agent cost summary */
+export async function fetchAgentCosts(): Promise<import("./types").AgentCostSummary[]> {
+  const res = await fetch("/api/agents/costs");
+  return checkedJson(res);
+}
+
+// -- Cognitive API ------------------------------------------------------------
+
+/** Fetch current OODA state */
+export async function fetchCognitiveState(): Promise<Record<string, unknown>> {
+  const res = await fetch("/api/cognitive/state");
+  return checkedJson(res);
+}
+
+/** Manually trigger an OODA cycle */
+export async function triggerOoda(): Promise<void> {
+  await checkedPost("/api/cognitive/trigger");
+}
+
+/** Fetch goal tree */
+export async function fetchGoals(): Promise<import("./types").GoalRecord[]> {
+  const res = await fetch("/api/cognitive/goals");
+  return checkedJson(res);
+}
+
+/** Create a goal */
+export async function createGoal(title: string, opts?: { description?: string; priority?: number; parentId?: number }): Promise<{ id: number }> {
+  const res = await fetch("/api/cognitive/goals", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, ...opts }),
+  });
+  return checkedJson(res);
+}
+
+/** Update a goal */
+export async function updateGoal(id: number, updates: { status?: string; actualOutcome?: string; successScore?: number }): Promise<void> {
+  const res = await fetch(`/api/cognitive/goals/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+/** Fetch decision journal */
+export async function fetchDecisions(opts?: { agent?: string; limit?: number }): Promise<import("./types").DecisionRecord[]> {
+  const params = new URLSearchParams();
+  if (opts?.agent) params.set("agent", opts.agent);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await fetch(`/api/cognitive/decisions${qs ? `?${qs}` : ""}`);
+  return checkedJson(res);
+}
+
+// -- Profile (mind meld) API --------------------------------------------------
+
+/** Fetch user profile entries */
+export async function fetchProfile(category?: string): Promise<import("./types").ProfileEntry[]> {
+  const params = category ? `?category=${encodeURIComponent(category)}` : "";
+  const res = await fetch(`/api/profile${params}`);
+  return checkedJson(res);
+}
+
+/** Add a note/idea */
+export async function addProfileNote(content: string, opts?: { tags?: string[]; weight?: number }): Promise<{ id: number | null }> {
+  const res = await fetch("/api/profile/note", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, ...opts }),
+  });
+  return checkedJson(res);
+}
+
+/** Add a personality trait */
+export async function addProfileTrait(content: string, weight?: number): Promise<{ id: number | null }> {
+  const res = await fetch("/api/profile/trait", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, weight }),
+  });
+  return checkedJson(res);
+}
+
+/** Ingest chat export text */
+export async function addChatExport(content: string, source?: string): Promise<{ chunks: number; saved: number }> {
+  const res = await fetch("/api/profile/chat-export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, source }),
+  });
+  return checkedJson(res);
+}
+
+/** Get profile preview (assembled prompt) */
+export async function fetchProfilePreview(): Promise<import("./types").ProfilePreview> {
+  const res = await fetch("/api/profile/preview");
+  return checkedJson(res);
+}
+
+/** Update a profile entry */
+export async function updateProfileEntry(id: number, updates: { content?: string; weight?: number; tags?: string[] }): Promise<void> {
+  const res = await fetch(`/api/profile/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+/** Delete a profile entry */
+export async function deleteProfileEntry(id: number): Promise<void> {
+  const res = await fetch(`/api/profile/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
 // -- SDK cost tracking API ----------------------------------------------------
 
 /** Fetch aggregate SDK costs */

@@ -484,6 +484,105 @@ export interface MemoryRecord {
   expires_at: number | null;
 }
 
+// -- Agent system -------------------------------------------------------------
+
+/** Agent definition from /api/agents */
+export interface AgentInfo {
+  name: string;
+  description: string;
+  prompt: string;
+  tools?: string[];
+  disallowed_tools?: string[];
+  model?: string;
+  max_turns?: number;
+  background?: boolean;
+  memory?: "user" | "project" | "local";
+  effort?: "low" | "medium" | "high" | "max";
+  permission_mode?: string;
+  max_budget_usd?: number;
+  enabled: boolean;
+  source: "builtin" | "toml" | "project" | "user";
+}
+
+/** Agent run record from /api/agents/runs */
+export interface AgentRunRecord {
+  id: number;
+  agent_name: string;
+  session_name: string;
+  session_id: string | null;
+  status: "running" | "completed" | "failed" | "cancelled";
+  started_at: number;
+  finished_at: number | null;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  turns: number;
+  error: string | null;
+  trigger: string;
+}
+
+/** Per-agent cost summary from /api/agents/costs */
+export interface AgentCostSummary {
+  agent_name: string;
+  total_cost: number;
+  run_count: number;
+  avg_cost: number;
+}
+
+// -- Cognitive system ---------------------------------------------------------
+
+/** Goal record from /api/cognitive/goals */
+export interface GoalRecord {
+  id: number;
+  parent_id: number | null;
+  title: string;
+  description: string | null;
+  status: string;
+  priority: number;
+  agent_name: string | null;
+  expected_outcome: string | null;
+  actual_outcome: string | null;
+  success_score: number | null;
+  children_count: number;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+}
+
+/** Decision record from /api/cognitive/decisions */
+export interface DecisionRecord {
+  id: number;
+  agent_name: string;
+  session_name: string | null;
+  goal_id: number | null;
+  action: string;
+  rationale: string;
+  alternatives: string | null;
+  expected_outcome: string | null;
+  actual_outcome: string | null;
+  score: number | null;
+  created_at: number;
+  evaluated_at: number | null;
+}
+
+/** User profile entry from /api/profile */
+export interface ProfileEntry {
+  id: number;
+  category: "chat_export" | "note" | "trait" | "style" | "preference";
+  content: string;
+  weight: number;
+  source: string | null;
+  tags: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Profile preview from /api/profile/preview */
+export interface ProfilePreview {
+  preview: string;
+  counts: { traits: number; notes: number; styles: number; chat_exports: number };
+}
+
 // -- SDK cost tracking --------------------------------------------------------
 
 /** Aggregate cost data from /api/costs */

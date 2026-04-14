@@ -6,6 +6,9 @@
     ClaudeMdInfo, HookInfo, MarketplacePlugin, RecentProject,
   } from "../lib/types";
   import McpManager from "./McpManager.svelte";
+  import AgentPanel from "./AgentPanel.svelte";
+  import MindMeldPanel from "./MindMeldPanel.svelte";
+  import CognitivePanel from "./CognitivePanel.svelte";
 
   // -- Constants --------------------------------------------------------------
 
@@ -44,6 +47,9 @@
     marketplace: false,
     hooks: false,
     sdk: false,
+    agents: false,
+    mindMeld: false,
+    cognitive: false,
   });
 
   /** SDK configuration state */
@@ -899,6 +905,48 @@ Example usage or output
       {/if}
     </div>
 
+    <!-- Section 8: Agents -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("agents")}>
+        <span class="chevron">{sections.agents ? "▾" : "▸"}</span>
+        <span class="section-title">Agents</span>
+        <span class="badge badge-purple">cognitive</span>
+      </button>
+      {#if sections.agents}
+        <div class="section-body">
+          <AgentPanel />
+        </div>
+      {/if}
+    </div>
+
+    <!-- Section 9: Mind Meld -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("mindMeld")}>
+        <span class="chevron">{sections.mindMeld ? "▾" : "▸"}</span>
+        <span class="section-title">Mind Meld</span>
+        <span class="badge badge-purple">profile</span>
+      </button>
+      {#if sections.mindMeld}
+        <div class="section-body">
+          <MindMeldPanel />
+        </div>
+      {/if}
+    </div>
+
+    <!-- Section 10: Cognitive Architecture -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("cognitive")}>
+        <span class="chevron">{sections.cognitive ? "▾" : "▸"}</span>
+        <span class="section-title">Cognitive</span>
+        <span class="badge badge-purple">OODA</span>
+      </button>
+      {#if sections.cognitive}
+        <div class="section-body">
+          <CognitivePanel />
+        </div>
+      {/if}
+    </div>
+
   {/if}
 
   {#if error && data}
@@ -1259,6 +1307,10 @@ Example usage or output
   .badge-green {
     background: rgba(34, 197, 94, 0.15);
     color: #22c55e;
+  }
+  .badge-purple {
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
   }
 
   /* Error card */
