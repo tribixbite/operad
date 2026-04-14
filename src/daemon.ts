@@ -70,6 +70,7 @@ import {
   isTmuxServerAlive,
   discoverBareClaudeSessions,
   spawnBareProcess,
+  findBareServicePid,
   ensureTmuxLdPreload,
   bringTermuxToForeground,
   suspendSession,
@@ -636,8 +637,24 @@ export class Daemon {
     this.state.transition(name, "waiting");
     this.state.transition(name, "starting");
 
-    // Bare sessions: spawn as detached process, track PID directly
+    // Bare sessions: spawn as detached process, track PID directly.
+    // Some bare services (e.g., termux-x11 via app_process) fork a child
+    // that gets reparented to init, so the shell PID dies quickly.
+    // We try to find the real process via command pattern matching.
     if (sessionConfig.bare) {
+      // First check if the service is already running (e.g., started before daemon)
+      const pattern = this.getBareServicePattern(sessionConfig);
+      if (pattern) {
+        const existingPid = findBareServicePid(pattern);
+        if (existingPid) {
+          this.log.info(`Bare session '${name}' already running (PID ${existingPid})`, { session: name });
+          this.adoptedPids.set(name, existingPid);
+          this.state.transition(name, "running");
+          this.wake.evaluate("session_change", this.state.getState().sessions);
+          return true;
+        }
+      }
+
       const pid = spawnBareProcess(sessionConfig, this.log);
       if (!pid) {
         this.state.transition(name, "failed", "Failed to spawn bare process");
@@ -646,6 +663,23 @@ export class Daemon {
       this.adoptedPids.set(name, pid);
       this.state.transition(name, "running");
       this.wake.evaluate("session_change", this.state.getState().sessions);
+
+      // Schedule a deferred PID check: if the shell PID died but the service
+      // process is running (reparented to init), adopt the real PID
+      if (pattern) {
+        setTimeout(() => {
+          if (!existsSync(`/proc/${pid}`)) {
+            const realPid = findBareServicePid(pattern);
+            if (realPid) {
+              this.log.info(`Bare session '${name}' shell exited, adopting real PID ${realPid}`, { session: name });
+              this.adoptedPids.set(name, realPid);
+            } else {
+              this.log.warn(`Bare session '${name}' shell exited and no service process found`, { session: name });
+              // Don't mark stopped yet — health sweep will catch it
+            }
+          }
+        }, 3000);
+      }
       return true;
     }
 
@@ -824,6 +858,55 @@ export class Daemon {
         this.state.getSession(bare.sessionName)!.uptime_start = new Date().toISOString();
       }
     }
+
+    // Also scan for bare service processes (e.g., termux-x11 via app_process)
+    for (const cfg of this.config.sessions) {
+      if (!cfg.bare) continue;
+      if (this.adoptedPids.has(cfg.name)) {
+        // Verify existing adopted PID is still alive
+        const pid = this.adoptedPids.get(cfg.name)!;
+        if (!existsSync(`/proc/${pid}`)) {
+          // PID died — try to find replacement
+          const pattern = this.getBareServicePattern(cfg);
+          const newPid = pattern ? findBareServicePid(pattern) : null;
+          if (newPid) {
+            this.log.info(`Bare service '${cfg.name}' PID ${pid} died, re-adopted as PID ${newPid}`, { session: cfg.name });
+            this.adoptedPids.set(cfg.name, newPid);
+          }
+          // else: health sweep will handle marking stopped
+        }
+        continue;
+      }
+
+      const s = this.state.getSession(cfg.name);
+      if (!s) continue;
+      if (s.status !== "stopped" && s.status !== "failed" && s.status !== "pending") continue;
+
+      const pattern = this.getBareServicePattern(cfg);
+      if (!pattern) continue;
+      const pid = findBareServicePid(pattern);
+      if (pid) {
+        this.log.info(`Late-adopting bare service '${cfg.name}' (PID ${pid})`, { session: cfg.name });
+        this.state.forceStatus(cfg.name, "running");
+        this.adoptedPids.set(cfg.name, pid);
+        s.uptime_start = new Date().toISOString();
+      }
+    }
+  }
+
+  /**
+   * Build a regex pattern to find a bare service process in the process table.
+   * Returns null for sessions without a recognizable service command.
+   */
+  private getBareServicePattern(cfg: SessionConfig): RegExp | null {
+    if (!cfg.command) return null;
+    // termux-x11 runs as app_process with com.termux.x11.Loader
+    if (cfg.command.includes("termux-x11")) return /com\.termux\.x11\.Loader/;
+    // mcp-server-playwright / @playwright/mcp
+    if (cfg.command.includes("playwright")) return /playwright.*mcp|mcp.*playwright/;
+    // Generic: match the first non-env non-cleanup token from the command
+    // e.g. "sleep 3 && DISPLAY=:1 bun foo" → match "bun foo" is too loose
+    return null;
   }
 
   // -- ADB helpers ------------------------------------------------------------

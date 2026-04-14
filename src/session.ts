@@ -138,6 +138,36 @@ export function discoverBareClaudeSessions(
   return results;
 }
 
+/**
+ * Find the PID of a running bare service by matching its command string
+ * in the process table. Used to adopt services like termux-x11 that run
+ * as detached processes (app_process) and outlive their spawn shell.
+ *
+ * @param pattern - regex to match against process args (e.g., /termux.x11|com\.termux\.x11/)
+ * @returns PID of the matching process, or null if not found
+ */
+export function findBareServicePid(pattern: RegExp): number | null {
+  try {
+    const result = spawnSync("ps", ["-eo", "pid,args"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.status !== 0 || !result.stdout) return null;
+    for (const line of result.stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const spaceIdx = trimmed.indexOf(" ");
+      if (spaceIdx < 0) continue;
+      const pid = parseInt(trimmed.slice(0, spaceIdx), 10);
+      const args = trimmed.slice(spaceIdx + 1);
+      if (isNaN(pid) || pid <= 1) continue;
+      if (pattern.test(args)) return pid;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 /** Check if the tmux server is alive */
 export function isTmuxServerAlive(): boolean {
   const result = spawnSync(TMUX_BIN, ["start-server"], {
