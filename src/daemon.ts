@@ -2565,7 +2565,9 @@ export class Daemon {
           break;
         }
         this.handleAgentChat(agentName, prompt, ws).catch((err) => {
-          ws.send(JSON.stringify({ type: "agent_chat_error", agentName, message: String(err) }));
+          try {
+            ws.send(JSON.stringify({ type: "agent_chat_error", agentName, message: String(err) }));
+          } catch { /* ws may have closed during the run */ }
         });
         break;
       }
@@ -2826,13 +2828,21 @@ export class Daemon {
     this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "running" });
 
     try {
+      // Streaming callback — forward intermediate text chunks to WS client
+      const onStream = (data: { text: string; thinking: string }) => {
+        try {
+          ws.send(JSON.stringify({ type: "agent_chat_stream", agentName, text: data.text, thinking: data.thinking }));
+        } catch { /* ws may have closed */ }
+      };
+
       const result = await this.sdkBridge.runStandaloneAgent(
-        agentName, sdkDef, cwd, fullPrompt, agent.max_budget_usd,
+        agentName, sdkDef, cwd, fullPrompt, agent.max_budget_usd, onStream,
       );
 
-      // Save assistant response
+      // Save assistant response (including thinking text)
       this.memoryDb.appendConversation(agentName, "assistant", result.responseText, {
         sessionId: result.sessionId,
+        thinking: result.thinkingText || undefined,
         costUsd: result.costUsd,
         tokensIn: result.inputTokens,
         tokensOut: result.outputTokens,
@@ -2850,13 +2860,16 @@ export class Daemon {
         turns: result.turns,
       });
 
-      ws.send(JSON.stringify({
-        type: "agent_chat_result",
-        agentName,
-        content: result.responseText,
-        cost: result.costUsd,
-        tokens: { input: result.inputTokens, output: result.outputTokens },
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: "agent_chat_result",
+          agentName,
+          content: result.responseText,
+          thinking: result.thinkingText || null,
+          cost: result.costUsd,
+          tokens: { input: result.inputTokens, output: result.outputTokens },
+        }));
+      } catch { /* ws may have closed during the run */ }
       this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
 
     } catch (err) {

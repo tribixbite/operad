@@ -131,6 +131,8 @@ function resolveClaudePath(): string {
 
 export class SdkBridge {
   private active: ActiveSession | null = null;
+  /** True while a standalone agent run is executing (prevents concurrent runs) */
+  private standaloneBusy = false;
   private pendingPermissions = new Map<string, PendingPermission>();
   private permissionIdCounter = 0;
   private log: Logger;
@@ -154,9 +156,9 @@ export class SdkBridge {
     return this.active?.sessionName ?? null;
   }
 
-  /** Whether the active session is busy processing a prompt */
+  /** Whether the bridge is busy — either processing a prompt or running a standalone agent */
   get isBusy(): boolean {
-    return this.active?.busy ?? false;
+    return this.standaloneBusy || (this.active?.busy ?? false);
   }
 
   /**
@@ -356,75 +358,98 @@ export class SdkBridge {
     cwd: string,
     prompt: string,
     maxBudgetUsd?: number,
-  ): Promise<{ sessionId: string; costUsd: number; inputTokens: number; outputTokens: number; turns: number; responseText: string }> {
-    if (this.active) {
+    /** Optional callback for streaming updates — receives accumulated text + thinking on each chunk */
+    onStream?: (data: { text: string; thinking: string }) => void,
+  ): Promise<{ sessionId: string; costUsd: number; inputTokens: number; outputTokens: number; turns: number; responseText: string; thinkingText: string }> {
+    if (this.active || this.standaloneBusy) {
       throw new Error("Cannot run standalone agent — SDK session already active");
     }
 
-    const sdk = await getSdk();
-    const opts = this.buildSessionOptions(cwd) as any;
-
-    // For standalone runs, the agent IS the session — set its prompt as system prompt
-    // and apply max_budget_usd at the session level (not on AgentDefinition)
-    if (maxBudgetUsd) opts.maxBudgetUsd = maxBudgetUsd;
-
-    // Override with agent-specific settings
-    if (agentDef.model) opts.model = agentDef.model;
-    if (agentDef.effort) opts.effort = agentDef.effort;
-    if (agentDef.permissionMode) opts.permissionMode = agentDef.permissionMode;
-    if (agentDef.maxTurns) opts.maxTurns = agentDef.maxTurns;
-
-    const session = sdk.unstable_v2_createSession(opts);
-
-    let resolvedSessionId = "";
-    let costUsd = 0;
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let turns = 0;
-    /** Accumulated assistant text blocks for post-processing (e.g. OODA action parsing) */
-    const textParts: string[] = [];
-
+    this.standaloneBusy = true;
     try {
-      // Prepend agent system prompt to user prompt
-      const fullPrompt = agentDef.prompt
-        ? `${agentDef.prompt}\n\n---\n\n${prompt}`
-        : prompt;
+      const sdk = await getSdk();
+      const opts = this.buildSessionOptions(cwd) as any;
 
-      await session.send(fullPrompt);
+      // For standalone runs, the agent IS the session — set its prompt as system prompt
+      // and apply max_budget_usd at the session level (not on AgentDefinition)
+      if (maxBudgetUsd) opts.maxBudgetUsd = maxBudgetUsd;
 
-      for await (const msg of session.stream()) {
-        this.broadcast(agentName, msg);
+      // Override with agent-specific settings
+      if (agentDef.model) opts.model = agentDef.model;
+      if (agentDef.effort) opts.effort = agentDef.effort;
+      if (agentDef.permissionMode) opts.permissionMode = agentDef.permissionMode;
+      if (agentDef.maxTurns) opts.maxTurns = agentDef.maxTurns;
 
-        if (msg.type === "system" && msg.subtype === "init" && msg.session_id) {
-          resolvedSessionId = msg.session_id;
-        }
+      const session = sdk.unstable_v2_createSession(opts);
 
-        // Accumulate assistant text blocks
-        if (msg.type === "assistant" && msg.message?.content) {
-          for (const block of msg.message.content) {
-            if (block.type === "text" && block.text) {
-              textParts.push(block.text);
+      let resolvedSessionId = "";
+      let costUsd = 0;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let turns = 0;
+      /** Accumulated assistant text blocks for post-processing (e.g. OODA action parsing) */
+      const textParts: string[] = [];
+      /** Accumulated thinking/reasoning blocks from extended thinking */
+      const thinkingParts: string[] = [];
+
+      /** Safely invoke onStream callback — exceptions must not kill the stream loop */
+      const notifyStream = () => {
+        if (!onStream) return;
+        try {
+          onStream({ text: textParts.join("\n"), thinking: thinkingParts.join("\n") });
+        } catch { /* callback failure must not interrupt streaming */ }
+      };
+
+      try {
+        // Prepend agent system prompt to user prompt
+        const fullPrompt = agentDef.prompt
+          ? `${agentDef.prompt}\n\n---\n\n${prompt}`
+          : prompt;
+
+        await session.send(fullPrompt);
+
+        for await (const msg of session.stream()) {
+          this.broadcast(agentName, msg);
+
+          if (msg.type === "system" && msg.subtype === "init" && msg.session_id) {
+            resolvedSessionId = msg.session_id;
+          }
+
+          // Accumulate assistant text and thinking blocks
+          if (msg.type === "assistant" && msg.message?.content) {
+            for (const block of msg.message.content) {
+              if (block.type === "text" && block.text) {
+                textParts.push(block.text);
+              } else if (block.type === "thinking" && block.thinking) {
+                thinkingParts.push(block.thinking);
+              }
             }
+            notifyStream();
+          }
+
+          if (msg.type === "result") {
+            costUsd = msg.total_cost_usd ?? 0;
+            inputTokens = msg.usage?.input_tokens ?? 0;
+            outputTokens = msg.usage?.output_tokens ?? 0;
+            turns = msg.num_turns ?? 0;
+            // Result may contain final text (SDKResultSuccess has result_text)
+            const resultText = "result_text" in msg ? (msg as any).result_text : undefined;
+            if (resultText) textParts.push(String(resultText));
+            // Final streaming notification so client sees complete text before result event
+            notifyStream();
+            break;
           }
         }
-
-        if (msg.type === "result") {
-          costUsd = msg.total_cost_usd ?? 0;
-          inputTokens = msg.usage?.input_tokens ?? 0;
-          outputTokens = msg.usage?.output_tokens ?? 0;
-          turns = msg.num_turns ?? 0;
-          // Result may contain final text (SDKResultSuccess has result_text)
-          const resultText = "result_text" in msg ? (msg as any).result_text : undefined;
-          if (resultText) textParts.push(String(resultText));
-          break;
-        }
+      } finally {
+        try { session.close(); } catch { /* already closed */ }
       }
-    } finally {
-      try { session.close(); } catch { /* already closed */ }
-    }
 
-    const responseText = textParts.join("\n");
-    return { sessionId: resolvedSessionId, costUsd, inputTokens, outputTokens, turns, responseText };
+      const responseText = textParts.join("\n");
+      const thinkingText = thinkingParts.join("\n");
+      return { sessionId: resolvedSessionId, costUsd, inputTokens, outputTokens, turns, responseText, thinkingText };
+    } finally {
+      this.standaloneBusy = false;
+    }
   }
 
   // -- Session listing (standalone functions, no active session needed) --------
