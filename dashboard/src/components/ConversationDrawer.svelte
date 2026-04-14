@@ -38,7 +38,7 @@
   let cleanupFns: Array<() => void> = [];
 
   /** Resolve session path from daemon state */
-  const sessionPath = $derived(() => {
+  const sessionPath = $derived.by(() => {
     const session = store.daemon?.sessions.find((s) => s.name === sessionName);
     return session?.path ?? null;
   });
@@ -54,7 +54,7 @@
 
   /** Attach SDK and start streaming */
   async function attachLive() {
-    const path = sessionPath();
+    const path = sessionPath;
     if (!path) {
       liveError = "Session has no project path";
       return;

@@ -33,7 +33,7 @@
   const PAGE_SIZE = 20;
 
   /** Unique project basenames extracted from loaded prompts */
-  const projectOptions = $derived(() => {
+  const projectOptions = $derived.by(() => {
     const seen = new Set<string>();
     const list: string[] = [];
     for (const p of prompts) {
@@ -159,6 +159,43 @@
     }
   }
 
+  // -- Download ---------------------------------------------------------------
+
+  let downloading = $state(false);
+
+  /** Download all matching prompts as a text file */
+  async function downloadPrompts() {
+    downloading = true;
+    try {
+      // Fetch all matching prompts (up to 10k)
+      const result = await fetchPrompts({
+        q: debouncedQuery || undefined,
+        starred: showStarred || undefined,
+        project: selectedProject || filterProject || undefined,
+        limit: 10000,
+        offset: 0,
+      });
+      const lines = result.prompts.map((p) => {
+        const proj = projectBasename(p.project);
+        const ts = new Date(p.timestamp).toISOString().slice(0, 19);
+        const star = p.starred ? " [starred]" : "";
+        return `--- ${proj} | ${ts} | ${p.session}${star} ---\n${p.display}\n`;
+      });
+      const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const tag = selectedProject || (filterProject ? projectBasename(filterProject) : "all");
+      a.download = `prompts-${tag}${showStarred ? "-starred" : ""}${debouncedQuery ? `-${debouncedQuery.slice(0, 20)}` : ""}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      error = (err as Error).message;
+    } finally {
+      downloading = false;
+    }
+  }
+
   // -- Helpers ----------------------------------------------------------------
 
   /** Extract the last path segment as a project display name */
@@ -228,10 +265,22 @@
         bind:value={selectedProject}
       >
         <option value="">All projects</option>
-        {#each projectOptions() as proj (proj)}
+        {#each projectOptions as proj (proj)}
           <option value={proj}>{proj}</option>
         {/each}
       </select>
+    {/if}
+
+    {#if !compact}
+      <button
+        class="pill"
+        onclick={downloadPrompts}
+        disabled={downloading || total === 0}
+        title="Download {total} matching prompts as text"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2V11M4 7.5L8 11.5L12 7.5"/><path d="M2 13.5H14"/></svg>
+        {downloading ? "..." : ""}
+      </button>
     {/if}
   </div>
 

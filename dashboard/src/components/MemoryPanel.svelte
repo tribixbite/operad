@@ -9,7 +9,7 @@
   let { projectPath: propPath }: Props = $props();
 
   /** Available project paths from active sessions */
-  const availableProjects = $derived(() => {
+  const availableProjects = $derived.by(() => {
     if (!store.daemon?.sessions) return [];
     return store.daemon.sessions
       .filter((s) => s.path)
@@ -52,7 +52,7 @@
   ];
 
   /** Group memories by category */
-  const groupedMemories = $derived(() => {
+  const groupedMemories = $derived.by(() => {
     const groups = new Map<MemoryCategory, MemoryRecord[]>();
     for (const cat of CATEGORY_ORDER) {
       const items = memories.filter((m) => m.category === cat);
@@ -181,7 +181,7 @@
         onchange={() => { memories = []; loading = true; loadMemories(); }}
       >
         <option value="">Select project...</option>
-        {#each availableProjects() as proj (proj.path)}
+        {#each availableProjects as proj (proj.path)}
           <option value={proj.path}>{proj.name}</option>
         {/each}
       </select>
@@ -239,7 +239,7 @@
   {:else}
     <!-- Grouped by category -->
     {#each CATEGORY_ORDER as cat}
-      {@const items = groupedMemories().get(cat)}
+      {@const items = groupedMemories.get(cat)}
       {#if items && items.length > 0}
         <div class="category-group">
           <div class="category-header">

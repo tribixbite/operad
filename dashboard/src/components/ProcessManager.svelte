@@ -44,9 +44,10 @@
   }
 
   // Initial load
-  if (typeof window !== "undefined") {
+  $effect(() => {
+    if (typeof window === "undefined") return;
     refresh();
-  }
+  });
 
   let totalRss = $derived(apps.reduce((sum, a) => sum + a.rss_mb, 0));
   let killableApps = $derived(apps.filter((a) => !a.system));

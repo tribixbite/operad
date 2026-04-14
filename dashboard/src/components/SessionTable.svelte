@@ -43,7 +43,7 @@
   const ACTIVE_STATUSES = new Set(["running", "degraded", "starting", "waiting", "stopping"]);
 
   /** Apply search filter then split into active/inactive */
-  const filteredSessions = $derived(() => {
+  const filteredSessions = $derived.by(() => {
     if (!sessionFilter) return allSessions;
     const q = sessionFilter.toLowerCase();
     return allSessions.filter((s) => s.name.toLowerCase().includes(q));
@@ -51,10 +51,10 @@
 
   /** Sorted: active sessions first (by name), then inactive (by name) */
   const activeSessions = $derived(
-    filteredSessions().filter((s) => ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
+    filteredSessions.filter((s) => ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
   );
   const inactiveSessions = $derived(
-    filteredSessions().filter((s) => !ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
+    filteredSessions.filter((s) => !ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
   );
 
   /** Only show search when there are enough sessions to warrant filtering */

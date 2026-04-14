@@ -14,7 +14,7 @@
   let countdownTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Truncated preview of tool input (max 500 chars) */
-  const inputPreview = $derived(() => {
+  const inputPreview = $derived.by(() => {
     try {
       const raw = typeof request.input === "string"
         ? request.input
@@ -92,7 +92,7 @@
 
       <div class="perm-input-section">
         <span class="perm-input-label">Input:</span>
-        <pre class="perm-input-preview">{inputPreview()}</pre>
+        <pre class="perm-input-preview">{inputPreview}</pre>
       </div>
     </div>
 
