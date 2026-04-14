@@ -4569,6 +4569,13 @@ export class Daemon {
             return { status: 200, data: this.memoryDb.getPersonalitySnapshot(subCmd) };
           }
 
+          if (subCmd && arg === "strategy-history" && method === "GET") {
+            // GET /api/agents/:name/strategy-history — strategy version history
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            return { status: 200, data: this.memoryDb.getStrategyHistory(subCmd, limit) };
+          }
+
           return { status: 400, data: { error: `Unknown agents endpoint: ${subCmd ?? "(root)"}` } };
         }
 

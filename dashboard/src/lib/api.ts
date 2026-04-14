@@ -940,6 +940,23 @@ export async function fetchAgentDrift(agentName: string): Promise<Array<{
   return checkedJson(res);
 }
 
+/** Strategy version record from the agent_strategies table */
+export interface StrategyVersion {
+  id: number;
+  agent_name: string;
+  strategy_text: string;
+  version: number;
+  rationale: string | null;
+  performance_score: number | null;
+  created_at: number;
+}
+
+/** Fetch strategy version history for an agent */
+export async function fetchStrategyHistory(agentName: string, limit = 20): Promise<StrategyVersion[]> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/strategy-history?limit=${limit}`);
+  return checkedJson(res);
+}
+
 /** Fetch decision quality metrics */
 export async function fetchDecisionMetrics(): Promise<Array<{
   agent_name: string; total_decisions: number; scored_decisions: number; avg_score: number | null;

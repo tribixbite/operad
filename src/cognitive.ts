@@ -69,6 +69,8 @@ export interface OodaContext {
   agentLearnings: LearningEntry[];
   /** High-confidence insights from other agents */
   sharedInsights: Array<{ agent_name: string; content: string; confidence: number }>;
+  /** Personality trait drift over recent window */
+  personalityDrift: Array<{ trait_name: string; current_value: number; previous_value: number; delta: number }>;
 }
 
 /** Parsed action from master controller response */
@@ -145,7 +147,15 @@ export function buildOodaContext(
     confidence: s.confidence as number,
   }));
 
-  return { observations, goals, decisionHistory, decisionTrend, inbox, strategy, userProfile, personality, agentLearnings, sharedInsights };
+  // Personality drift — detect significant trait changes over the past week
+  const personalityDrift = db.getPersonalityDrift("master-controller").map((d) => ({
+    trait_name: d.trait_name,
+    current_value: d.current_value,
+    previous_value: d.previous_value,
+    delta: d.delta,
+  }));
+
+  return { observations, goals, decisionHistory, decisionTrend, inbox, strategy, userProfile, personality, agentLearnings, sharedInsights, personalityDrift };
 }
 
 /** Build cost observation from recent data */
@@ -254,11 +264,21 @@ export function buildOodaPrompt(ctx: OodaContext): string {
     sections.push(`**Average**: ${ctx.decisionTrend.avg_score?.toFixed(2) ?? "n/a"} (${ctx.decisionTrend.scored_count} scored / ${ctx.decisionTrend.total_count} total) | **Trend**: ${ctx.decisionTrend.trend}${trendArrow}`);
   }
 
-  // 3c. Your personality
+  // 3c. Your personality (with drift indicators when available)
   if (ctx.personality.length > 0) {
     sections.push(`\n## Your Personality\n`);
+    // Index drift data by trait name for O(1) lookup
+    const driftMap = new Map(ctx.personalityDrift.map((d) => [d.trait_name, d]));
     for (const t of ctx.personality) {
-      sections.push(`- **${t.trait_name}**: ${t.trait_value.toFixed(2)}${t.evidence ? ` (${t.evidence})` : ""}`);
+      const drift = driftMap.get(t.trait_name);
+      let driftStr = " (stable)";
+      if (drift) {
+        const arrow = drift.delta > 0 ? "\u2191" : "\u2193";
+        const sign = drift.delta > 0 ? "+" : "";
+        driftStr = ` (${arrow} from ${drift.previous_value.toFixed(2)}, ${sign}${drift.delta.toFixed(2)})`;
+      }
+      const evidence = t.evidence ? ` | ${t.evidence}` : "";
+      sections.push(`- **${t.trait_name}**: ${t.trait_value.toFixed(2)}${driftStr}${evidence}`);
     }
   }
 

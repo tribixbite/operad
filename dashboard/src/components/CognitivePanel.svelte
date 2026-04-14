@@ -4,8 +4,9 @@
     fetchDecisions, triggerOoda,
     fetchAgentMessages, fetchAgentConversationPairs, sendAgentMessage,
     fetchAgentLearnings, fetchAgentPersonality, fetchAgentDrift,
-    fetchDecisionMetrics, fetchAgents,
+    fetchDecisionMetrics, fetchAgents, fetchStrategyHistory,
   } from "../lib/api";
+  import type { StrategyVersion } from "../lib/api";
   import { connect, on } from "../lib/ws.svelte";
   import type {
     GoalRecord, DecisionRecord,
@@ -38,6 +39,9 @@
 
   /** OODA cycle running */
   let oodaRunning = $state(false);
+
+  /** Unread message count badge — increments on agent_message WS events when not on messages tab */
+  let unreadMessages = $state(0);
 
   // -- Messages tab state -----------------------------------------------------
 
@@ -90,6 +94,10 @@
   let drifts: Map<string, Array<{ trait_name: string; current: number; previous: number; delta: number; direction: string }>> = $state(new Map());
   /** Derived drift for selected growth agent */
   let growthDrift = $derived(growthAgent ? (drifts.get(growthAgent) ?? []) : []);
+  /** Per-agent strategy version history */
+  let strategyHistories: Map<string, StrategyVersion[]> = $state(new Map());
+  /** Derived strategy history for selected growth agent */
+  let growthStrategyHistory = $derived(growthAgent ? (strategyHistories.get(growthAgent) ?? []) : []);
 
   // -- Load data --------------------------------------------------------------
 
@@ -138,6 +146,10 @@
         created_at: msg.created_at as number ?? Math.floor(Date.now() / 1000),
       };
       allMessages = [entry, ...allMessages].slice(0, 100);
+      // Increment unread badge when not viewing messages tab
+      if (tab !== "messages") {
+        unreadMessages++;
+      }
     });
 
     return () => { offOoda(); offMsg(); };
@@ -169,23 +181,27 @@
       agentNames = agents.map((a: AgentInfo) => a.name);
       decisionMetrics = metrics;
 
-      // Load personality + learnings + drift for each agent in parallel
+      // Load personality + learnings + drift + strategy history for each agent in parallel
       const pMap = new Map<string, PersonalityTrait[]>();
       const lMap = new Map<string, AgentLearning[]>();
       const dMap = new Map<string, Array<{ trait_name: string; current: number; previous: number; delta: number; direction: string }>>();
+      const sMap = new Map<string, StrategyVersion[]>();
       await Promise.all(agents.map(async (a: AgentInfo) => {
-        const [p, l, d] = await Promise.all([
+        const [p, l, d, s] = await Promise.all([
           fetchAgentPersonality(a.name),
           fetchAgentLearnings(a.name, 10),
           fetchAgentDrift(a.name),
+          fetchStrategyHistory(a.name, 20),
         ]);
         pMap.set(a.name, p);
         lMap.set(a.name, l);
         dMap.set(a.name, d);
+        sMap.set(a.name, s);
       }));
       personalities = pMap;
       learnings = lMap;
       drifts = dMap;
+      strategyHistories = sMap;
     } catch (e) {
       error = String(e);
     }
@@ -193,7 +209,10 @@
 
   // Load tab-specific data when tab changes
   $effect(() => {
-    if (tab === "messages") loadMessages();
+    if (tab === "messages") {
+      loadMessages();
+      unreadMessages = 0; // Clear badge when entering messages tab
+    }
     if (tab === "growth") loadGrowth();
   });
 
@@ -333,7 +352,7 @@
         Strategy
       </button>
       <button class="tab" class:active={tab === "messages"} onclick={() => tab = "messages"}>
-        Messages
+        Messages{#if unreadMessages > 0} <span class="unread-badge">{unreadMessages}</span>{/if}
       </button>
       <button class="tab" class:active={tab === "growth"} onclick={() => tab = "growth"}>
         Growth
@@ -738,6 +757,42 @@
               </div>
             </div>
           {/if}
+
+          <!-- Strategy evolution timeline -->
+          <div class="growth-card">
+            <h4 class="growth-card-title">Strategy Evolution</h4>
+            {#if growthStrategyHistory.length === 0}
+              <div class="empty-sm">No strategy versions recorded yet.</div>
+            {:else}
+              <div class="strategy-timeline">
+                {#each growthStrategyHistory as sv, i}
+                  <div class="strategy-entry" class:latest={i === 0}>
+                    <div class="strategy-dot-col">
+                      <span class="strategy-dot" class:latest={i === 0}></span>
+                      {#if i < growthStrategyHistory.length - 1}
+                        <span class="strategy-line"></span>
+                      {/if}
+                    </div>
+                    <div class="strategy-content">
+                      <div class="strategy-header">
+                        <span class="strategy-version">v{sv.version}</span>
+                        {#if sv.performance_score != null}
+                          <span class="strategy-score" class:good={sv.performance_score >= 0.7} class:mid={sv.performance_score >= 0.4 && sv.performance_score < 0.7} class:bad={sv.performance_score < 0.4}>
+                            {Math.round(sv.performance_score * 100)}%
+                          </span>
+                        {/if}
+                        <span class="strategy-ts">{formatTs(sv.created_at)}</span>
+                      </div>
+                      {#if sv.rationale}
+                        <div class="strategy-rationale">{sv.rationale.length > 100 ? sv.rationale.slice(0, 100) + "..." : sv.rationale}</div>
+                      {/if}
+                      <div class="strategy-text-preview">{sv.strategy_text.length > 120 ? sv.strategy_text.slice(0, 120) + "..." : sv.strategy_text}</div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -776,6 +831,20 @@
     background: var(--accent-blue);
     color: white;
     border-color: var(--accent-blue);
+  }
+  .unread-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1rem;
+    height: 1rem;
+    padding: 0 0.25rem;
+    border-radius: 9999px;
+    background: #ef4444;
+    color: white;
+    font-size: 0.6rem;
+    font-weight: 700;
+    line-height: 1;
   }
 
   .ooda-btn {
@@ -1304,4 +1373,83 @@
   }
   .quality-trend.improving { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
   .quality-trend.declining { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+  /* Strategy evolution timeline */
+  .strategy-timeline { display: flex; flex-direction: column; }
+  .strategy-entry {
+    display: flex;
+    gap: 0.5rem;
+    min-height: 3rem;
+  }
+  .strategy-dot-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 12px;
+    flex-shrink: 0;
+  }
+  .strategy-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+    margin-top: 0.35rem;
+  }
+  .strategy-dot.latest {
+    width: 10px;
+    height: 10px;
+    background: #a855f7;
+    box-shadow: 0 0 4px rgba(168, 85, 247, 0.5);
+  }
+  .strategy-line {
+    flex: 1;
+    width: 1px;
+    background: var(--border);
+    margin: 0.15rem 0;
+  }
+  .strategy-content {
+    flex: 1;
+    padding-bottom: 0.5rem;
+    font-size: 0.7rem;
+  }
+  .strategy-header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-bottom: 0.15rem;
+  }
+  .strategy-version {
+    font-weight: 700;
+    color: var(--text-primary);
+    font-size: 0.75rem;
+  }
+  .strategy-entry.latest .strategy-version { color: #c084fc; }
+  .strategy-score {
+    font-size: 0.6rem;
+    font-weight: 600;
+    padding: 0.05rem 0.2rem;
+    border-radius: 3px;
+    background: rgba(156, 163, 175, 0.15);
+    color: var(--text-muted);
+  }
+  .strategy-score.good { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+  .strategy-score.mid { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+  .strategy-score.bad { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+  .strategy-ts {
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    margin-left: auto;
+  }
+  .strategy-rationale {
+    color: var(--text-secondary);
+    font-style: italic;
+    line-height: 1.3;
+    margin-bottom: 0.15rem;
+  }
+  .strategy-text-preview {
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    line-height: 1.3;
+  }
 </style>
