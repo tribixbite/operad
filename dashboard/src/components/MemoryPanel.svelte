@@ -8,12 +8,20 @@
   }
   let { projectPath: propPath }: Props = $props();
 
-  /** Available project paths from active sessions */
+  /** Available project paths from active sessions, deduped by path */
   const availableProjects = $derived.by(() => {
     if (!store.daemon?.sessions) return [];
-    return store.daemon.sessions
-      .filter((s) => s.path)
-      .map((s) => ({ name: s.name, path: s.path! }));
+    const seen = new Map<string, string>();
+    for (const s of store.daemon.sessions) {
+      if (!s.path || seen.has(s.path)) continue;
+      const name = s.path.split("/").filter(Boolean).pop() ?? s.name;
+      // Skip dot-dirs and non-project paths
+      if (name.startsWith(".") || name.startsWith("~")) continue;
+      seen.set(s.path, name);
+    }
+    return [...seen.entries()]
+      .map(([path, name]) => ({ name, path }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   });
 
   /** Selected project path (prop overrides selector) */
