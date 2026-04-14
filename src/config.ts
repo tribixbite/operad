@@ -20,6 +20,7 @@ import type {
   WakeLockPolicy,
   HealthCheckType,
 } from "./types.js";
+import { parseTomlAgents, type AgentConfig } from "./agents.js";
 import { detectPlatform } from "./platform/platform.js";
 
 /** Default config search paths from platform (operad primary, tmx/drey fallback for compat) */
@@ -340,11 +341,17 @@ function validateConfig(raw: Record<string, unknown>): TmxConfig {
     );
   }
 
+  // Agent definitions from [[agent]] sections
+  const agentRaw = (raw.agent ?? []) as Record<string, unknown>[];
+  const agents: AgentConfig[] = parseTomlAgents(
+    agentRaw, asString, asNumber, asBool, asEnum, asStringArray,
+  );
+
   if (errors.length > 0) {
     throw new Error(`Config validation failed:\n  ${errors.join("\n  ")}`);
   }
 
-  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults };
+  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents };
 }
 
 // -- Type coercion helpers ----------------------------------------------------

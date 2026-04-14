@@ -223,6 +223,8 @@ export interface TmxConfig {
   telemetry_sink: TelemetrySinkConfig;
   sessions: SessionConfig[];
   health_defaults: HealthDefaults;
+  /** Agent definitions from TOML [[agent]] sections */
+  agents: import("./agents.js").AgentConfig[];
 }
 
 // -- Runtime state (persisted to JSON) ----------------------------------------

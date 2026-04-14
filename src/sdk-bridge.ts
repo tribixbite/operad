@@ -81,6 +81,8 @@ export interface SdkBridgeConfig {
   model?: string;
   /** Permission timeout in ms (default: 5 minutes) */
   permissionTimeoutMs?: number;
+  /** Agent definitions to inject into SDK sessions (SDK AgentDefinition map) */
+  agents?: Record<string, Record<string, unknown>>;
 }
 
 /** Resolved path to the Claude Code executable */
@@ -179,6 +181,11 @@ export class SdkBridge {
     if (this.config.thinking) opts.thinking = this.config.thinking;
     if (this.config.maxBudgetUsd) opts.maxBudgetUsd = this.config.maxBudgetUsd;
     if (this.config.model) opts.model = this.config.model;
+    // Inject agent definitions — agents is not on SDKSessionOptions type but
+    // works via the same `as any` cast used for cwd, settingSources, etc.
+    if (this.config.agents && Object.keys(this.config.agents).length > 0) {
+      opts.agents = this.config.agents;
+    }
     return opts;
   }
 
@@ -327,6 +334,82 @@ export class SdkBridge {
   async setModel(_model: string): Promise<void> {
     // V2 sessions don't expose setModel — log for now
     this.log.info(`SDK model change requested: ${_model} (not supported in V2 API)`);
+  }
+
+  /**
+   * Update agent definitions. Takes effect on the NEXT attach() call —
+   * does NOT affect currently running sessions.
+   */
+  updateAgents(agents: Record<string, Record<string, unknown>>): void {
+    this.config.agents = agents;
+    this.log.info(`SDK agents updated: ${Object.keys(agents).join(", ") || "(none)"}`);
+  }
+
+  /**
+   * Run a standalone agent — creates a V2 session with the agent's config,
+   * sends the initial prompt, streams results, and returns cost data.
+   * Fails if there's already an active session (single-session constraint).
+   */
+  async runStandaloneAgent(
+    agentName: string,
+    agentDef: Record<string, unknown>,
+    cwd: string,
+    prompt: string,
+    maxBudgetUsd?: number,
+  ): Promise<{ sessionId: string; costUsd: number; inputTokens: number; outputTokens: number; turns: number }> {
+    if (this.active) {
+      throw new Error("Cannot run standalone agent — SDK session already active");
+    }
+
+    const sdk = await getSdk();
+    const opts = this.buildSessionOptions(cwd) as any;
+
+    // For standalone runs, the agent IS the session — set its prompt as system prompt
+    // and apply max_budget_usd at the session level (not on AgentDefinition)
+    if (maxBudgetUsd) opts.maxBudgetUsd = maxBudgetUsd;
+
+    // Override with agent-specific settings
+    if (agentDef.model) opts.model = agentDef.model;
+    if (agentDef.effort) opts.effort = agentDef.effort;
+    if (agentDef.permissionMode) opts.permissionMode = agentDef.permissionMode;
+    if (agentDef.maxTurns) opts.maxTurns = agentDef.maxTurns;
+
+    const session = sdk.unstable_v2_createSession(opts);
+
+    let resolvedSessionId = "";
+    let costUsd = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let turns = 0;
+
+    try {
+      // Prepend agent system prompt to user prompt
+      const fullPrompt = agentDef.prompt
+        ? `${agentDef.prompt}\n\n---\n\n${prompt}`
+        : prompt;
+
+      await session.send(fullPrompt);
+
+      for await (const msg of session.stream()) {
+        this.broadcast(agentName, msg);
+
+        if (msg.type === "system" && msg.subtype === "init" && msg.session_id) {
+          resolvedSessionId = msg.session_id;
+        }
+
+        if (msg.type === "result") {
+          costUsd = msg.total_cost_usd ?? 0;
+          inputTokens = msg.usage?.input_tokens ?? 0;
+          outputTokens = msg.usage?.output_tokens ?? 0;
+          turns = msg.num_turns ?? 0;
+          break;
+        }
+      }
+    } finally {
+      try { session.close(); } catch { /* already closed */ }
+    }
+
+    return { sessionId: resolvedSessionId, costUsd, inputTokens, outputTokens, turns };
   }
 
   // -- Session listing (standalone functions, no active session needed) --------

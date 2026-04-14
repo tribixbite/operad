@@ -127,6 +127,106 @@ const SCHEMA_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_costs_session ON costs(session_name)`,
   `CREATE INDEX IF NOT EXISTS idx_costs_created ON costs(created_at)`,
+
+  // Agent run tracking
+  `CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at INTEGER DEFAULT (unixepoch()),
+    finished_at INTEGER,
+    cost_usd REAL DEFAULT 0,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    turns INTEGER DEFAULT 0,
+    error TEXT,
+    trigger TEXT NOT NULL DEFAULT 'standalone'
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_runs_agent ON agent_runs(agent_name)`,
+  `CREATE INDEX IF NOT EXISTS idx_runs_started ON agent_runs(started_at DESC)`,
+
+  // Persistent goal tree: hierarchical goals with outcome tracking
+  `CREATE TABLE IF NOT EXISTS agent_goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES agent_goals(id),
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    priority INTEGER DEFAULT 5,
+    agent_name TEXT,
+    expected_outcome TEXT,
+    actual_outcome TEXT,
+    success_score REAL,
+    created_at INTEGER DEFAULT (unixepoch()),
+    updated_at INTEGER DEFAULT (unixepoch()),
+    completed_at INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_goals_status ON agent_goals(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_goals_agent ON agent_goals(agent_name)`,
+  `CREATE INDEX IF NOT EXISTS idx_goals_parent ON agent_goals(parent_id)`,
+
+  // Decision journal: every decision with rationale and outcome scoring
+  `CREATE TABLE IF NOT EXISTS agent_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    session_name TEXT,
+    goal_id INTEGER REFERENCES agent_goals(id),
+    action TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    alternatives TEXT,
+    expected_outcome TEXT,
+    actual_outcome TEXT,
+    score REAL,
+    context_snapshot TEXT,
+    created_at INTEGER DEFAULT (unixepoch()),
+    evaluated_at INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_decisions_agent ON agent_decisions(agent_name)`,
+  `CREATE INDEX IF NOT EXISTS idx_decisions_goal ON agent_decisions(goal_id)`,
+
+  // Inter-agent message bus
+  `CREATE TABLE IF NOT EXISTS agent_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    message_type TEXT NOT NULL DEFAULT 'info',
+    content TEXT NOT NULL,
+    metadata TEXT,
+    read_at INTEGER,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_msgs_to ON agent_messages(to_agent, read_at)`,
+
+  // User profile: mind meld data with weighting
+  `CREATE TABLE IF NOT EXISTS user_profile (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT,
+    weight REAL NOT NULL DEFAULT 1.0,
+    source TEXT,
+    tags TEXT,
+    created_at INTEGER DEFAULT (unixepoch()),
+    updated_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_hash ON user_profile(content_hash)`,
+  `CREATE INDEX IF NOT EXISTS idx_profile_category ON user_profile(category)`,
+  `CREATE INDEX IF NOT EXISTS idx_profile_weight ON user_profile(weight DESC)`,
+
+  // Strategy evolution: self-modifying strategy loaded into master controller
+  `CREATE TABLE IF NOT EXISTS agent_strategies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    strategy_text TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    rationale TEXT,
+    performance_score REAL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_strategy_agent ON agent_strategies(agent_name, active)`,
 ];
 
 /**
@@ -458,5 +558,378 @@ export class MemoryDb {
       ORDER BY total_cost DESC
       LIMIT ?`,
     ).all(limit) as unknown as Array<{ session_name: string; total_cost: number; queries: number }>;
+  }
+
+  // -- Agent runs ---------------------------------------------------------------
+
+  /** Start tracking an agent run. Returns the run ID. */
+  startAgentRun(
+    agentName: string,
+    sessionName: string,
+    trigger: "standalone" | "manual" = "standalone",
+  ): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO agent_runs (agent_name, session_name, trigger) VALUES (?, ?, ?)`,
+    ).run(agentName, sessionName, trigger);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Complete an agent run with results */
+  completeAgentRun(
+    runId: number,
+    status: "completed" | "failed" | "cancelled",
+    result: { sessionId?: string; costUsd?: number; inputTokens?: number; outputTokens?: number; turns?: number; error?: string },
+  ): void {
+    const db = this.requireDb();
+    db.prepare(
+      `UPDATE agent_runs SET
+        status = ?, finished_at = unixepoch(), session_id = ?,
+        cost_usd = ?, input_tokens = ?, output_tokens = ?,
+        turns = ?, error = ?
+      WHERE id = ?`,
+    ).run(
+      status, result.sessionId ?? null,
+      result.costUsd ?? 0, result.inputTokens ?? 0, result.outputTokens ?? 0,
+      result.turns ?? 0, result.error ?? null, runId,
+    );
+  }
+
+  /** Get recent agent runs */
+  getAgentRuns(limit = 50, agentName?: string): Record<string, unknown>[] {
+    const db = this.requireDb();
+    if (agentName) {
+      return db.prepare(
+        `SELECT * FROM agent_runs WHERE agent_name = ? ORDER BY started_at DESC LIMIT ?`,
+      ).all(agentName, limit);
+    }
+    return db.prepare(
+      `SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT ?`,
+    ).all(limit);
+  }
+
+  /** Get per-agent cost summary */
+  getAgentCostSummary(): Array<{ agent_name: string; total_cost: number; run_count: number; avg_cost: number }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT agent_name, SUM(cost_usd) as total_cost, COUNT(*) as run_count,
+        AVG(cost_usd) as avg_cost
+      FROM agent_runs WHERE status = 'completed'
+      GROUP BY agent_name ORDER BY total_cost DESC`,
+    ).all() as unknown as Array<{ agent_name: string; total_cost: number; run_count: number; avg_cost: number }>;
+  }
+
+  // -- Goals ------------------------------------------------------------------
+
+  /** Create a goal. Returns the goal ID. */
+  createGoal(
+    title: string,
+    opts?: { description?: string; parentId?: number; priority?: number; agentName?: string; expectedOutcome?: string },
+  ): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO agent_goals (title, description, parent_id, priority, agent_name, expected_outcome)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      title, opts?.description ?? null, opts?.parentId ?? null,
+      opts?.priority ?? 5, opts?.agentName ?? null, opts?.expectedOutcome ?? null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Update a goal's status and/or outcome */
+  updateGoal(
+    id: number,
+    updates: { status?: string; actualOutcome?: string; successScore?: number },
+  ): boolean {
+    const db = this.requireDb();
+    const sets: string[] = ["updated_at = unixepoch()"];
+    const params: unknown[] = [];
+
+    if (updates.status) {
+      sets.push("status = ?");
+      params.push(updates.status);
+      if (updates.status === "completed" || updates.status === "failed") {
+        sets.push("completed_at = unixepoch()");
+      }
+    }
+    if (updates.actualOutcome) {
+      sets.push("actual_outcome = ?");
+      params.push(updates.actualOutcome);
+    }
+    if (updates.successScore != null) {
+      sets.push("success_score = ?");
+      params.push(updates.successScore);
+    }
+
+    params.push(id);
+    const result = db.prepare(
+      `UPDATE agent_goals SET ${sets.join(", ")} WHERE id = ?`,
+    ).run(...params);
+    return result.changes > 0;
+  }
+
+  /** Get a single goal by ID */
+  getGoal(id: number): Record<string, unknown> | undefined {
+    const db = this.requireDb();
+    return db.prepare(`SELECT * FROM agent_goals WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+  }
+
+  /** Get active goals, optionally filtered by agent */
+  getActiveGoals(agentName?: string): Record<string, unknown>[] {
+    const db = this.requireDb();
+    if (agentName) {
+      return db.prepare(
+        `SELECT * FROM agent_goals WHERE status = 'active' AND agent_name = ? ORDER BY priority ASC`,
+      ).all(agentName);
+    }
+    return db.prepare(
+      `SELECT * FROM agent_goals WHERE status = 'active' ORDER BY priority ASC`,
+    ).all();
+  }
+
+  /** Get full goal tree (all goals with children counts) */
+  getGoalTree(): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT g.*, (SELECT COUNT(*) FROM agent_goals c WHERE c.parent_id = g.id) as children_count
+       FROM agent_goals g ORDER BY g.priority ASC, g.created_at DESC`,
+    ).all();
+  }
+
+  // -- Decisions --------------------------------------------------------------
+
+  /** Record a decision with rationale */
+  recordDecision(
+    agentName: string,
+    action: string,
+    rationale: string,
+    opts?: { sessionName?: string; goalId?: number; alternatives?: string[]; expectedOutcome?: string; contextSnapshot?: Record<string, unknown> },
+  ): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO agent_decisions (agent_name, session_name, goal_id, action, rationale, alternatives, expected_outcome, context_snapshot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      agentName, opts?.sessionName ?? null, opts?.goalId ?? null,
+      action, rationale,
+      opts?.alternatives ? JSON.stringify(opts.alternatives) : null,
+      opts?.expectedOutcome ?? null,
+      opts?.contextSnapshot ? JSON.stringify(opts.contextSnapshot) : null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Evaluate a past decision with actual outcome and score */
+  evaluateDecision(id: number, actualOutcome: string, score: number): boolean {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `UPDATE agent_decisions SET actual_outcome = ?, score = ?, evaluated_at = unixepoch() WHERE id = ?`,
+    ).run(actualOutcome, score, id);
+    return result.changes > 0;
+  }
+
+  /** Get recent decisions, optionally filtered by agent */
+  getRecentDecisions(limit = 20, agentName?: string): Record<string, unknown>[] {
+    const db = this.requireDb();
+    if (agentName) {
+      return db.prepare(
+        `SELECT * FROM agent_decisions WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?`,
+      ).all(agentName, limit);
+    }
+    return db.prepare(
+      `SELECT * FROM agent_decisions ORDER BY created_at DESC LIMIT ?`,
+    ).all(limit);
+  }
+
+  /** Get decisions for a specific goal */
+  getDecisionsByGoal(goalId: number): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_decisions WHERE goal_id = ? ORDER BY created_at DESC`,
+    ).all(goalId);
+  }
+
+  // -- Inter-agent messages ---------------------------------------------------
+
+  /** Send a message between agents */
+  sendAgentMessage(
+    fromAgent: string,
+    toAgent: string,
+    content: string,
+    opts?: { messageType?: string; metadata?: Record<string, unknown> },
+  ): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO agent_messages (from_agent, to_agent, message_type, content, metadata)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      fromAgent, toAgent, opts?.messageType ?? "info", content,
+      opts?.metadata ? JSON.stringify(opts.metadata) : null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Get unread messages for an agent */
+  getUnreadMessages(agentName: string): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_messages
+       WHERE (to_agent = ? OR to_agent = '*') AND read_at IS NULL
+       ORDER BY created_at ASC`,
+    ).all(agentName);
+  }
+
+  /** Mark messages as read */
+  markMessagesRead(messageIds: number[]): void {
+    const db = this.requireDb();
+    for (const id of messageIds) {
+      db.prepare(`UPDATE agent_messages SET read_at = unixepoch() WHERE id = ?`).run(id);
+    }
+  }
+
+  /** Get message conversation between two agents */
+  getConversation(agent1: string, agent2: string, limit = 50): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_messages
+       WHERE (from_agent = ? AND to_agent = ?) OR (from_agent = ? AND to_agent = ?)
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(agent1, agent2, agent2, agent1, limit);
+  }
+
+  // -- User profile (mind meld) -----------------------------------------------
+
+  /** Add a profile entry. Deduplicates by content hash. */
+  addProfileEntry(
+    category: "chat_export" | "note" | "trait" | "style" | "preference",
+    content: string,
+    opts?: { weight?: number; source?: string; tags?: string[] },
+  ): number | null {
+    const db = this.requireDb();
+    const hash = hashContent(content);
+
+    // Default weights by category
+    const defaultWeights: Record<string, number> = {
+      chat_export: 0.5,
+      note: 2.0,
+      trait: 3.0,
+      style: 2.0,
+      preference: 2.5,
+    };
+    const weight = opts?.weight ?? defaultWeights[category] ?? 1.0;
+
+    try {
+      const result = db.prepare(
+        `INSERT INTO user_profile (category, content, content_hash, weight, source, tags)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(category, content, hash, weight, opts?.source ?? null,
+        opts?.tags ? JSON.stringify(opts.tags) : null);
+      return Number(result.lastInsertRowid);
+    } catch (err: any) {
+      if (err?.message?.includes("UNIQUE")) return null; // duplicate
+      throw err;
+    }
+  }
+
+  /** Get profile entries, sorted by weight (highest first) */
+  getProfile(category?: string, limit = 100): Record<string, unknown>[] {
+    const db = this.requireDb();
+    if (category) {
+      return db.prepare(
+        `SELECT * FROM user_profile WHERE category = ? ORDER BY weight DESC, updated_at DESC LIMIT ?`,
+      ).all(category, limit);
+    }
+    return db.prepare(
+      `SELECT * FROM user_profile ORDER BY weight DESC, updated_at DESC LIMIT ?`,
+    ).all(limit);
+  }
+
+  /** Update a profile entry */
+  updateProfileEntry(
+    id: number,
+    updates: { content?: string; weight?: number; tags?: string[] },
+  ): boolean {
+    const db = this.requireDb();
+    const sets: string[] = ["updated_at = unixepoch()"];
+    const params: unknown[] = [];
+
+    if (updates.content) {
+      sets.push("content = ?", "content_hash = ?");
+      params.push(updates.content, hashContent(updates.content));
+    }
+    if (updates.weight != null) {
+      sets.push("weight = ?");
+      params.push(updates.weight);
+    }
+    if (updates.tags) {
+      sets.push("tags = ?");
+      params.push(JSON.stringify(updates.tags));
+    }
+
+    params.push(id);
+    const result = db.prepare(
+      `UPDATE user_profile SET ${sets.join(", ")} WHERE id = ?`,
+    ).run(...params);
+    return result.changes > 0;
+  }
+
+  /** Delete a profile entry */
+  deleteProfileEntry(id: number): boolean {
+    const db = this.requireDb();
+    return db.prepare(`DELETE FROM user_profile WHERE id = ?`).run(id).changes > 0;
+  }
+
+  /** Search profile entries by content */
+  searchProfile(query: string, limit = 20): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM user_profile WHERE content LIKE ? ORDER BY weight DESC LIMIT ?`,
+    ).all(`%${query}%`, limit);
+  }
+
+  // -- Strategy evolution ------------------------------------------------------
+
+  /** Get the active strategy for an agent */
+  getActiveStrategy(agentName: string): Record<string, unknown> | undefined {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_strategies WHERE agent_name = ? AND active = 1 ORDER BY version DESC LIMIT 1`,
+    ).get(agentName) as Record<string, unknown> | undefined;
+  }
+
+  /** Evolve strategy — deactivates current, creates new version */
+  evolveStrategy(
+    agentName: string,
+    strategyText: string,
+    rationale: string,
+    performanceScore?: number,
+  ): number {
+    const db = this.requireDb();
+
+    // Deactivate current strategy
+    db.prepare(
+      `UPDATE agent_strategies SET active = 0 WHERE agent_name = ? AND active = 1`,
+    ).run(agentName);
+
+    // Get latest version number
+    const latest = db.prepare(
+      `SELECT MAX(version) as v FROM agent_strategies WHERE agent_name = ?`,
+    ).get(agentName) as { v: number | null } | undefined;
+    const nextVersion = (latest?.v ?? 0) + 1;
+
+    const result = db.prepare(
+      `INSERT INTO agent_strategies (agent_name, strategy_text, version, rationale, performance_score)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(agentName, strategyText, nextVersion, rationale, performanceScore ?? null);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Get strategy version history for an agent */
+  getStrategyHistory(agentName: string, limit = 10): Record<string, unknown>[] {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT * FROM agent_strategies WHERE agent_name = ? ORDER BY version DESC LIMIT ?`,
+    ).all(agentName, limit);
   }
 }

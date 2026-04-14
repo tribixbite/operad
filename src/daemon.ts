@@ -34,6 +34,8 @@ import { TelemetrySinkServer } from "./telemetry-sink.js";
 import { SdkBridge } from "./sdk-bridge.js";
 import { MemoryDb } from "./memory-db.js";
 import { buildMemoryPrompt, saveMemoriesFromResponse } from "./memory-injector.js";
+import { loadAgents, toSdkAgentMap, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
+import { buildOodaContext, buildOodaPrompt, parseOodaResponse, type OodaAction } from "./cognitive.js";
 import {
   getProjectTokenUsage,
   getConversationPage,
@@ -166,6 +168,24 @@ function removeNotification(id: string): void {
   detectPlatform().removeNotification(id);
 }
 
+/** Chunk text into segments of approximately maxChars, splitting on paragraph/newline boundaries */
+function chunkText(text: string, maxChars = 2000): string[] {
+  const chunks: string[] = [];
+  const paragraphs = text.split(/\n\n+/);
+  let current = "";
+
+  for (const para of paragraphs) {
+    if (current.length + para.length + 2 > maxChars && current.length > 0) {
+      chunks.push(current.trim());
+      current = "";
+    }
+    current += (current ? "\n\n" : "") + para;
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  return chunks;
+}
+
 export class Daemon {
   private config: TmxConfig;
   private log: Logger;
@@ -181,6 +201,11 @@ export class Daemon {
   private telemetrySink: TelemetrySinkServer | null = null;
   private sdkBridge: SdkBridge | null = null;
   private memoryDb: MemoryDb | null = null;
+  private agentConfigs: AgentConfig[] = [];
+  /** Timer for periodic OODA loop evaluation */
+  private cognitiveTimer: ReturnType<typeof setInterval> | null = null;
+  /** Scheduled next OODA run (from controller's ```schedule``` blocks) */
+  private scheduledOodaTimer: ReturnType<typeof setTimeout> | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private batteryTimer: ReturnType<typeof setInterval> | null = null;
@@ -438,6 +463,14 @@ export class Daemon {
     if (this.registryFlushTimer) {
       clearInterval(this.registryFlushTimer);
       this.registryFlushTimer = null;
+    }
+    if (this.cognitiveTimer) {
+      clearInterval(this.cognitiveTimer);
+      this.cognitiveTimer = null;
+    }
+    if (this.scheduledOodaTimer) {
+      clearTimeout(this.scheduledOodaTimer);
+      this.scheduledOodaTimer = null;
     }
 
     // Cancel pending auto-tabs and auto-restart timers
@@ -2411,6 +2444,24 @@ export class Daemon {
         });
       });
 
+      // Load agent definitions and inject into SDK bridge
+      const projectPaths = this.config.sessions
+        .filter((s) => s.path)
+        .map((s) => s.path!);
+      this.agentConfigs = loadAgents(this.config.agents ?? [], projectPaths);
+      const enabledAgents = this.agentConfigs.filter((a) => a.enabled);
+      if (enabledAgents.length > 0) {
+        this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
+        this.log.info(`Loaded ${enabledAgents.length} agents: ${enabledAgents.map((a) => a.name).join(", ")}`);
+      }
+
+      // Start cognitive timer — checks OODA trigger conditions every 60s
+      this.cognitiveTimer = setInterval(() => {
+        this.maybeTriggerOoda().catch((err) => {
+          this.log.warn(`Cognitive timer error: ${err}`);
+        });
+      }, 60_000);
+
       // Verify SDK is available (non-blocking, log result)
       import("@anthropic-ai/claude-agent-sdk").then(() => {
         this.log.info("SDK available for streaming");
@@ -2479,9 +2530,225 @@ export class Daemon {
         }
         break;
       }
+      case "agent_run": {
+        // Trigger standalone agent run via WS
+        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
+        const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
+        if (!agentName || !prompt) throw new Error("agentName and prompt required");
+        this.handleStandaloneAgentRun(agentName, prompt).catch((err) => {
+          ws.send(JSON.stringify({ type: "error", message: String(err) }));
+        });
+        ws.send(JSON.stringify({ type: "agent_run_started", agentName }));
+        break;
+      }
       default:
         // subscribe/unsubscribe/ping handled by http.ts directly
         break;
+    }
+  }
+
+  // -- Agent & cognitive methods ------------------------------------------------
+
+  /** Reload agent configs from all sources and update SDK bridge */
+  private reloadAgents(): void {
+    const projectPaths = this.config.sessions
+      .filter((s) => s.path)
+      .map((s) => s.path!);
+    this.agentConfigs = loadAgents(this.config.agents ?? [], projectPaths);
+    const enabledAgents = this.agentConfigs.filter((a) => a.enabled);
+    if (this.sdkBridge) {
+      this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
+    }
+    this.log.info(`Reloaded agents: ${enabledAgents.length} enabled`);
+  }
+
+  /** Handle a standalone agent run (from WS or REST API) */
+  private async handleStandaloneAgentRun(agentName: string, prompt: string): Promise<Record<string, unknown>> {
+    if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
+    if (this.sdkBridge.isAttached) throw new Error("Cannot run agent — SDK session already active");
+
+    const agent = this.agentConfigs.find((a) => a.name === agentName);
+    if (!agent) throw new Error(`Agent not found: ${agentName}`);
+    if (!agent.enabled) throw new Error(`Agent is disabled: ${agentName}`);
+
+    // Resolve cwd: use first session path or home directory
+    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
+    const sdkDef = toSdkAgentMap([agent])[agentName];
+
+    // Track the run in DB
+    const runId = this.memoryDb?.startAgentRun(agentName, "standalone", "standalone") ?? 0;
+
+    this.log.info(`Starting standalone agent run: ${agentName} (runId=${runId})`);
+
+    try {
+      const result = await this.sdkBridge.runStandaloneAgent(
+        agentName, sdkDef, cwd, prompt, agent.max_budget_usd,
+      );
+
+      if (this.memoryDb && runId > 0) {
+        this.memoryDb.completeAgentRun(runId, "completed", {
+          sessionId: result.sessionId,
+          costUsd: result.costUsd,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          turns: result.turns,
+        });
+      }
+
+      this.log.info(`Agent run completed: ${agentName} cost=$${result.costUsd.toFixed(4)}`);
+      return { ok: true, runId, ...result };
+    } catch (err) {
+      if (this.memoryDb && runId > 0) {
+        this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
+      }
+      this.log.error(`Agent run failed: ${agentName}: ${err}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Check OODA trigger conditions and run master controller if warranted.
+   * Called every 60s by cognitiveTimer.
+   */
+  private async maybeTriggerOoda(): Promise<void> {
+    // Don't run if SDK is busy or no memory DB
+    if (!this.sdkBridge || !this.memoryDb) return;
+    if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) return;
+
+    // Check trigger conditions
+    const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller" && a.enabled);
+    if (!masterAgent) return;
+
+    // Condition: unread messages waiting >5 min
+    const unread = this.memoryDb.getUnreadMessages("master-controller");
+    const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
+    const urgentMessages = unread.filter((m) => (m.created_at as number) < fiveMinAgo);
+
+    if (urgentMessages.length > 0) {
+      this.log.info(`OODA trigger: ${urgentMessages.length} unread messages older than 5min`);
+      await this.runOodaCycle();
+      return;
+    }
+
+    // Other triggers can be added here:
+    // - Cost threshold exceeded
+    // - Memory pressure escalation
+    // - Agent run completion (evaluate outcome)
+    // Note: timer-based runs use scheduledOodaTimer from ```schedule``` blocks
+  }
+
+  /**
+   * Run a full OODA cycle — build context, run master controller, parse and
+   * execute actions from its response.
+   */
+  private async runOodaCycle(): Promise<void> {
+    if (!this.sdkBridge || !this.memoryDb) return;
+    if (this.sdkBridge.isAttached) {
+      this.log.debug("OODA cycle skipped — SDK session active");
+      return;
+    }
+
+    const state = this.state.getState();
+    const ctx = buildOodaContext(state, this.memoryDb);
+    const oodaPrompt = buildOodaPrompt(ctx);
+
+    this.log.info("Running OODA cycle for master-controller");
+
+    try {
+      const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller");
+      if (!masterAgent) return;
+
+      const sdkDef = toSdkAgentMap([masterAgent])["master-controller"];
+      const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
+
+      const runId = this.memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone");
+
+      // Collect response text from broadcast
+      let responseText = "";
+      const origBroadcast = this.dashboard?.broadcastToRoom.bind(this.dashboard);
+
+      // Temporarily intercept broadcasts to capture response text
+      // (The standalone run broadcasts via the agent name room)
+      const result = await this.sdkBridge.runStandaloneAgent(
+        "master-controller", sdkDef, cwd, oodaPrompt, masterAgent.max_budget_usd,
+      );
+
+      this.memoryDb.completeAgentRun(runId, "completed", {
+        sessionId: result.sessionId,
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        turns: result.turns,
+      });
+
+      // TODO: Capture full response text for parsing OODA actions
+      // Currently the broadcast captures partial messages but we need the full text.
+      // For now, log the completion — action parsing will be wired when response
+      // text capture is implemented via an accumulator in runStandaloneAgent.
+
+      this.log.info(`OODA cycle completed: cost=$${result.costUsd.toFixed(4)}, turns=${result.turns}`);
+    } catch (err) {
+      this.log.error(`OODA cycle failed: ${err}`);
+    }
+  }
+
+  /**
+   * Execute parsed OODA actions from master controller response.
+   * Called after parseOodaResponse() returns structured actions.
+   */
+  private executeOodaActions(actions: OodaAction[]): void {
+    if (!this.memoryDb) return;
+
+    for (const action of actions) {
+      try {
+        switch (action.type) {
+          case "goal":
+            this.memoryDb.createGoal(action.title, {
+              description: action.description,
+              parentId: action.parentId,
+              priority: action.priority,
+              agentName: "master-controller",
+            });
+            this.log.info(`OODA: created goal "${action.title}"`);
+            break;
+
+          case "decision":
+            this.memoryDb.recordDecision("master-controller", action.action, action.rationale, {
+              goalId: action.goalId,
+              alternatives: action.alternatives ? [action.alternatives] : undefined,
+              expectedOutcome: action.expectedOutcome,
+            });
+            this.log.info(`OODA: recorded decision "${action.action}"`);
+            break;
+
+          case "message":
+            this.memoryDb.sendAgentMessage("master-controller", action.to, action.content, {
+              messageType: action.messageType,
+            });
+            this.log.info(`OODA: sent message to ${action.to}`);
+            break;
+
+          case "strategy":
+            this.memoryDb.evolveStrategy("master-controller", action.text, action.rationale);
+            this.log.info(`OODA: evolved strategy`);
+            break;
+
+          case "schedule": {
+            // Schedule next OODA run
+            if (this.scheduledOodaTimer) clearTimeout(this.scheduledOodaTimer);
+            const delayMs = action.delayMinutes * 60 * 1000;
+            this.scheduledOodaTimer = setTimeout(() => {
+              this.runOodaCycle().catch((err) => {
+                this.log.warn(`Scheduled OODA cycle failed: ${err}`);
+              });
+            }, delayMs);
+            this.log.info(`OODA: scheduled next run in ${action.delayMinutes}min (${action.reason})`);
+            break;
+          }
+        }
+      } catch (err) {
+        this.log.warn(`OODA action failed (${action.type}): ${err}`);
+      }
     }
   }
 
@@ -3807,6 +4074,330 @@ export class Daemon {
           }
 
           return { status: 400, data: { error: `Unknown SDK endpoint: ${subCmd}` } };
+        }
+
+        // -- Agent endpoints --------------------------------------------------------
+        case "agents": {
+          const subCmd = name; // /api/agents/<subCmd>/<arg>
+          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+
+          // Static sub-routes checked BEFORE treating subCmd as agent name
+          if (subCmd === "runs") {
+            // GET /api/agents/runs — agent run history
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const agentFilter = queryParams.get("agent") ?? undefined;
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            return { status: 200, data: this.memoryDb.getAgentRuns(limit, agentFilter) };
+          }
+
+          if (subCmd === "costs") {
+            // GET /api/agents/costs — per-agent cost summary
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            return { status: 200, data: this.memoryDb.getAgentCostSummary() };
+          }
+
+          if (!subCmd && method === "GET") {
+            // GET /api/agents — list all agent definitions
+            return { status: 200, data: this.agentConfigs };
+          }
+
+          if (!subCmd && method === "POST") {
+            // POST /api/agents — create user-level agent
+            try {
+              const parsed = JSON.parse(body) as Partial<AgentConfig>;
+              const errors = validateAgentConfig(parsed);
+              if (errors.length > 0) {
+                return { status: 400, data: { error: errors.join("; ") } };
+              }
+              const agentConf: AgentConfig = {
+                name: parsed.name!,
+                description: parsed.description!,
+                prompt: parsed.prompt!,
+                tools: parsed.tools,
+                disallowed_tools: parsed.disallowed_tools,
+                model: parsed.model,
+                max_turns: parsed.max_turns,
+                background: parsed.background,
+                memory: parsed.memory,
+                effort: parsed.effort,
+                permission_mode: parsed.permission_mode,
+                max_budget_usd: parsed.max_budget_usd,
+                enabled: parsed.enabled ?? true,
+                source: "user",
+              };
+              saveUserAgent(agentConf);
+              this.reloadAgents();
+              return { status: 201, data: { ok: true, name: agentConf.name } };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+
+          if (subCmd && method === "GET") {
+            // GET /api/agents/:name — get single agent
+            const agent = this.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            return { status: 200, data: agent };
+          }
+
+          if (subCmd && method === "PUT") {
+            // PUT /api/agents/:name — update agent fields
+            try {
+              const parsed = JSON.parse(body) as Partial<AgentConfig>;
+              const existing = this.agentConfigs.find((a) => a.name === subCmd);
+              if (!existing) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+              const updated = { ...existing, ...parsed, name: subCmd };
+              const errors = validateAgentConfig(updated);
+              if (errors.length > 0) {
+                return { status: 400, data: { error: errors.join("; ") } };
+              }
+              saveUserAgent(updated as AgentConfig);
+              this.reloadAgents();
+              return { status: 200, data: { ok: true } };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+
+          if (subCmd && method === "DELETE") {
+            // DELETE /api/agents/:name — delete user-level agent (403 for builtins)
+            const agent = this.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            if (agent.source === "builtin") {
+              return { status: 403, data: { error: "Cannot delete built-in agent" } };
+            }
+            deleteUserAgent(subCmd);
+            this.reloadAgents();
+            return { status: 200, data: { ok: true } };
+          }
+
+          if (subCmd && arg === "toggle" && method === "POST") {
+            // POST /api/agents/:name/toggle — enable/disable
+            const agent = this.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            const toggled = { ...agent, enabled: !agent.enabled };
+            saveUserAgent(toggled);
+            this.reloadAgents();
+            return { status: 200, data: { ok: true, enabled: toggled.enabled } };
+          }
+
+          if (subCmd && arg === "run" && method === "POST") {
+            // POST /api/agents/:name/run — trigger standalone run
+            if (this.sdkBridge?.isAttached) {
+              return { status: 409, data: { error: "SDK session active — cannot run standalone agent" } };
+            }
+            try {
+              const parsed = body ? JSON.parse(body) as { prompt?: string } : {};
+              const prompt = parsed.prompt ?? "Analyze the current system state and take appropriate action.";
+              // Non-blocking — result streamed via WS
+              this.handleStandaloneAgentRun(subCmd, prompt).catch((err) => {
+                this.log.error(`Standalone agent run failed: ${err}`);
+              });
+              return { status: 202, data: { ok: true, message: `Agent ${subCmd} run started` } };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+
+          return { status: 400, data: { error: `Unknown agents endpoint: ${subCmd ?? "(root)"}` } };
+        }
+
+        // -- Cognitive endpoints ----------------------------------------------------
+        case "cognitive": {
+          const subCmd = name; // /api/cognitive/<subCmd>/<arg>
+          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+
+          if (subCmd === "state" && method === "GET") {
+            // GET /api/cognitive/state — current OODA context
+            const state = this.state.getState();
+            const ctx = buildOodaContext(state, this.memoryDb);
+            return { status: 200, data: ctx };
+          }
+
+          if (subCmd === "trigger" && method === "POST") {
+            // POST /api/cognitive/trigger — manually trigger an OODA cycle
+            if (this.sdkBridge?.isAttached) {
+              return { status: 409, data: { error: "SDK session active" } };
+            }
+            this.runOodaCycle().catch((err) => {
+              this.log.error(`Manual OODA trigger failed: ${err}`);
+            });
+            return { status: 202, data: { ok: true, message: "OODA cycle triggered" } };
+          }
+
+          if (subCmd === "goals") {
+            if (method === "GET") {
+              // GET /api/cognitive/goals — goal tree
+              return { status: 200, data: this.memoryDb.getGoalTree() };
+            }
+            if (method === "POST") {
+              // POST /api/cognitive/goals — create goal manually
+              try {
+                const parsed = JSON.parse(body) as { title: string; description?: string; priority?: number; parentId?: number };
+                if (!parsed.title) return { status: 400, data: { error: "title required" } };
+                const id = this.memoryDb.createGoal(parsed.title, {
+                  description: parsed.description,
+                  parentId: parsed.parentId,
+                  priority: parsed.priority,
+                });
+                return { status: 201, data: { id } };
+              } catch {
+                return { status: 400, data: { error: "Invalid JSON body" } };
+              }
+            }
+          }
+
+          if (subCmd === "goals" && arg && method === "PUT") {
+            // PUT /api/cognitive/goals/:id — update goal
+            try {
+              const parsed = JSON.parse(body) as { status?: string; actualOutcome?: string; successScore?: number };
+              const updated = this.memoryDb.updateGoal(Number(arg), parsed);
+              return { status: updated ? 200 : 404, data: { ok: updated } };
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+          }
+
+          if (subCmd === "decisions" && method === "GET") {
+            // GET /api/cognitive/decisions — decision journal
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const agentFilter = queryParams.get("agent") ?? undefined;
+            return { status: 200, data: this.memoryDb.getRecentDecisions(limit, agentFilter) };
+          }
+
+          if (subCmd === "strategy" && arg && method === "GET") {
+            // GET /api/cognitive/strategy/:agent — current strategy
+            const strategy = this.memoryDb.getActiveStrategy(arg);
+            if (!strategy) return { status: 404, data: { error: "No strategy found" } };
+            return { status: 200, data: strategy };
+          }
+
+          if (subCmd === "messages" && method === "GET") {
+            // GET /api/cognitive/messages?agent=... — unread messages
+            const agentFilter = queryParams.get("agent") ?? "master-controller";
+            return { status: 200, data: this.memoryDb.getUnreadMessages(agentFilter) };
+          }
+
+          return { status: 400, data: { error: `Unknown cognitive endpoint: ${subCmd ?? "(root)"}` } };
+        }
+
+        // -- Profile (mind meld) endpoints ------------------------------------------
+        case "profile": {
+          const subCmd = name; // /api/profile/<subCmd>/<arg>
+          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+
+          if (!subCmd && method === "GET") {
+            // GET /api/profile — list all profile entries
+            const category = queryParams.get("category") ?? undefined;
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 100;
+            return { status: 200, data: this.memoryDb.getProfile(category, limit) };
+          }
+
+          if (subCmd === "note" && method === "POST") {
+            // POST /api/profile/note — add a note/idea
+            try {
+              const parsed = JSON.parse(body) as { content: string; tags?: string[]; weight?: number };
+              if (!parsed.content) return { status: 400, data: { error: "content required" } };
+              const id = this.memoryDb.addProfileEntry("note", parsed.content, {
+                weight: parsed.weight,
+                tags: parsed.tags,
+                source: "manual",
+              });
+              return { status: 201, data: { id, duplicate: id === null } };
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+          }
+
+          if (subCmd === "trait" && method === "POST") {
+            // POST /api/profile/trait — add a personality trait
+            try {
+              const parsed = JSON.parse(body) as { content: string; weight?: number };
+              if (!parsed.content) return { status: 400, data: { error: "content required" } };
+              const id = this.memoryDb.addProfileEntry("trait", parsed.content, {
+                weight: parsed.weight ?? 3.0,
+                source: "manual",
+              });
+              return { status: 201, data: { id, duplicate: id === null } };
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+          }
+
+          if (subCmd === "chat-export" && method === "POST") {
+            // POST /api/profile/chat-export — ingest chat export text
+            try {
+              const parsed = JSON.parse(body) as { content: string; source?: string };
+              if (!parsed.content) return { status: 400, data: { error: "content required" } };
+
+              // Chunk into ~500-token segments (~2000 chars)
+              const chunks = chunkText(parsed.content, 2000);
+              let saved = 0;
+              for (const chunk of chunks) {
+                const id = this.memoryDb.addProfileEntry("chat_export", chunk, {
+                  weight: 0.5,
+                  source: parsed.source ?? "upload",
+                });
+                if (id !== null) saved++;
+              }
+              return { status: 201, data: { ok: true, chunks: chunks.length, saved } };
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+          }
+
+          if (subCmd === "preview" && method === "GET") {
+            // GET /api/profile/preview — preview assembled profile prompt
+            const traits = this.memoryDb.getProfile("trait", 20);
+            const notes = this.memoryDb.getProfile("note", 20);
+            const styles = this.memoryDb.getProfile("style", 10);
+            const chatCount = this.memoryDb.getProfile("chat_export").length;
+
+            let preview = "## User Profile\n\n";
+            if (traits.length > 0) {
+              preview += "**Traits:**\n";
+              for (const t of traits) preview += `- ${t.content} (weight: ${t.weight})\n`;
+            }
+            if (notes.length > 0) {
+              preview += "\n**Notes/Ideas:**\n";
+              for (const n of notes) preview += `- ${n.content}\n`;
+            }
+            if (styles.length > 0) {
+              preview += "\n**Communication Style:**\n";
+              for (const s of styles) preview += `- ${s.content}\n`;
+            }
+            if (chatCount > 0) {
+              preview += `\n_${chatCount} chat export segments available._\n`;
+            }
+
+            return { status: 200, data: { preview, counts: { traits: traits.length, notes: notes.length, styles: styles.length, chat_exports: chatCount } } };
+          }
+
+          // Numeric ID operations
+          const profileId = subCmd ? Number(subCmd) : NaN;
+          if (!isNaN(profileId)) {
+            if (method === "PUT") {
+              // PUT /api/profile/:id — update entry
+              try {
+                const parsed = JSON.parse(body) as { content?: string; weight?: number; tags?: string[] };
+                const updated = this.memoryDb.updateProfileEntry(profileId, parsed);
+                return { status: updated ? 200 : 404, data: { ok: updated } };
+              } catch {
+                return { status: 400, data: { error: "Invalid JSON body" } };
+              }
+            }
+            if (method === "DELETE") {
+              // DELETE /api/profile/:id — delete entry
+              const deleted = this.memoryDb.deleteProfileEntry(profileId);
+              return { status: deleted ? 200 : 404, data: { ok: deleted } };
+            }
+          }
+
+          return { status: 400, data: { error: `Unknown profile endpoint: ${subCmd ?? "(root)"}` } };
         }
 
         // -- Memory endpoints -------------------------------------------------------
