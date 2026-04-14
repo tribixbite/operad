@@ -249,7 +249,7 @@ export interface ConversationPage {
   oldest_uuid: string | null;
   has_more: boolean;
   session_id: string;
-  session_list: Array<{ id: string; last_modified: string }>;
+  session_list: Array<{ id: string; last_modified: string; title?: string }>;
 }
 
 // -- Session timeline ---------------------------------------------------------

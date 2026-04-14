@@ -258,7 +258,7 @@
       <select value={selectedSessionId} onchange={handleSessionChange}>
         {#each page.session_list as session (session.id)}
           <option value={session.id}>
-            {session.id.slice(0, 8)} — {new Date(session.last_modified).toLocaleDateString()}
+            {session.title ?? session.id.slice(0, 8)} — {new Date(session.last_modified).toLocaleDateString()}
           </option>
         {/each}
       </select>

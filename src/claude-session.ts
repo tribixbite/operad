@@ -48,6 +48,34 @@ interface JsonlFileInfo {
   size: number;     // file size in bytes
 }
 
+/**
+ * Extract the custom title (nickname) from a Claude session JSONL file.
+ * Scans for the LAST `type: "custom-title"` entry (most recent rename).
+ * Returns null if no title found or file unreadable.
+ */
+function extractSessionTitle(filePath: string): string | null {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    // Quick bail if no custom-title anywhere in the file
+    if (!content.includes("custom-title")) return null;
+
+    let title: string | null = null;
+    const lines = content.split("\n");
+    for (const line of lines) {
+      if (!line.includes("custom-title")) continue;
+      try {
+        const entry = JSON.parse(line) as { type?: string; customTitle?: string };
+        if (entry.type === "custom-title" && entry.customTitle) {
+          title = entry.customTitle;
+        }
+      } catch { /* skip malformed lines */ }
+    }
+    return title;
+  } catch {
+    return null;
+  }
+}
+
 /** List all JSONL files for a project path, sorted by mtime descending */
 export function resolveJsonlFiles(projectPath: string): JsonlFileInfo[] {
   const mangled = manglePath(projectPath);
@@ -553,10 +581,14 @@ export function getConversationPage(
   beforeUuid?: string,
 ): ConversationPage {
   const files = resolveJsonlFiles(projectPath);
-  const sessionList = files.map(f => ({
-    id: f.id,
-    last_modified: new Date(f.mtime).toISOString(),
-  }));
+  const sessionList = files.map(f => {
+    const title = extractSessionTitle(f.path) ?? undefined;
+    return {
+      id: f.id,
+      last_modified: new Date(f.mtime).toISOString(),
+      title,
+    };
+  });
 
   // Resolve JSONL file
   let jsonlFile: JsonlFileInfo | null = null;

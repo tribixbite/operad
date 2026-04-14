@@ -425,7 +425,7 @@ export interface ConversationPage {
   has_more: boolean;
   session_id: string;
   /** Available JSONL sessions for the session picker */
-  session_list: Array<{ id: string; last_modified: string }>;
+  session_list: Array<{ id: string; last_modified: string; title?: string }>;
 }
 
 // -- Session timeline ---------------------------------------------------------
