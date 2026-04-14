@@ -1,7 +1,11 @@
 /**
  * sdk-bridge.ts — Bridge between operad daemon and Claude Agent SDK
  *
- * Manages ONE active SDK query at a time (Android memory constraint:
+ * Uses the V2 session API (unstable_v2_createSession / unstable_v2_resumeSession)
+ * for persistent sessions that support multiple prompts without the empty-text-block
+ * cache_control bug that affects the v1 query() API.
+ *
+ * Manages ONE active SDK session at a time (Android memory constraint:
  * ~150-300MB per subprocess). Streams messages over WebSocket to
  * dashboard clients and handles permission callbacks.
  */
@@ -11,7 +15,7 @@
  * This prevents the daemon from crashing at startup when
  * @anthropic-ai/claude-agent-sdk is not installed.
  */
-import { existsSync, readlinkSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { detectPlatform } from "./platform/platform.js";
@@ -34,7 +38,7 @@ async function getSdk() {
 }
 
 /** SDK message type (re-exported for consumers that reference it) */
-type SDKMessage = Awaited<ReturnType<typeof getSdk>> extends { SDKMessage: infer T } ? T : any;
+type SDKMessage = any;
 type SDKResultMessage = any;
 type SDKSessionInfo = any;
 
@@ -53,13 +57,15 @@ interface PendingPermission {
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** Active query wrapper */
-interface ActiveQuery {
+/** Active V2 session wrapper */
+interface ActiveSession {
   sessionName: string;
-  sessionId: string | undefined;
+  /** Claude Code session UUID */
+  sessionId: string;
   cwd: string;
-  query: any; // ReturnType of sdk.query() — typed as any since SDK is lazy-loaded
-  /** Whether the query is currently processing a prompt */
+  /** V2 session object — has .send(), .stream(), .close(), .sessionId */
+  session: any;
+  /** Whether a prompt is currently being processed */
   busy: boolean;
 }
 
@@ -92,12 +98,12 @@ function resolveClaudePath(): string {
     // Try which first
     const whichResult = execSync("which claude", { encoding: "utf-8" }).trim();
     if (whichResult) {
-      // Resolve symlinks to get the actual JS file
+      // Resolve ALL symlinks to get the absolute JS file path
+      // readlinkSync only follows one level and may return a relative path
       try {
-        cachedClaudePath = readlinkSync(whichResult);
+        cachedClaudePath = realpathSync(whichResult);
         return cachedClaudePath;
       } catch {
-        // readlink fails if it's not a symlink — use the path directly
         cachedClaudePath = whichResult;
         return cachedClaudePath;
       }
@@ -122,7 +128,7 @@ function resolveClaudePath(): string {
 }
 
 export class SdkBridge {
-  private active: ActiveQuery | null = null;
+  private active: ActiveSession | null = null;
   private pendingPermissions = new Map<string, PendingPermission>();
   private permissionIdCounter = 0;
   private log: Logger;
@@ -136,7 +142,7 @@ export class SdkBridge {
     this.config = config ?? {};
   }
 
-  /** Whether there's an active query */
+  /** Whether there's an active session */
   get isAttached(): boolean {
     return this.active !== null;
   }
@@ -146,14 +152,39 @@ export class SdkBridge {
     return this.active?.sessionName ?? null;
   }
 
-  /** Whether the active query is busy processing a prompt */
+  /** Whether the active session is busy processing a prompt */
   get isBusy(): boolean {
     return this.active?.busy ?? false;
   }
 
   /**
-   * Attach to a session — creates a new SDK query (or resumes an existing one).
-   * Only one query can be active at a time (Android memory constraint).
+   * Build shared session options for V2 create/resume calls.
+   * Centralizes Termux-specific config (executable, path, env, sandbox).
+   */
+  private buildSessionOptions(cwd: string): Record<string, unknown> {
+    const env = this.platform.cleanEnv();
+    const opts: Record<string, unknown> = {
+      cwd,
+      settingSources: ["user", "project", "local"],
+      executable: "node",
+      pathToClaudeCodeExecutable: resolveClaudePath(),
+      env,
+      sandbox: { enabled: false },
+      canUseTool: async (toolName: string, toolInput: unknown) => {
+        return this.requestPermission(this.active?.sessionName ?? "unknown", toolName, toolInput);
+      },
+      permissionMode: "default",
+    };
+    if (this.config.effort) opts.effort = this.config.effort;
+    if (this.config.thinking) opts.thinking = this.config.thinking;
+    if (this.config.maxBudgetUsd) opts.maxBudgetUsd = this.config.maxBudgetUsd;
+    if (this.config.model) opts.model = this.config.model;
+    return opts;
+  }
+
+  /**
+   * Attach to a session — creates a new V2 session or resumes an existing one.
+   * Only one session can be active at a time (Android memory constraint).
    */
   async attach(
     sessionName: string,
@@ -165,68 +196,45 @@ export class SdkBridge {
       await this.detach();
     }
 
-    const env = this.platform.cleanEnv();
     const sdk = await getSdk();
+    // Cast to any — SDKSessionOptions requires model but it defaults internally
+    const opts = this.buildSessionOptions(cwd) as any;
 
-    const q = sdk.query({
-      prompt: "", // Empty initial prompt — we'll send prompts via send()
-      options: {
-        cwd,
-        // Resume existing session if sessionId provided
-        ...(sessionId ? { resume: sessionId } : {}),
-        // Load user + project settings for CLAUDE.md etc.
-        settingSources: ["user", "project", "local"],
-        // Stream partial messages for real-time UI updates
-        includePartialMessages: true,
-        // Use node on Termux — bun's glibc-runner strips LD_PRELOAD
-        executable: "node",
-        // Resolve claude path for Termux shebang compatibility
-        pathToClaudeCodeExecutable: resolveClaudePath(),
-        // Clean env with LD_PRELOAD re-injected
-        env,
-        // Termux can't sandbox
-        sandbox: { enabled: false },
-        // Permission callback — routes to WS for dashboard approval
-        canUseTool: async (toolName: string, toolInput: unknown) => {
-          return this.requestPermission(sessionName, toolName, toolInput);
-        },
-        // SDK-level config
-        ...(this.config.effort ? { effort: this.config.effort } : {}),
-        ...(this.config.thinking ? { thinking: this.config.thinking } : {}),
-        ...(this.config.maxBudgetUsd ? { maxBudgetUsd: this.config.maxBudgetUsd } : {}),
-        ...(this.config.model ? { model: this.config.model } : {}),
-        // Don't auto-accept edits — route through permission
-        permissionMode: "default",
-      },
-    });
+    // V2 API: create or resume a persistent session
+    let session: any;
+    if (sessionId) {
+      session = sdk.unstable_v2_resumeSession(sessionId, opts);
+    } else {
+      session = sdk.unstable_v2_createSession(opts);
+    }
 
-    // Capture session ID from init message
+    // V2 session ID is only available after first message exchange;
+    // use provided sessionId or empty string until resolved by a prompt
     let resolvedSessionId = sessionId ?? "";
+    try {
+      resolvedSessionId = session.sessionId ?? resolvedSessionId;
+    } catch {
+      // .sessionId getter may throw before messages are received
+    }
 
-    // Start consuming messages in background
     this.active = {
       sessionName,
       sessionId: resolvedSessionId,
       cwd,
-      query: q,
+      session,
       busy: false,
     };
 
-    // Consume init messages
-    this.consumeMessages(sessionName, q).catch((err) => {
-      this.log.error(`SDK stream error for ${sessionName}: ${err}`);
-      this.broadcast(sessionName, { type: "error", message: String(err) });
-    });
-
-    this.log.info(`SDK attached to session: ${sessionName} (id=${sessionId ?? "new"})`);
+    this.log.info(`SDK attached to session: ${sessionName} (id=${resolvedSessionId || "new"})`);
     this.broadcast(sessionName, { type: "attached", sessionName, sessionId: resolvedSessionId });
 
     return { sessionId: resolvedSessionId };
   }
 
   /**
-   * Send a prompt to the active query.
-   * The query subprocess stays alive between prompts (~2-3s vs ~12s cold start).
+   * Send a prompt to the active V2 session.
+   * Streams messages to WS clients in real time, then returns the result.
+   * The subprocess stays alive between prompts (~2-3s vs ~12s cold start).
    */
   async send(prompt: string, options?: {
     effort?: "low" | "medium" | "high" | "max";
@@ -235,43 +243,49 @@ export class SdkBridge {
     if (!this.active) throw new Error("No active SDK session");
     if (this.active.busy) throw new Error("Query is busy processing");
 
-    const q = this.active.query;
-    const sessionName = this.active.sessionName;
+    const { session, sessionName } = this.active;
     this.active.busy = true;
 
     this.broadcast(sessionName, { type: "prompt_start", prompt });
 
     try {
-      // Apply per-query options if provided
-      if (options?.effort) {
-        // TODO: effort can't be changed per-send yet, only per-query
-        this.log.debug(`Effort override not yet supported per-send: ${options.effort}`);
-      }
+      // Send the prompt — this starts the Claude subprocess processing
+      await session.send(prompt);
 
-      // Stream messages from the SDK
-      for await (const msg of q) {
+      // Stream messages from the session until we get a result
+      for await (const msg of session.stream()) {
         this.routeMessage(sessionName, msg);
 
-        // Check for result message (query complete for this prompt)
+        // Capture session ID from init message
+        if (msg.type === "system" && msg.subtype === "init" && msg.session_id) {
+          if (this.active) {
+            this.active.sessionId = msg.session_id;
+          }
+        }
+
+        // Result message means this prompt is done
         if (msg.type === "result") {
           break;
         }
       }
+    } catch (err) {
+      this.log.error(`SDK send error for ${sessionName}: ${err}`);
+      this.broadcast(sessionName, { type: "error", message: String(err) });
     } finally {
       if (this.active) this.active.busy = false;
     }
   }
 
-  /** Interrupt the active query */
+  /** Interrupt the active session */
   async interrupt(): Promise<void> {
     if (!this.active) return;
-    try {
-      await this.active.query.interrupt();
-      this.broadcast(this.active.sessionName, { type: "interrupted" });
-      this.log.info(`SDK query interrupted for ${this.active.sessionName}`);
-    } catch (err) {
-      this.log.warn(`Interrupt failed: ${err}`);
-    }
+    // V2 sessions don't have an explicit interrupt() — close and re-attach
+    this.log.info(`SDK interrupt requested for ${this.active.sessionName}`);
+    const { sessionName, sessionId, cwd } = this.active;
+    await this.detach();
+    // Re-attach to resume the session for future prompts
+    await this.attach(sessionName, sessionId, cwd);
+    this.broadcast(sessionName, { type: "interrupted" });
   }
 
   /** Detach — close the SDK subprocess */
@@ -279,12 +293,12 @@ export class SdkBridge {
     if (!this.active) return;
     const name = this.active.sessionName;
     try {
-      this.active.query.close();
+      this.active.session.close();
     } catch { /* may already be closed */ }
     this.active = null;
 
     // Clean up pending permissions
-    for (const [id, pending] of this.pendingPermissions) {
+    for (const [, pending] of this.pendingPermissions) {
       clearTimeout(pending.timer);
       pending.resolve({ behavior: "deny", message: "Session detached" });
     }
@@ -310,13 +324,12 @@ export class SdkBridge {
   }
 
   /** Change model at runtime */
-  async setModel(model: string): Promise<void> {
-    if (!this.active) throw new Error("No active SDK session");
-    await this.active.query.setModel(model);
-    this.log.info(`SDK model changed to: ${model}`);
+  async setModel(_model: string): Promise<void> {
+    // V2 sessions don't expose setModel — log for now
+    this.log.info(`SDK model change requested: ${_model} (not supported in V2 API)`);
   }
 
-  // -- Session listing (standalone functions, no active query needed) ----------
+  // -- Session listing (standalone functions, no active session needed) --------
 
   /** List Claude Code sessions, optionally filtered by directory */
   async listAllSessions(dir?: string, limit?: number): Promise<SDKSessionInfo[]> {
@@ -337,28 +350,6 @@ export class SdkBridge {
   }
 
   // -- Internal ----------------------------------------------------------------
-
-  /** Consume messages from the query stream and broadcast to WS clients */
-  private async consumeMessages(
-    sessionName: string,
-    q: any, // SDK query async iterable
-  ): Promise<void> {
-    try {
-      for await (const msg of q) {
-        this.routeMessage(sessionName, msg);
-
-        // Capture session ID from init message
-        if (msg.type === "system" && "subtype" in msg && msg.subtype === "init") {
-          if (this.active && this.active.sessionName === sessionName) {
-            this.active.sessionId = msg.session_id;
-          }
-        }
-      }
-    } catch (err) {
-      // Stream ended (normal on detach or when query completes)
-      this.log.debug(`SDK stream ended for ${sessionName}: ${err}`);
-    }
-  }
 
   /** Route an SDK message to the appropriate WS broadcast format */
   private routeMessage(sessionName: string, msg: SDKMessage): void {
@@ -398,7 +389,6 @@ export class SdkBridge {
           type: "system",
           subtype: "subtype" in msg ? msg.subtype : "unknown",
           session_id: msg.session_id,
-          // Forward select fields based on subtype
           ...("tools" in msg ? { tools: msg.tools } : {}),
           ...("model" in msg ? { model: msg.model } : {}),
           ...("claude_code_version" in msg ? { version: msg.claude_code_version } : {}),

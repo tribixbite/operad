@@ -269,7 +269,6 @@
     <div class="drawer-header">
       <h3 class="drawer-title">{sessionName}</h3>
       <div class="drawer-controls">
-        <!-- TODO: Live SDK streaming toggle — hidden until SDK bridge is functional
         <button
           class="live-toggle"
           class:live-active={liveMode}
@@ -279,7 +278,6 @@
           <svg class="live-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg>
           Live
         </button>
-        -->
         <button class="drawer-close" onclick={onclose} title="Close (Esc)"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
       </div>
     </div>
