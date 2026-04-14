@@ -756,6 +756,40 @@ export class Daemon {
     }
 
     this.state.transition(name, "stopping");
+
+    // Kill bare (non-tmux) process if adopted
+    const adoptedPid = this.adoptedPids.get(name);
+    const cfg = this.config.sessions.find((c) => c.name === name);
+    if (adoptedPid || cfg?.bare) {
+      // Find all PIDs to kill: adopted PID + any matching service process
+      const pidsToKill = new Set<number>();
+      if (adoptedPid) pidsToKill.add(adoptedPid);
+      const pattern = cfg ? this.getBareServicePattern(cfg) : null;
+      if (pattern) {
+        const realPid = findBareServicePid(pattern);
+        if (realPid) pidsToKill.add(realPid);
+      }
+
+      for (const pid of pidsToKill) {
+        this.log.info(`Killing bare process '${name}' (PID ${pid})`, { session: name });
+        try {
+          // Kill process group first (catches children like xfce4-session, dbus-launch)
+          process.kill(-pid, "SIGTERM");
+        } catch {
+          // Process group kill may fail — fall back to direct PID kill
+          try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+        }
+      }
+      await sleep(1500);
+      // Force-kill any survivors
+      for (const pid of pidsToKill) {
+        if (existsSync(`/proc/${pid}`)) {
+          try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
+        }
+      }
+      this.adoptedPids.delete(name);
+    }
+
     const stopped = await stopSession(name, this.log);
     if (stopped) {
       this.state.transition(name, "stopped");
