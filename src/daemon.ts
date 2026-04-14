@@ -2449,16 +2449,12 @@ export class Daemon {
         });
       });
 
-      // Load agent definitions and inject into SDK bridge
-      const projectPaths = this.config.sessions
-        .filter((s) => s.path)
-        .map((s) => s.path!);
-      this.agentConfigs = loadAgents(this.config.agents ?? [], projectPaths);
-      const enabledAgents = this.agentConfigs.filter((a) => a.enabled);
-      if (enabledAgents.length > 0) {
-        this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
-        this.log.info(`Loaded ${enabledAgents.length} agents: ${enabledAgents.map((a) => a.name).join(", ")}`);
-      }
+      // Load agent definitions, populate switchboard agents map, inject into SDK bridge
+      this.reloadAgents();
+      // Persist switchboard so agent names survive restart
+      const bootState = this.state.getState();
+      bootState.switchboard = this.switchboard;
+      this.state.flush();
 
       // Start cognitive timer — checks OODA trigger conditions every 60s
       this.cognitiveTimer = setInterval(() => {
