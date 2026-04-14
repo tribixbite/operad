@@ -431,12 +431,12 @@ export function parseOodaResponse(text: string): OodaAction[] {
         break;
 
       case "personality":
-        if (fields.trait && fields.value && fields.evidence) {
+        if (fields.trait && fields.value) {
           actions.push({
             type: "personality",
             trait: fields.trait,
             value: parseFloat(fields.value),
-            evidence: fields.evidence,
+            evidence: fields.evidence ?? "",
           });
         }
         break;

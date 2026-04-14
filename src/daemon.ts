@@ -2812,22 +2812,7 @@ export class Daemon {
     if (agentContext) promptParts.push(agentContext);
     if (historyText) promptParts.push(`## Conversation History\n${historyText}`);
 
-    // Self-improvement instructions
-    promptParts.push(`## Self-Improvement
-You accumulate knowledge across conversations. Use these blocks to record what you learn:
-
-\`\`\`learning
-category: insight|mistake|pattern|preference
-content: what you learned
-confidence: 0.0-1.0
-\`\`\`
-
-\`\`\`personality
-trait: trait_name (e.g., risk_tolerance, verbosity, creativity, thoroughness)
-value: 0.0-1.0
-evidence: why you're setting this value
-\`\`\``);
-
+    // Self-improvement instructions already included in agent prompt (agents.ts)
     promptParts.push(`## Current Message\n${userPrompt}`);
 
     const fullPrompt = promptParts.join("\n\n---\n\n");

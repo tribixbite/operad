@@ -86,6 +86,10 @@
   let growthLearnings = $derived(growthAgent ? (learnings.get(growthAgent) ?? []) : []);
   /** Derived decision metric for selected growth agent */
   let growthMetric = $derived(growthAgent ? decisionMetrics.find(m => m.agent_name === growthAgent) ?? null : null);
+  /** Per-agent personality drift */
+  let drifts: Map<string, Array<{ trait_name: string; current: number; previous: number; delta: number; direction: string }>> = $state(new Map());
+  /** Derived drift for selected growth agent */
+  let growthDrift = $derived(growthAgent ? (drifts.get(growthAgent) ?? []) : []);
 
   // -- Load data --------------------------------------------------------------
 
@@ -165,19 +169,23 @@
       agentNames = agents.map((a: AgentInfo) => a.name);
       decisionMetrics = metrics;
 
-      // Load personality + learnings for each agent in parallel
+      // Load personality + learnings + drift for each agent in parallel
       const pMap = new Map<string, PersonalityTrait[]>();
       const lMap = new Map<string, AgentLearning[]>();
+      const dMap = new Map<string, Array<{ trait_name: string; current: number; previous: number; delta: number; direction: string }>>();
       await Promise.all(agents.map(async (a: AgentInfo) => {
-        const [p, l] = await Promise.all([
+        const [p, l, d] = await Promise.all([
           fetchAgentPersonality(a.name),
           fetchAgentLearnings(a.name, 10),
+          fetchAgentDrift(a.name),
         ]);
         pMap.set(a.name, p);
         lMap.set(a.name, l);
+        dMap.set(a.name, d);
       }));
       personalities = pMap;
       learnings = lMap;
+      drifts = dMap;
     } catch (e) {
       error = String(e);
     }
@@ -677,6 +685,11 @@
                       <div class="trait-bar" style="width: {Math.round(t.trait_value * 100)}%"></div>
                     </div>
                     <span class="trait-value">{t.trait_value.toFixed(2)}</span>
+                    {#each growthDrift.filter(d => d.trait_name === t.trait_name) as d}
+                      <span class="drift-indicator" class:up={d.direction === "up"} class:down={d.direction === "down"}>
+                        {d.direction === "up" ? "↑" : "↓"}{Math.abs(d.delta).toFixed(2)}
+                      </span>
+                    {/each}
                   </div>
                 {/each}
               </div>
@@ -1233,6 +1246,9 @@
     border-radius: 3px;
   }
   .trait-value { font-family: monospace; font-size: 0.6rem; color: var(--text-muted); width: 2rem; text-align: right; flex-shrink: 0; }
+  .drift-indicator { font-size: 0.55rem; font-weight: 600; flex-shrink: 0; }
+  .drift-indicator.up { color: #4ade80; }
+  .drift-indicator.down { color: #f87171; }
 
   /* Learnings */
   .learning-list { display: flex; flex-direction: column; gap: 0.3rem; }
