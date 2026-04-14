@@ -3,6 +3,7 @@
     fetchCognitiveState, fetchGoals, createGoal, updateGoal,
     fetchDecisions, triggerOoda,
   } from "../lib/api";
+  import { connect, on } from "../lib/ws.svelte";
   import type { GoalRecord, DecisionRecord } from "../lib/types";
 
   // -- State ------------------------------------------------------------------
@@ -53,7 +54,22 @@
     }
   }
 
-  $effect(() => { loadAll(); });
+  // Load initial data + subscribe to WS events for live updates
+  $effect(() => {
+    loadAll();
+    connect();
+
+    // Auto-refresh when OODA cycle completes — goals/decisions/strategy may have changed
+    const offOoda = on("ooda_status", (msg) => {
+      oodaRunning = !!msg.running;
+      if (!msg.running) {
+        // Reload after OODA completes to pick up new goals/decisions/strategy
+        loadAll();
+      }
+    });
+
+    return () => { offOoda(); };
+  });
 
   // -- Goal actions -----------------------------------------------------------
 

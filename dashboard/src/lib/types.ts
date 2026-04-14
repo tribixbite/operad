@@ -608,3 +608,23 @@ export interface SdkSessionCost {
   total_cost: number;
   queries: number;
 }
+
+// -- Switchboard --------------------------------------------------------------
+
+/** Switchboard — master control for enabling/disabling subsystems */
+export interface Switchboard {
+  /** Master kill-switch — if false, all autonomous subsystems disabled */
+  all: boolean;
+  /** SDK bridge (streaming, attach/detach) */
+  sdkBridge: boolean;
+  /** Cognitive timer (periodic OODA checks) */
+  cognitive: boolean;
+  /** OODA auto-trigger (automatic master controller runs) */
+  oodaAutoTrigger: boolean;
+  /** Memory injection into SDK queries */
+  memoryInjection: boolean;
+  /** Mind meld profile injection into OODA prompts */
+  mindMeld: boolean;
+  /** Per-agent enable overrides — false force-disables */
+  agents: Record<string, boolean>;
+}

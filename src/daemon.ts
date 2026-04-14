@@ -13,7 +13,8 @@ import { execSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync, closeSync, appendFileSync, writeFileSync, readFileSync, chmodSync, readdirSync, statSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import type { TmxConfig, IpcCommand, IpcResponse, SessionConfig, SessionStatus } from "./types.js";
+import type { TmxConfig, IpcCommand, IpcResponse, SessionConfig, SessionStatus, Switchboard } from "./types.js";
+import { defaultSwitchboard } from "./types.js";
 import { loadConfig } from "./config.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
@@ -202,6 +203,8 @@ export class Daemon {
   private sdkBridge: SdkBridge | null = null;
   private memoryDb: MemoryDb | null = null;
   private agentConfigs: AgentConfig[] = [];
+  /** Master switchboard — controls subsystem enable/disable */
+  private switchboard: Switchboard = defaultSwitchboard();
   /** Timer for periodic OODA loop evaluation */
   private cognitiveTimer: ReturnType<typeof setInterval> | null = null;
   /** Scheduled next OODA run (from controller's ```schedule``` blocks) */
@@ -237,6 +240,8 @@ export class Daemon {
     this.config = loadConfig(configPath);
     this.log = new Logger(this.config.orchestrator.log_dir);
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
+    // Restore switchboard from persisted state, fallback to defaults
+    this.switchboard = { ...defaultSwitchboard(), ...this.state.getState().switchboard };
     this.budget = new BudgetTracker(this.config.orchestrator.process_budget, this.log);
     this.wake = new WakeLockManager(this.config.orchestrator.wake_lock_policy, this.log);
     // Acquire wake lock immediately — never release it. Android kills
@@ -2476,6 +2481,7 @@ export class Daemon {
     switch (msg.type) {
       case "attach": {
         if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
+        if (!this.switchboard.all || !this.switchboard.sdkBridge) throw new Error("SDK bridge disabled by switchboard");
         const sessionName = msg.sessionName;
         if (!sessionName) throw new Error("sessionName required");
         // Resolve session path from config or registry
@@ -2490,9 +2496,9 @@ export class Daemon {
         if (!this.sdkBridge?.isAttached) throw new Error("No active SDK session");
         const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
         if (!prompt) throw new Error("prompt required");
-        // Inject memories if available
+        // Inject memories if available and switchboard allows it
         let fullPrompt = prompt;
-        if (this.memoryDb && this.sdkBridge.activeSessionName) {
+        if (this.switchboard.all && this.switchboard.memoryInjection && this.memoryDb && this.sdkBridge.activeSessionName) {
           const sessionPath = this.resolveSessionPath(this.sdkBridge.activeSessionName);
           if (sessionPath) {
             const { prompt: memPrompt } = await buildMemoryPrompt(
@@ -2541,10 +2547,71 @@ export class Daemon {
         ws.send(JSON.stringify({ type: "agent_run_started", agentName }));
         break;
       }
+      case "switchboard_get": {
+        // Return current switchboard state to requesting client
+        ws.send(JSON.stringify({ type: "switchboard_update", ...this.switchboard }));
+        break;
+      }
+      case "switchboard_update": {
+        // Apply partial switchboard update from WS client
+        const patch = msg as unknown as Partial<Switchboard>;
+        delete (patch as any).type; // strip the WS message type field
+        const updated = this.updateSwitchboard(patch);
+        ws.send(JSON.stringify({ type: "switchboard_update", ...updated }));
+        break;
+      }
       default:
         // subscribe/unsubscribe/ping handled by http.ts directly
         break;
     }
+  }
+
+  // -- Switchboard methods ------------------------------------------------------
+
+  /**
+   * Update switchboard state, persist to disk, and broadcast change via WS.
+   * Pass partial updates — only the keys you want to change.
+   */
+  private updateSwitchboard(patch: Partial<Switchboard>): Switchboard {
+    // Merge agents sub-map if provided
+    if (patch.agents) {
+      this.switchboard.agents = { ...this.switchboard.agents, ...patch.agents };
+      delete patch.agents;
+    }
+    Object.assign(this.switchboard, patch);
+
+    // If "all" was turned off, it acts as master kill-switch
+    // (individual toggles remain as-is so turning "all" back on restores previous config)
+
+    // Persist to state
+    const state = this.state.getState();
+    state.switchboard = this.switchboard;
+    this.state.flush();
+
+    // Re-gate agents — switchboard agent overrides interact with agent.enabled
+    this.reloadAgents();
+
+    // Broadcast update to all WS clients
+    this.broadcastSwitchboard("switchboard_update", this.switchboard);
+
+    return this.switchboard;
+  }
+
+  /** Check if a specific agent is enabled (agent.enabled AND switchboard allows it) */
+  private isAgentEnabled(agentName: string): boolean {
+    if (!this.switchboard.all) return false;
+    const agentConf = this.agentConfigs.find((a) => a.name === agentName);
+    if (!agentConf || !agentConf.enabled) return false;
+    // Per-agent switchboard override (default: follow agent.enabled)
+    const sw = this.switchboard.agents[agentName];
+    if (sw === false) return false;
+    return true;
+  }
+
+  /** Broadcast a switchboard/system event to all connected WS clients */
+  private broadcastSwitchboard(type: string, data: unknown): void {
+    if (!this.dashboard) return;
+    this.dashboard.broadcastWs({ type, ...((data && typeof data === "object") ? data : { data }) });
   }
 
   // -- Agent & cognitive methods ------------------------------------------------
@@ -2555,7 +2622,16 @@ export class Daemon {
       .filter((s) => s.path)
       .map((s) => s.path!);
     this.agentConfigs = loadAgents(this.config.agents ?? [], projectPaths);
-    const enabledAgents = this.agentConfigs.filter((a) => a.enabled);
+
+    // Ensure all known agents appear in switchboard (default: true = follow agent.enabled)
+    for (const agent of this.agentConfigs) {
+      if (!(agent.name in this.switchboard.agents)) {
+        this.switchboard.agents[agent.name] = true;
+      }
+    }
+
+    // Apply switchboard overrides: master switch + per-agent toggles
+    const enabledAgents = this.agentConfigs.filter((a) => this.isAgentEnabled(a.name));
     if (this.sdkBridge) {
       this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
     }
@@ -2565,11 +2641,12 @@ export class Daemon {
   /** Handle a standalone agent run (from WS or REST API) */
   private async handleStandaloneAgentRun(agentName: string, prompt: string): Promise<Record<string, unknown>> {
     if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
+    if (!this.switchboard.all || !this.switchboard.sdkBridge) throw new Error("SDK bridge disabled by switchboard");
     if (this.sdkBridge.isAttached) throw new Error("Cannot run agent — SDK session already active");
 
     const agent = this.agentConfigs.find((a) => a.name === agentName);
     if (!agent) throw new Error(`Agent not found: ${agentName}`);
-    if (!agent.enabled) throw new Error(`Agent is disabled: ${agentName}`);
+    if (!this.isAgentEnabled(agentName)) throw new Error(`Agent is disabled: ${agentName}`);
 
     // Resolve cwd: use first session path or home directory
     const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
@@ -2579,6 +2656,7 @@ export class Daemon {
     const runId = this.memoryDb?.startAgentRun(agentName, "standalone", "standalone") ?? 0;
 
     this.log.info(`Starting standalone agent run: ${agentName} (runId=${runId})`);
+    this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "running" });
 
     try {
       const result = await this.sdkBridge.runStandaloneAgent(
@@ -2596,12 +2674,14 @@ export class Daemon {
       }
 
       this.log.info(`Agent run completed: ${agentName} cost=$${result.costUsd.toFixed(4)}`);
+      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
       return { ok: true, runId, ...result };
     } catch (err) {
       if (this.memoryDb && runId > 0) {
         this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
       }
       this.log.error(`Agent run failed: ${agentName}: ${err}`);
+      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "failed", error: String(err) });
       throw err;
     }
   }
@@ -2614,6 +2694,9 @@ export class Daemon {
     // Don't run if SDK is busy or no memory DB
     if (!this.sdkBridge || !this.memoryDb) return;
     if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) return;
+
+    // Check switchboard — both cognitive and oodaAutoTrigger must be on
+    if (!this.switchboard.cognitive || !this.switchboard.oodaAutoTrigger) return;
 
     // Check trigger conditions
     const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller" && a.enabled);
@@ -2648,11 +2731,22 @@ export class Daemon {
       return;
     }
 
+    // Check switchboard
+    if (!this.switchboard.oodaAutoTrigger) {
+      this.log.debug("OODA cycle skipped — disabled by switchboard");
+      return;
+    }
+
     const state = this.state.getState();
     const ctx = buildOodaContext(state, this.memoryDb);
+    // Strip profile data if mind meld is disabled
+    if (!this.switchboard.mindMeld) {
+      ctx.userProfile = { traits: [], notes: [], styles: [], chat_export_count: 0 };
+    }
     const oodaPrompt = buildOodaPrompt(ctx);
 
     this.log.info("Running OODA cycle for master-controller");
+    this.broadcastSwitchboard("ooda_status", { running: true });
 
     try {
       const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller");
@@ -2663,12 +2757,6 @@ export class Daemon {
 
       const runId = this.memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone");
 
-      // Collect response text from broadcast
-      let responseText = "";
-      const origBroadcast = this.dashboard?.broadcastToRoom.bind(this.dashboard);
-
-      // Temporarily intercept broadcasts to capture response text
-      // (The standalone run broadcasts via the agent name room)
       const result = await this.sdkBridge.runStandaloneAgent(
         "master-controller", sdkDef, cwd, oodaPrompt, masterAgent.max_budget_usd,
       );
@@ -2681,14 +2769,20 @@ export class Daemon {
         turns: result.turns,
       });
 
-      // TODO: Capture full response text for parsing OODA actions
-      // Currently the broadcast captures partial messages but we need the full text.
-      // For now, log the completion — action parsing will be wired when response
-      // text capture is implemented via an accumulator in runStandaloneAgent.
+      // Parse and execute structured OODA actions from response text
+      if (result.responseText) {
+        const actions = parseOodaResponse(result.responseText);
+        if (actions.length > 0) {
+          this.log.info(`OODA: parsed ${actions.length} actions from response`);
+          this.executeOodaActions(actions);
+        }
+      }
 
       this.log.info(`OODA cycle completed: cost=$${result.costUsd.toFixed(4)}, turns=${result.turns}`);
+      this.broadcastSwitchboard("ooda_status", { running: false, lastRun: new Date().toISOString(), cost: result.costUsd });
     } catch (err) {
       this.log.error(`OODA cycle failed: ${err}`);
+      this.broadcastSwitchboard("ooda_status", { running: false, error: String(err) });
     }
   }
 
@@ -4074,6 +4168,27 @@ export class Daemon {
           }
 
           return { status: 400, data: { error: `Unknown SDK endpoint: ${subCmd}` } };
+        }
+
+        // -- Switchboard endpoints ---------------------------------------------------
+        case "switchboard": {
+          // GET /api/switchboard — current switchboard state
+          if (method === "GET") {
+            return { status: 200, data: this.switchboard };
+          }
+
+          // PUT /api/switchboard — update switchboard (partial patch)
+          if (method === "PUT") {
+            try {
+              const patch = JSON.parse(body) as Partial<Switchboard>;
+              const updated = this.updateSwitchboard(patch);
+              return { status: 200, data: updated };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+
+          return { status: 405, data: { error: "Method not allowed" } };
         }
 
         // -- Agent endpoints --------------------------------------------------------

@@ -356,7 +356,7 @@ export class SdkBridge {
     cwd: string,
     prompt: string,
     maxBudgetUsd?: number,
-  ): Promise<{ sessionId: string; costUsd: number; inputTokens: number; outputTokens: number; turns: number }> {
+  ): Promise<{ sessionId: string; costUsd: number; inputTokens: number; outputTokens: number; turns: number; responseText: string }> {
     if (this.active) {
       throw new Error("Cannot run standalone agent — SDK session already active");
     }
@@ -381,6 +381,8 @@ export class SdkBridge {
     let inputTokens = 0;
     let outputTokens = 0;
     let turns = 0;
+    /** Accumulated assistant text blocks for post-processing (e.g. OODA action parsing) */
+    const textParts: string[] = [];
 
     try {
       // Prepend agent system prompt to user prompt
@@ -397,11 +399,23 @@ export class SdkBridge {
           resolvedSessionId = msg.session_id;
         }
 
+        // Accumulate assistant text blocks
+        if (msg.type === "assistant" && msg.message?.content) {
+          for (const block of msg.message.content) {
+            if (block.type === "text" && block.text) {
+              textParts.push(block.text);
+            }
+          }
+        }
+
         if (msg.type === "result") {
           costUsd = msg.total_cost_usd ?? 0;
           inputTokens = msg.usage?.input_tokens ?? 0;
           outputTokens = msg.usage?.output_tokens ?? 0;
           turns = msg.num_turns ?? 0;
+          // Result may contain final text (SDKResultSuccess has result_text)
+          const resultText = "result_text" in msg ? (msg as any).result_text : undefined;
+          if (resultText) textParts.push(String(resultText));
           break;
         }
       }
@@ -409,7 +423,8 @@ export class SdkBridge {
       try { session.close(); } catch { /* already closed */ }
     }
 
-    return { sessionId: resolvedSessionId, costUsd, inputTokens, outputTokens, turns };
+    const responseText = textParts.join("\n");
+    return { sessionId: resolvedSessionId, costUsd, inputTokens, outputTokens, turns, responseText };
   }
 
   // -- Session listing (standalone functions, no active session needed) --------

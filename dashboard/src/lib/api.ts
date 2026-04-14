@@ -856,6 +856,24 @@ export async function deleteProfileEntry(id: number): Promise<void> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 
+// -- Switchboard API ----------------------------------------------------------
+
+/** Fetch current switchboard state */
+export async function fetchSwitchboard(): Promise<import("./types").Switchboard> {
+  const res = await fetch("/api/switchboard");
+  return checkedJson(res);
+}
+
+/** Update switchboard (partial patch) */
+export async function updateSwitchboard(patch: Partial<import("./types").Switchboard>): Promise<import("./types").Switchboard> {
+  const res = await fetch("/api/switchboard", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  return checkedJson(res);
+}
+
 // -- SDK cost tracking API ----------------------------------------------------
 
 /** Fetch aggregate SDK costs */

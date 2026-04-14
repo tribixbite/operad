@@ -271,6 +271,11 @@ export class StateManager {
     return newDaemonState();
   }
 
+  /** Flush state to disk immediately (public wrapper for persist) */
+  flush(): void {
+    this.persist();
+  }
+
   /** Write state to disk atomically (write to .tmp then rename) */
   private persist(): void {
     try {

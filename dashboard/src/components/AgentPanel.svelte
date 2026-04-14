@@ -3,6 +3,7 @@
     fetchAgents, toggleAgent, runAgent, deleteAgent, createAgent,
     fetchAgentRuns, fetchAgentCosts,
   } from "../lib/api";
+  import { connect, on } from "../lib/ws.svelte";
   import type { AgentInfo, AgentRunRecord, AgentCostSummary } from "../lib/types";
 
   // -- State ------------------------------------------------------------------
@@ -54,7 +55,24 @@
     }
   }
 
-  $effect(() => { loadAll(); });
+  // Load initial data + subscribe to WS events for live updates
+  $effect(() => {
+    loadAll();
+    connect();
+
+    // Auto-refresh when agent runs complete/fail
+    const offRun = on("agent_run_update", (msg) => {
+      const status = msg.status as string;
+      if (status === "completed" || status === "failed") {
+        runningAgent = null;
+        loadAll();
+      } else if (status === "running") {
+        runningAgent = msg.agentName as string;
+      }
+    });
+
+    return () => { offRun(); };
+  });
 
   // -- Actions ----------------------------------------------------------------
 

@@ -259,6 +259,40 @@ export interface SessionState {
   claude_status: "working" | "waiting" | null;
 }
 
+/**
+ * Switchboard — master control for enabling/disabling subsystems.
+ * Persisted in state.json so toggles survive daemon restarts.
+ */
+export interface Switchboard {
+  /** Master kill-switch — if false, all autonomous subsystems are disabled */
+  all: boolean;
+  /** SDK bridge (streaming, attach/detach) */
+  sdkBridge: boolean;
+  /** Cognitive timer (periodic maybeTriggerOoda checks) */
+  cognitive: boolean;
+  /** OODA auto-trigger (automatic master controller runs) */
+  oodaAutoTrigger: boolean;
+  /** Memory injection into SDK queries */
+  memoryInjection: boolean;
+  /** Mind meld profile injection into OODA prompts */
+  mindMeld: boolean;
+  /** Per-agent enable overrides — true means "use agent.enabled", false force-disables */
+  agents: Record<string, boolean>;
+}
+
+/** Default switchboard — everything on */
+export function defaultSwitchboard(): Switchboard {
+  return {
+    all: true,
+    sdkBridge: true,
+    cognitive: true,
+    oodaAutoTrigger: true,
+    memoryInjection: true,
+    mindMeld: true,
+    agents: {},
+  };
+}
+
 /** Full persisted state */
 export interface TmxState {
   /** ISO timestamp of daemon start */
@@ -273,6 +307,8 @@ export interface TmxState {
   memory?: SystemMemorySnapshot | null;
   /** Latest battery snapshot (populated by daemon, not persisted) */
   battery?: BatterySnapshot | null;
+  /** Switchboard — subsystem enable/disable controls */
+  switchboard?: Switchboard;
 }
 
 /** Battery snapshot stored in state */

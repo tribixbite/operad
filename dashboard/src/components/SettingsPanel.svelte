@@ -6,6 +6,7 @@
     ClaudeMdInfo, HookInfo, MarketplacePlugin, RecentProject,
   } from "../lib/types";
   import McpManager from "./McpManager.svelte";
+  import SwitchboardPanel from "./SwitchboardPanel.svelte";
   import AgentPanel from "./AgentPanel.svelte";
   import MindMeldPanel from "./MindMeldPanel.svelte";
   import CognitivePanel from "./CognitivePanel.svelte";
@@ -50,6 +51,7 @@
     agents: false,
     mindMeld: false,
     cognitive: false,
+    switchboard: true,
   });
 
   /** SDK configuration state */
@@ -505,6 +507,20 @@ Example usage or output
   {:else if error && !data}
     <div class="card"><p class="error-text">Error: {error}</p></div>
   {:else if data}
+
+    <!-- Section 0: Switchboard -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("switchboard")}>
+        <span class="chevron">{sections.switchboard ? "▾" : "▸"}</span>
+        <span class="section-title">Switchboard</span>
+        <span class="badge badge-green">control</span>
+      </button>
+      {#if sections.switchboard}
+        <div class="section-body">
+          <SwitchboardPanel />
+        </div>
+      {/if}
+    </div>
 
     <!-- Section 1: MCP Servers -->
     <div class="card section-card">
