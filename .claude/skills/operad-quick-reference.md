@@ -56,8 +56,8 @@ tmx migrate                 # Convert legacy repos.conf to tmx.toml
 | Registry | `~/.local/share/tmx/registry.json` (dynamically opened sessions) |
 | Trace log | `~/.local/share/tmx/logs/trace.log` (crash-safe, appendFileSync) |
 | Daemon stderr | `~/.local/share/tmx/logs/daemon-stderr.log` |
-| IPC socket | `$PREFIX/tmp/tmx.sock` (Android) / `/tmp/operad.sock` (Linux) |
-| Bundle | `~/git/operad/dist/tmx.js` (~361KB CJS) |
+| IPC socket | `$PREFIX/tmp/tmx.sock` (Android) / `$XDG_RUNTIME_DIR/operad.sock` or `/tmp/operad.sock` (Linux) / `/tmp/operad.sock` (macOS) |
+| Bundle | `~/git/operad/dist/tmx.js` (~494KB CJS) |
 | Symlink | `~/.local/bin/tmx` -> `~/git/operad/dist/tmx.js` |
 
 ## Ports

@@ -9,7 +9,7 @@
 ```sh
 cd ~/git/operad
 bun install
-bun run build        # → dist/tmx.js (~113KB CJS)
+bun run build        # → dist/tmx.js (~494KB CJS)
 bun run typecheck    # zero errors required
 ```
 
