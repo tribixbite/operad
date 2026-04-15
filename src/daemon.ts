@@ -37,6 +37,7 @@ import { MemoryDb, computeQuotaStatus } from "./memory-db.js";
 import { buildMemoryPrompt, saveMemoriesFromResponse } from "./memory-injector.js";
 import { loadAgents, toSdkAgentMap, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
 import { buildOodaContext, buildOodaPrompt, parseOodaResponse, type OodaAction } from "./cognitive.js";
+import { ToolExecutor, type ToolContext, type ToolCategory } from "./tools.js";
 import {
   getProjectTokenUsage,
   getConversationPage,
@@ -202,6 +203,7 @@ export class Daemon {
   private telemetrySink: TelemetrySinkServer | null = null;
   private sdkBridge: SdkBridge | null = null;
   private memoryDb: MemoryDb | null = null;
+  private toolExecutor: ToolExecutor | null = null;
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
   private switchboard: Switchboard = defaultSwitchboard();
@@ -2373,6 +2375,12 @@ export class Daemon {
       this.memoryDb = null;
     }
 
+    // Initialize tool executor (requires memoryDb)
+    if (this.memoryDb) {
+      this.toolExecutor = new ToolExecutor(this.memoryDb, this.log);
+      this.log.info(`Tool executor initialized with ${this.toolExecutor.getAllTools().length} tools`);
+    }
+
     // Initialize SDK bridge (uses WS broadcast for streaming)
     if (this.dashboard) {
       // Accumulate assistant text per session for memory extraction on result
@@ -2956,6 +2964,11 @@ export class Daemon {
     if (!this.switchboard.mindMeld) {
       ctx.userProfile = { traits: [], notes: [], styles: [], chat_export_count: 0 };
     }
+    // Inject available tools for master controller
+    if (this.toolExecutor) {
+      const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller");
+      ctx.availableToolsPrompt = this.toolExecutor.formatToolsForPrompt(masterAgent?.allowed_tool_categories);
+    }
     const oodaPrompt = buildOodaPrompt(ctx);
 
     this.log.info("Running OODA cycle for master-controller");
@@ -2987,7 +3000,7 @@ export class Daemon {
         const actions = parseOodaResponse(result.responseText);
         if (actions.length > 0) {
           this.log.info(`OODA: parsed ${actions.length} actions from response`);
-          this.executeOodaActions(actions);
+          await this.executeOodaActions(actions);
         }
       }
 
@@ -3003,7 +3016,7 @@ export class Daemon {
    * Execute parsed OODA actions from master controller response.
    * Called after parseOodaResponse() returns structured actions.
    */
-  private executeOodaActions(actions: OodaAction[]): void {
+  private async executeOodaActions(actions: OodaAction[]): Promise<void> {
     if (!this.memoryDb) return;
 
     for (const action of actions) {
@@ -3071,11 +3084,73 @@ export class Daemon {
             this.log.info(`OODA: scheduled next run in ${action.delayMinutes}min (${action.reason})`);
             break;
           }
+
+          case "tool_call": {
+            if (!this.toolExecutor || !this.memoryDb) break;
+            const toolCtx = this.buildToolContext("master-controller");
+            const result = await this.toolExecutor.execute(action.name, action.params, toolCtx);
+            this.log.info(`OODA: tool ${action.name} → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
+            // Broadcast tool result to dashboard
+            this.broadcastSwitchboard("tool_result", {
+              agent: "master-controller", tool: action.name,
+              success: result.success, summary: result.summary,
+              duration_ms: result.duration_ms,
+            });
+            break;
+          }
+
+          case "tool_sequence": {
+            if (!this.toolExecutor || !this.memoryDb) break;
+            const toolCtx = this.buildToolContext("master-controller");
+            this.log.info(`OODA: executing tool sequence (${action.steps.length} steps): ${action.reason}`);
+            for (const step of action.steps) {
+              const result = await this.toolExecutor.execute(step.name, step.params, toolCtx);
+              this.log.info(`OODA: seq step ${step.name} → ${result.success ? "ok" : "fail"}`);
+              if (!result.success) {
+                this.log.warn(`OODA: tool sequence aborted at ${step.name}: ${result.summary}`);
+                break;
+              }
+            }
+            break;
+          }
         }
       } catch (err) {
         this.log.warn(`OODA action failed (${action.type}): ${err}`);
       }
     }
+  }
+
+  /** Build a ToolContext for a specific agent with session state accessors */
+  private buildToolContext(agentName: string): ToolContext {
+    const state = this.state.getState();
+    return {
+      agentName,
+      cwd: this.config.sessions.find((s) => s.path)?.path ?? homedir(),
+      db: this.memoryDb!,
+      log: this.log,
+      signal: new AbortController().signal,
+      getSessionStates: () => {
+        const result: Record<string, { status: string; activity: string | null; rss_mb: number | null }> = {};
+        for (const [name, s] of Object.entries(state.sessions)) {
+          result[name] = { status: s.status, activity: s.activity, rss_mb: s.rss_mb };
+        }
+        return result;
+      },
+      getSystemMemory: () => state.memory ? { available_mb: state.memory.available_mb, pressure: state.memory.pressure } : null,
+      getBattery: () => state.battery ? { pct: state.battery.percentage, charging: state.battery.charging } : null,
+      captureSessionOutput: (name: string, lines: number) => {
+        try {
+          const output = execSync(
+            `tmux capture-pane -t ${JSON.stringify(name)} -p -S -${lines}`,
+            { encoding: "utf-8", timeout: 3000 },
+          ).trim();
+          return output || null;
+        } catch { return null; }
+      },
+      sendToSession: (name: string, text: string) => {
+        sendKeys(name, text);
+      },
+    };
   }
 
   /** Start telemetry sink server if enabled in config */

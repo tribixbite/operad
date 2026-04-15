@@ -1,16 +1,16 @@
-# Phase 9: Agentic Tool Use, State Portability, Scheduling & Autonomy
+# Phase 10: Agentic Tool Use, State Portability, Scheduling & Autonomy
 
 ## Context
 
-Phase 8 completed the cognitive feedback loops: agent chat, learning/personality systems, inter-agent messaging, growth tracking, streaming, markdown rendering, and thinking blocks. Agents can now think, reflect, learn, and evolve -- but they **cannot act**. They have no file I/O, no shell access, no API calls, no tool use. Phase 9 gives agents hands.
+Phase 8 completed cognitive feedback loops. Phase 10 refactored cost tracking to token quota management. Agents can now think, reflect, learn, and evolve -- but they **cannot act**. They have no file I/O, no shell access, no API calls, no tool use. Phase 10 gives agents hands.
 
 **Design sources**: Opus deep architecture review + Gemini 3 Pro creative brainstorm + codebase analysis.
 
 ---
 
-## Phase 9A: Tool Registry & Built-in Tools
+## Phase 10A: Tool Registry & Built-in Tools
 
-### 9A.1 Tool Type System
+### 10A.1 Tool Type System
 **File**: `src/tools.ts` (NEW)
 
 ```typescript
@@ -50,7 +50,7 @@ interface ToolResult {
 }
 ```
 
-### 9A.2 Built-in Tool Set (initial, conservative)
+### 10A.2 Built-in Tool Set (initial, conservative)
 
 **Observe** (always auto-approved):
 - `system-status` — sessions, memory, battery, costs (same as OODA observations)
@@ -82,7 +82,7 @@ interface ToolResult {
 - `session-send` — send text to a tmux pane
 - `agent-spawn` — trigger another agent's run
 
-### 9A.3 Tool Emission via Fenced Blocks
+### 10A.3 Tool Emission via Fenced Blocks
 **File**: `src/cognitive.ts`
 
 Extends `OodaAction` union:
@@ -102,7 +102,7 @@ lines: 1-50
 
 Multi-step sequences support `$prev.data.fieldName` template syntax for chaining.
 
-### 9A.4 Tool Execution Pipeline
+### 10A.4 Tool Execution Pipeline
 **File**: `src/daemon.ts`, extend `executeOodaActions()`
 
 ```
@@ -119,7 +119,7 @@ Agent emits ```tool block
     → Return ToolResult → injected into next prompt as ## Tool Results
 ```
 
-### 9A.5 Tool Audit Log
+### 10A.5 Tool Audit Log
 **File**: `src/memory-db.ts`
 
 ```sql
@@ -143,7 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_agent ON tool_executions(agent_name, created
 
 Append-only — no UPDATE/DELETE in MemoryDb API. Full forensic trail.
 
-### 9A.6 OODA Prompt: Available Tools Section
+### 10A.6 OODA Prompt: Available Tools Section
 **File**: `src/cognitive.ts`, `buildOodaPrompt()`
 
 Add section listing available tools per agent's permission scope:
@@ -156,7 +156,7 @@ You can execute tools using ```tool blocks. Available to you:
 ...
 ```
 
-### 9A.7 Per-Agent Tool Scoping
+### 10A.7 Per-Agent Tool Scoping
 **File**: `src/agents.ts`, extend `AgentConfig`
 
 ```typescript
@@ -177,9 +177,9 @@ Default tool access:
 
 ---
 
-## Phase 9B: Autonomy & Budget Guardrails
+## Phase 10B: Autonomy & Budget Guardrails
 
-### 9B.1 Autonomy Levels
+### 10B.1 Autonomy Levels
 **File**: `src/types.ts`
 
 ```typescript
@@ -191,7 +191,7 @@ type AutonomyLevel =
   | "autonomous"; // everything auto-approved; human notified post-hoc
 ```
 
-### 9B.2 Dynamic Trust Calibration (Gemini idea)
+### 10B.2 Dynamic Trust Calibration (Gemini idea)
 **File**: `src/memory-db.ts`
 
 ```sql
@@ -219,7 +219,7 @@ Trust score → autonomy recommendation:
 
 Adjustments are **recommendations** shown in dashboard — user approves or dismisses.
 
-### 9B.3 Budget Guardrails
+### 10B.3 Budget Guardrails
 **File**: `src/types.ts`, `src/daemon.ts`
 
 ```typescript
@@ -235,7 +235,7 @@ interface AgentBudgetGuardrails {
 
 When any cap is hit → agent auto-disabled in switchboard, notification fires, schedules paused.
 
-### 9B.4 Protected Checkpoints
+### 10B.4 Protected Checkpoints
 **File**: `src/config.ts`
 
 ```toml
@@ -248,7 +248,7 @@ protected_tools = ["session-stop", "session-send", "http-fetch"]
 
 These always require human approval regardless of autonomy level.
 
-### 9B.5 Contextual Tool Leases (Gemini idea)
+### 10B.5 Contextual Tool Leases (Gemini idea)
 **File**: `src/memory-db.ts`
 
 ```sql
@@ -269,9 +269,9 @@ When agent takes a Goal, master-controller grants specific tool leases. Lease ex
 
 ---
 
-## Phase 9C: Persistent Scheduling
+## Phase 10C: Persistent Scheduling
 
-### 9C.1 Schedule Table
+### 10C.1 Schedule Table
 **File**: `src/memory-db.ts`
 
 ```sql
@@ -296,12 +296,12 @@ CREATE TABLE IF NOT EXISTS agent_schedules (
 CREATE INDEX IF NOT EXISTS idx_schedule_next ON agent_schedules(enabled, next_run_at);
 ```
 
-### 9C.2 Schedule Engine
+### 10C.2 Schedule Engine
 **File**: `src/schedule.ts` (NEW)
 
 Replaces in-memory `scheduledOodaTimer`. Polls every 30s, fires due schedules, tracks failures, auto-disables after 3 consecutive failures. Survives daemon restarts.
 
-### 9C.3 Agent Schedule Emission
+### 10C.3 Agent Schedule Emission
 
 Extended `schedule` block format:
 ```
@@ -315,7 +315,7 @@ max_budget_usd: 0.50
 
 Backwards compatible: existing `delayMinutes`-only blocks become one-shot schedules.
 
-### 9C.4 Event-Driven Triggers (Gemini "wake word" idea)
+### 10C.4 Event-Driven Triggers (Gemini "wake word" idea)
 **File**: `src/triggers.ts` (NEW), `src/memory-db.ts`
 
 ```sql
@@ -345,9 +345,9 @@ Evaluated in the daemon's existing tick loop — lightweight condition checks, n
 
 ---
 
-## Phase 9D: Agent State Portability
+## Phase 10D: Agent State Portability
 
-### 9D.1 Agent State Bundle Format
+### 10D.1 Agent State Bundle Format
 **File**: `src/agent-state.ts` (NEW)
 
 ```typescript
@@ -376,7 +376,7 @@ interface AgentStateBundle {
 
 Single `.operad-agent` file — gzipped JSON, self-contained, no external refs or DB IDs.
 
-### 9D.2 Export/Import API
+### 10D.2 Export/Import API
 **File**: `src/daemon.ts`
 
 ```
@@ -393,7 +393,7 @@ operad agent import < mc.operad-agent
 operad agent import --merge < mc.operad-agent
 ```
 
-### 9D.3 Import Merge Strategy
+### 10D.3 Import Merge Strategy
 
 ```typescript
 interface ImportOptions {
@@ -408,7 +408,7 @@ Learnings: dedup via `content_hash`. Duplicate → keep higher confidence, sum r
 Personality: merge strategy determines which value wins for same trait.
 Strategies: all versions concatenated, import's active replaces only in `replace` mode.
 
-### 9D.4 Automatic Snapshots
+### 10D.4 Automatic Snapshots
 
 Daily snapshots in `~/.local/share/operad/snapshots/{agent-name}/{date}.operad-agent.gz`.
 Retention: 7 daily, 4 weekly, 3 monthly (configurable in TOML).
@@ -416,9 +416,9 @@ Triggered during consolidation timer. Each snapshot is a full bundle (minus conv
 
 ---
 
-## Phase 9E: Memory Consolidation & Reflection
+## Phase 10E: Memory Consolidation & Reflection
 
-### 9E.1 REM Sleep Consolidation (Gemini idea)
+### 10E.1 REM Sleep Consolidation (Gemini idea)
 **File**: `src/consolidation.ts` (NEW)
 
 Triggers during idle periods (no user activity 30+ min, battery > 30%, on charger):
@@ -443,7 +443,7 @@ CREATE TABLE IF NOT EXISTS consolidation_runs (
 );
 ```
 
-### 9E.2 Agent Reflection ("Dreams")
+### 10E.2 Agent Reflection ("Dreams")
 
 During consolidation, master-controller gets a special reflection prompt:
 
@@ -472,7 +472,7 @@ Emit ```learning```, ```personality```, and ```strategy``` blocks.
 
 Runs with `effort: "max"` and extended thinking. Output is purely self-improvement.
 
-### 9E.3 Strategy A/B Forking (Gemini idea)
+### 10E.3 Strategy A/B Forking (Gemini idea)
 
 When optimizer detects a recurring goal type, it can fork strategies:
 1. Create Variant A and Variant B with different approaches
@@ -484,9 +484,9 @@ This is true meta-learning — the system experiments with *how* it solves probl
 
 ---
 
-## Phase 9F: Collaborative Patterns
+## Phase 10F: Collaborative Patterns
 
-### 9F.1 Roundtable Protocol
+### 10F.1 Roundtable Protocol
 
 MC can invoke structured multi-agent discussion:
 ```
@@ -506,7 +506,7 @@ Daemon orchestrates:
 
 Different perspectives emerge because agents have different personalities, learnings, strategies.
 
-### 9F.2 Agent Specialization Tracking
+### 10F.2 Agent Specialization Tracking
 
 Track what task types each agent handles successfully:
 ```typescript
@@ -523,20 +523,20 @@ MC uses specialization data when delegating: "optimizer has 0.92 success rate on
 ## Implementation Order
 
 ```
-9A: Tool Registry + Built-in Tools        ← foundation, everything depends on this
+10A: Tool Registry + Built-in Tools        ← foundation, everything depends on this
   │
-9B: Autonomy + Budget + Trust Calibration  ← required before agents can use tools safely
+10B: Autonomy + Budget + Trust Calibration  ← required before agents can use tools safely
   │
-9C: Persistent Scheduling + Triggers       ← agents can schedule their own work
+10C: Persistent Scheduling + Triggers       ← agents can schedule their own work
   │
-9D: Agent State Portability                ← export/import/snapshot system
+10D: Agent State Portability                ← export/import/snapshot system
   │
-9E: Memory Consolidation + Reflection      ← idle-time self-improvement
+10E: Memory Consolidation + Reflection      ← idle-time self-improvement
   │
-9F: Collaborative Patterns                 ← roundtable, specialization
+10F: Collaborative Patterns                 ← roundtable, specialization
 ```
 
-Each phase produces a commit. 9A-9B are prerequisites. 9C-9F can be parallelized.
+Each phase produces a commit. 10A-10B are prerequisites. 10C-10F can be parallelized.
 
 ---
 

@@ -348,6 +348,24 @@ const SCHEMA_STATEMENTS: string[] = [
     created_at INTEGER DEFAULT (unixepoch())
   )`,
   `CREATE INDEX IF NOT EXISTS idx_personality ON agent_personality(agent_name, trait_name)`,
+
+  // Tool execution audit log (append-only forensic trail)
+  `CREATE TABLE IF NOT EXISTS tool_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    tool_category TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    result_success INTEGER NOT NULL,
+    result_summary TEXT,
+    side_effects TEXT,
+    duration_ms INTEGER,
+    approval TEXT NOT NULL DEFAULT 'auto',
+    error TEXT,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_agent ON tool_executions(agent_name, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_executions(tool_name, created_at)`,
 ];
 
 /**
@@ -1402,5 +1420,87 @@ export class MemoryDb {
        GROUP BY agent_name
        ORDER BY agent_name`,
     ).all() as Array<{ agent_name: string; total_decisions: number; scored_decisions: number; avg_score: number | null }>;
+  }
+
+  // -- Tool execution audit log -----------------------------------------------
+
+  /** Log a tool execution (append-only audit trail) */
+  logToolExecution(entry: {
+    agent_name: string;
+    tool_name: string;
+    tool_category: string;
+    params_json: string;
+    result_success: boolean;
+    result_summary?: string;
+    side_effects?: string[];
+    duration_ms?: number;
+    approval?: string;
+    error?: string;
+  }): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO tool_executions (agent_name, tool_name, tool_category, params_json, result_success, result_summary, side_effects, duration_ms, approval, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      entry.agent_name,
+      entry.tool_name,
+      entry.tool_category,
+      entry.params_json,
+      entry.result_success ? 1 : 0,
+      entry.result_summary ?? null,
+      entry.side_effects ? JSON.stringify(entry.side_effects) : null,
+      entry.duration_ms ?? null,
+      entry.approval ?? "auto",
+      entry.error ?? null,
+    );
+    return (result as any).lastInsertRowid ?? 0;
+  }
+
+  /** Get recent tool executions, optionally filtered by agent */
+  getToolExecutions(agentName?: string, limit = 50): Array<{
+    id: number;
+    agent_name: string;
+    tool_name: string;
+    tool_category: string;
+    params_json: string;
+    result_success: number;
+    result_summary: string | null;
+    side_effects: string | null;
+    duration_ms: number | null;
+    approval: string;
+    error: string | null;
+    created_at: number;
+  }> {
+    const db = this.requireDb();
+    if (agentName) {
+      return db.prepare(
+        `SELECT * FROM tool_executions WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?`,
+      ).all(agentName, limit) as any;
+    }
+    return db.prepare(
+      `SELECT * FROM tool_executions ORDER BY created_at DESC LIMIT ?`,
+    ).all(limit) as any;
+  }
+
+  /** Get tool usage stats per agent (total calls, success rate, top tools) */
+  getToolStats(agentName?: string): Array<{
+    tool_name: string;
+    tool_category: string;
+    total_calls: number;
+    success_count: number;
+    avg_duration_ms: number;
+  }> {
+    const db = this.requireDb();
+    const where = agentName ? "WHERE agent_name = ?" : "";
+    const params = agentName ? [agentName] : [];
+    return db.prepare(
+      `SELECT tool_name, tool_category,
+              COUNT(*) as total_calls,
+              SUM(result_success) as success_count,
+              AVG(duration_ms) as avg_duration_ms
+       FROM tool_executions ${where}
+       GROUP BY tool_name, tool_category
+       ORDER BY total_calls DESC`,
+    ).all(...params) as any;
   }
 }

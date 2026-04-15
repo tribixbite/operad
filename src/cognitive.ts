@@ -72,6 +72,8 @@ export interface OodaContext {
   sharedInsights: Array<{ agent_name: string; content: string; confidence: number }>;
   /** Personality trait drift over recent window */
   personalityDrift: Array<{ trait_name: string; current_value: number; previous_value: number; delta: number }>;
+  /** Pre-formatted tool availability section for prompt injection (from ToolExecutor) */
+  availableToolsPrompt?: string;
 }
 
 /** Parsed action from master controller response */
@@ -82,7 +84,9 @@ export type OodaAction =
   | { type: "strategy"; text: string; rationale: string }
   | { type: "schedule"; delayMinutes: number; trigger: string; reason: string }
   | { type: "learning"; content: string; category: string; confidence?: number }
-  | { type: "personality"; trait: string; value: number; evidence: string };
+  | { type: "personality"; trait: string; value: number; evidence: string }
+  | { type: "tool_call"; name: string; params: Record<string, unknown>; id?: string }
+  | { type: "tool_sequence"; steps: Array<{ name: string; params: Record<string, unknown> }>; reason: string };
 
 // -- Context assembly ---------------------------------------------------------
 
@@ -357,7 +361,19 @@ export function buildOodaPrompt(ctx: OodaContext): string {
     sections.push("_No strategy defined yet. Use a \\`\\`\\`strategy block to establish your initial strategy._");
   }
 
-  // 7. Available actions
+  // 7. Available tools (injected by ToolExecutor if provided)
+  if (ctx.availableToolsPrompt) {
+    sections.push("\n## Available Tools\n");
+    sections.push("You can execute tools using \\`\\`\\`tool blocks:");
+    sections.push("```tool");
+    sections.push("name: <tool-name>");
+    sections.push("<param>: <value>");
+    sections.push("```");
+    sections.push("");
+    sections.push(ctx.availableToolsPrompt);
+  }
+
+  // 8. Available actions
   sections.push("\n## Available Actions\n");
   sections.push("Use fenced code blocks to emit actions:");
   sections.push("- `goal` — Create or update goals");
@@ -367,6 +383,9 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   sections.push("- `schedule` — Schedule your next run");
   sections.push("- `learning` — Record something you've learned (persists across runs)");
   sections.push("- `personality` — Update a personality trait based on evidence");
+  if (ctx.availableToolsPrompt) {
+    sections.push("- `tool` — Execute a registered tool (see Available Tools above)");
+  }
 
   return sections.join("\n");
 }
@@ -381,7 +400,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
   const actions: OodaAction[] = [];
 
   // Match fenced code blocks: ```type\n...\n```
-  const blockPattern = /```(goal|decision|message|strategy|schedule|learning|personality)\s*\n([\s\S]*?)```/g;
+  const blockPattern = /```(goal|decision|message|strategy|schedule|learning|personality|tool|tool_sequence)\s*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
 
   while ((match = blockPattern.exec(text)) !== null) {
@@ -467,6 +486,55 @@ export function parseOodaResponse(text: string): OodaAction[] {
           });
         }
         break;
+
+      case "tool":
+        if (fields.name) {
+          // Parse all fields except 'name' and 'id' as tool params
+          const params: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(fields)) {
+            if (k === "name" || k === "id") continue;
+            // Try to parse as number or boolean
+            if (v === "true") params[k] = true;
+            else if (v === "false") params[k] = false;
+            else if (/^-?\d+(\.\d+)?$/.test(v)) params[k] = Number(v);
+            else params[k] = v;
+          }
+          actions.push({
+            type: "tool_call",
+            name: fields.name,
+            params,
+            id: fields.id,
+          });
+        }
+        break;
+
+      case "tool_sequence": {
+        // Parse multiple tool steps separated by "---" or "step:" markers
+        const steps: Array<{ name: string; params: Record<string, unknown> }> = [];
+        const stepBlocks = body.split(/^---$/m);
+        for (const stepBlock of stepBlocks) {
+          const stepFields = parseBlockFields(stepBlock);
+          if (stepFields.name) {
+            const stepParams: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(stepFields)) {
+              if (k === "name") continue;
+              if (v === "true") stepParams[k] = true;
+              else if (v === "false") stepParams[k] = false;
+              else if (/^-?\d+(\.\d+)?$/.test(v)) stepParams[k] = Number(v);
+              else stepParams[k] = v;
+            }
+            steps.push({ name: stepFields.name, params: stepParams });
+          }
+        }
+        if (steps.length > 0) {
+          actions.push({
+            type: "tool_sequence",
+            steps,
+            reason: fields.reason ?? "multi-step tool execution",
+          });
+        }
+        break;
+      }
     }
   }
 

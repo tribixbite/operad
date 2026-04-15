@@ -63,6 +63,10 @@ export interface AgentConfig {
   enabled: boolean;
   /** Where this definition came from */
   source: AgentSource;
+  /** Tool categories this agent can use (empty = all, per Phase 10A) */
+  allowed_tool_categories?: import("./tools.js").ToolCategory[];
+  /** Max tool calls per single run (budget guardrail) */
+  max_tool_calls_per_run?: number;
 }
 
 /** Agent run tracking record (stored in SQLite) */
@@ -104,6 +108,9 @@ export function getBuiltinAgents(): AgentConfig[] {
       effort: "max",
       enabled: true,
       source: "builtin",
+      // All tool categories — MC is the primary actor
+      allowed_tool_categories: ["observe", "analyze", "mutate", "communicate", "orchestrate"],
+      max_tool_calls_per_run: 20,
     },
     {
       name: "optimizer",
@@ -116,6 +123,9 @@ export function getBuiltinAgents(): AgentConfig[] {
       model: "sonnet",
       enabled: true,
       source: "builtin",
+      // Read-only: observe and analyze only
+      allowed_tool_categories: ["observe", "analyze"],
+      max_tool_calls_per_run: 10,
     },
     {
       name: "preference-learner",
@@ -128,6 +138,9 @@ export function getBuiltinAgents(): AgentConfig[] {
       effort: "high",
       enabled: true,
       source: "builtin",
+      // Read-only: observe and analyze only
+      allowed_tool_categories: ["observe", "analyze"],
+      max_tool_calls_per_run: 10,
     },
     {
       name: "ideator",
@@ -139,6 +152,9 @@ export function getBuiltinAgents(): AgentConfig[] {
       effort: "max",
       enabled: true,
       source: "builtin",
+      // Read-only: observe and analyze only
+      allowed_tool_categories: ["observe", "analyze"],
+      max_tool_calls_per_run: 10,
     },
   ];
 }
@@ -157,6 +173,7 @@ You run the OODA loop — Observe, Orient, Decide, Act — to manage a fleet of 
 - Send messages to other agents via the message bus
 - Schedule future runs based on system events
 - Evolve your own strategy based on decision outcome scores
+- Execute tools to observe, analyze, and act on system state (see Available Tools section)
 
 ## Decision Framework
 1. **Observe**: Review system state, token quota, memory pressure, user activity, goal progress
@@ -197,6 +214,12 @@ rationale: <why you're changing it>
 delay_minutes: <minutes until next run>
 trigger: <what condition, or "timer">
 reason: <why this timing>
+\`\`\`
+
+\`\`\`tool
+name: <tool-name>
+<param1>: <value1>
+<param2>: <value2>
 \`\`\`
 
 ## Self-Improvement
