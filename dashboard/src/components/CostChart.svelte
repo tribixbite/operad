@@ -131,39 +131,58 @@
       default: return "var(--text-muted)";
     }
   }
+
+  /** Velocity trend arrow */
+  function trendArrow(trend: string): string {
+    if (trend === "rising") return "↑";
+    if (trend === "falling") return "↓";
+    return "";
+  }
+
+  /** Velocity trend color */
+  function trendColor(trend: string): string {
+    if (trend === "rising") return "var(--accent-yellow)";
+    if (trend === "falling") return "var(--accent-green)";
+    return "var(--text-muted)";
+  }
 </script>
 
 <div class="card cost-chart-card">
-  <!-- Quota status bar (if configured) -->
-  {#if quota && quota.weekly_tokens_limit > 0}
+  <!-- Plan + quota status bar -->
+  {#if quota}
     <div class="quota-bar">
       <div class="quota-info">
-        <span class="quota-label">Weekly Quota</span>
-        <span class="quota-value" style="color: {levelColor(quota.weekly_level)}">
-          {fmtTokens(quota.weekly_tokens_used)} / {fmtTokens(quota.weekly_tokens_limit)}
-          ({quota.weekly_pct}%)
+        {#if quota.plan}
+          <span class="plan-badge">Claude {quota.plan}</span>
+        {/if}
+        {#if quota.weekly_tokens_limit > 0}
+          <span class="quota-value" style="color: {levelColor(quota.weekly_level)}">
+            {fmtTokens(quota.weekly_tokens_used)} / {fmtTokens(quota.weekly_tokens_limit)}
+            ({quota.weekly_pct}%)
+          </span>
+        {:else}
+          <span class="quota-value">{fmtTokens(quota.weekly_tokens_used)} this week</span>
+        {/if}
+      </div>
+      {#if quota.weekly_tokens_limit > 0}
+        <div class="quota-track">
+          <div
+            class="quota-fill"
+            style="width: {Math.min(quota.weekly_pct, 100)}%; background: {levelColor(quota.weekly_level)};"
+          ></div>
+        </div>
+      {/if}
+      <div class="quota-meta">
+        <span>
+          {fmtTokens(quota.tokens_per_hour)}/hr
+          {#if quota.velocity_trend !== "stable"}
+            <span class="trend" style="color: {trendColor(quota.velocity_trend)}">
+              {trendArrow(quota.velocity_trend)}
+            </span>
+          {/if}
         </span>
-      </div>
-      <div class="quota-track">
-        <div
-          class="quota-fill"
-          style="width: {Math.min(quota.weekly_pct, 100)}%; background: {levelColor(quota.weekly_level)};"
-        ></div>
-      </div>
-      <div class="quota-meta">
-        <span>{fmtTokens(quota.tokens_per_hour)}/hr</span>
-        <span>projected: {fmtTokens(quota.projected_weekly_total)}/week</span>
-      </div>
-    </div>
-  {:else if quota}
-    <div class="quota-bar">
-      <div class="quota-info">
-        <span class="quota-label">This Week</span>
-        <span class="quota-value">{fmtTokens(quota.weekly_tokens_used)} tokens</span>
-      </div>
-      <div class="quota-meta">
-        <span>{fmtTokens(quota.tokens_per_hour)}/hr</span>
-        <span>{fmtTokens(quota.window_tokens_used)} in last {quota.window_hours}h</span>
+        <span>avg {fmtTokens(quota.daily_avg_tokens)}/day</span>
+        <span>{fmtTokens(quota.window_tokens_used)} in {quota.window_hours}h window</span>
       </div>
     </div>
   {/if}
@@ -364,12 +383,19 @@
     margin-bottom: 0.25rem;
   }
 
-  .quota-label {
+  .plan-badge {
+    font-size: 0.5625rem;
+    font-weight: 600;
+    padding: 0.0625rem 0.375rem;
+    border-radius: 3px;
+    background: rgba(139, 92, 246, 0.15);
+    color: #a78bfa;
+    letter-spacing: 0.02em;
+  }
+
+  .trend {
+    font-weight: 700;
     font-size: 0.625rem;
-    font-weight: 500;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
 
   .quota-value {
