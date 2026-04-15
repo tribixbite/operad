@@ -2927,6 +2927,13 @@ export class Daemon {
     const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller" && a.enabled);
     if (!masterAgent) return;
 
+    // Quota guardrail: suppress auto-triggers when weekly quota is exceeded
+    const quota = computeQuotaStatus(this.memoryDb, this.config.orchestrator);
+    if (quota.weekly_level === "exceeded") {
+      this.log.debug("OODA auto-trigger suppressed — weekly quota exceeded");
+      return;
+    }
+
     // Condition: unread messages waiting >5 min
     const unread = this.memoryDb.getUnreadMessages("master-controller");
     const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
@@ -2960,6 +2967,17 @@ export class Daemon {
     if (!this.switchboard.oodaAutoTrigger) {
       this.log.debug("OODA cycle skipped — disabled by switchboard");
       return;
+    }
+
+    // Quota circuit breaker: block when exceeded, warn on critical
+    const quota = computeQuotaStatus(this.memoryDb, this.config.orchestrator);
+    if (quota.weekly_level === "exceeded") {
+      this.log.warn(`OODA cycle blocked — weekly quota exceeded (${quota.weekly_pct}%)`);
+      this.broadcastSwitchboard("ooda_status", { running: false, blocked: "quota_exceeded" });
+      return;
+    }
+    if (quota.weekly_level === "critical") {
+      this.log.warn(`OODA cycle running under critical quota (${quota.weekly_pct}%) — consider reducing activity`);
     }
 
     const state = this.state.getState();
@@ -3022,6 +3040,17 @@ export class Daemon {
    */
   private async executeOodaActions(actions: OodaAction[]): Promise<void> {
     if (!this.memoryDb) return;
+
+    // Per-run tool call budget tracking
+    const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller");
+    const maxToolCalls = masterAgent?.max_tool_calls_per_run ?? 20;
+    let toolCallCount = 0;
+
+    // Quota-level tool restriction: when critical/exceeded, block non-observe tools
+    const quotaLevel = this.memoryDb
+      ? computeQuotaStatus(this.memoryDb, this.config.orchestrator).weekly_level
+      : "ok";
+    const quotaRestrictTools = quotaLevel === "exceeded" || quotaLevel === "critical";
 
     for (const action of actions) {
       try {
@@ -3091,9 +3120,23 @@ export class Daemon {
 
           case "tool_call": {
             if (!this.toolExecutor || !this.memoryDb) break;
+            // Enforce per-run tool call budget
+            if (toolCallCount >= maxToolCalls) {
+              this.log.warn(`OODA: tool call budget exhausted (${maxToolCalls}), skipping ${action.name}`);
+              break;
+            }
+            // Quota restriction: only observe tools when critical/exceeded
+            if (quotaRestrictTools) {
+              const toolDef = this.toolExecutor.getTool(action.name);
+              if (toolDef && toolDef.category !== "observe") {
+                this.log.warn(`OODA: tool ${action.name} (${toolDef.category}) blocked — quota ${quotaLevel}`);
+                break;
+              }
+            }
             const toolCtx = this.buildToolContext("master-controller");
             const result = await this.toolExecutor.execute(action.name, action.params, toolCtx);
-            this.log.info(`OODA: tool ${action.name} → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
+            toolCallCount++;
+            this.log.info(`OODA: tool ${action.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
             // Broadcast tool result to dashboard
             this.broadcastSwitchboard("tool_result", {
               agent: "master-controller", tool: action.name,
@@ -3108,8 +3151,22 @@ export class Daemon {
             const toolCtx = this.buildToolContext("master-controller");
             this.log.info(`OODA: executing tool sequence (${action.steps.length} steps): ${action.reason}`);
             for (const step of action.steps) {
+              // Enforce per-run tool call budget across sequences
+              if (toolCallCount >= maxToolCalls) {
+                this.log.warn(`OODA: tool call budget exhausted (${maxToolCalls}), aborting sequence at ${step.name}`);
+                break;
+              }
+              // Quota restriction: only observe tools when critical/exceeded
+              if (quotaRestrictTools) {
+                const stepDef = this.toolExecutor.getTool(step.name);
+                if (stepDef && stepDef.category !== "observe") {
+                  this.log.warn(`OODA: seq step ${step.name} (${stepDef.category}) blocked — quota ${quotaLevel}`);
+                  continue; // skip this step but continue sequence
+                }
+              }
               const result = await this.toolExecutor.execute(step.name, step.params, toolCtx);
-              this.log.info(`OODA: seq step ${step.name} → ${result.success ? "ok" : "fail"}`);
+              toolCallCount++;
+              this.log.info(`OODA: seq step ${step.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}`);
               if (!result.success) {
                 this.log.warn(`OODA: tool sequence aborted at ${step.name}: ${result.summary}`);
                 break;

@@ -240,6 +240,12 @@ export function buildOodaPrompt(ctx: OodaContext): string {
     const topStr = q.top_sessions.slice(0, 3).map(s => `${s.name} (${fmtTokens(s.tokens)}, ${s.pct}%)`).join(", ");
     sections.push(`**Top consumers**: ${topStr}`);
   }
+  // Quota guardrail warnings injected into prompt
+  if (q.weekly_level === "critical") {
+    sections.push(`\n> **QUOTA WARNING**: Weekly token usage is at ${q.weekly_pct}% — conserve tokens. Minimize tool calls, use shorter responses, defer non-essential agent runs.`);
+  } else if (q.weekly_level === "exceeded") {
+    sections.push(`\n> **QUOTA EXCEEDED**: Weekly limit reached (${q.weekly_pct}%). Only essential observe tools allowed. Do not spawn agents or schedule OODA runs.`);
+  }
 
   // 2. Active goals
   sections.push("\n## Active Goals\n");
