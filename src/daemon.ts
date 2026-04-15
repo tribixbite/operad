@@ -40,6 +40,11 @@ import { buildOodaContext, buildOodaPrompt, parseOodaResponse, type OodaAction }
 import { ToolExecutor, type ToolContext, type ToolCategory } from "./tools.js";
 import { ScheduleEngine, type ScheduleRecord } from "./schedule.js";
 import {
+  exportAgentState, importAgentState, serializeBundle, deserializeBundle,
+  saveSnapshot, pruneSnapshots, listSnapshots,
+  type AgentStateBundle, type ImportOptions,
+} from "./agent-state.js";
+import {
   getProjectTokenUsage,
   getConversationPage,
   readTimeline,
@@ -206,6 +211,7 @@ export class Daemon {
   private memoryDb: MemoryDb | null = null;
   private toolExecutor: ToolExecutor | null = null;
   private scheduleEngine: ScheduleEngine | null = null;
+  private lastSnapshotDate: string | null = null;
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
   private switchboard: Switchboard = defaultSwitchboard();
@@ -2490,6 +2496,8 @@ export class Daemon {
           const expired = this.memoryDb.expireLeases();
           if (expired > 0) this.log.debug(`Expired ${expired} tool lease(s)`);
         }
+        // Daily agent snapshot (check every tick, only run once per day)
+        this.maybeDailySnapshot();
       }, 60_000);
 
       // Verify SDK is available (non-blocking, log result)
@@ -3323,6 +3331,26 @@ export class Daemon {
         sendKeys(name, text);
       },
     };
+  }
+
+  /** Run daily agent snapshots (called on each cognitive tick, self-deduplicates) */
+  private maybeDailySnapshot(): void {
+    if (!this.memoryDb) return;
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.lastSnapshotDate === today) return;
+    this.lastSnapshotDate = today;
+
+    const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
+    for (const agent of this.agentConfigs) {
+      if (!agent.enabled) continue;
+      try {
+        saveSnapshot(this.memoryDb, agent, snapshotDir);
+        pruneSnapshots(snapshotDir, agent.name);
+      } catch (err) {
+        this.log.warn(`Snapshot failed for ${agent.name}: ${err}`);
+      }
+    }
+    this.log.info(`Daily agent snapshots saved (${this.agentConfigs.filter((a) => a.enabled).length} agents)`);
   }
 
   /** Start telemetry sink server if enabled in config */
@@ -4821,6 +4849,51 @@ export class Daemon {
             if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
             return { status: 200, data: this.memoryDb.getStrategyHistory(subCmd, limit) };
+          }
+
+          if (subCmd && arg === "export" && method === "GET") {
+            // GET /api/agents/:name/export — export agent state bundle
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const agent = this.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            const template = queryParams.get("template") === "1";
+            const bundle = exportAgentState(this.memoryDb, agent, { template });
+            // Return raw JSON (not gzipped) for API consumers; CLI can gzip
+            return { status: 200, data: bundle };
+          }
+
+          if (subCmd && arg === "import" && method === "POST") {
+            // POST /api/agents/:name/import — import state bundle into existing agent
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const agent = this.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            try {
+              const parsed = (typeof body === "string" ? JSON.parse(body) : body) as {
+                bundle: AgentStateBundle;
+                options?: Partial<ImportOptions>;
+              };
+              const result = importAgentState(this.memoryDb, parsed.bundle, parsed.options);
+              return { status: 200, data: result };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+
+          if (subCmd && arg === "snapshots" && method === "GET") {
+            // GET /api/agents/:name/snapshots — list available snapshots
+            const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
+            return { status: 200, data: listSnapshots(snapshotDir, subCmd) };
+          }
+
+          if (subCmd && arg === "snapshot" && method === "POST") {
+            // POST /api/agents/:name/snapshot — create snapshot now
+            if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const agent = this.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
+            const path = saveSnapshot(this.memoryDb, agent, snapshotDir);
+            const pruned = pruneSnapshots(snapshotDir, subCmd);
+            return { status: 201, data: { path, pruned } };
           }
 
           return { status: 400, data: { error: `Unknown agents endpoint: ${subCmd ?? "(root)"}` } };
