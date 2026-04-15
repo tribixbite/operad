@@ -83,6 +83,7 @@ export type OodaAction =
   | { type: "message"; to: string; messageType: string; content: string }
   | { type: "strategy"; text: string; rationale: string }
   | { type: "schedule"; delayMinutes: number; trigger: string; reason: string }
+  | { type: "persistent_schedule"; name: string; cronExpr?: string; intervalMinutes?: number; prompt: string; maxBudgetUsd?: number }
   | { type: "learning"; content: string; category: string; confidence?: number }
   | { type: "personality"; trait: string; value: number; evidence: string }
   | { type: "tool_call"; name: string; params: Record<string, unknown>; id?: string }
@@ -390,6 +391,7 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   sections.push("- `schedule` — Schedule your next run");
   sections.push("- `learning` — Record something you've learned (persists across runs)");
   sections.push("- `personality` — Update a personality trait based on evidence");
+  sections.push("- `persistent_schedule` — Create a recurring schedule (cron or interval, survives restarts)");
   if (ctx.availableToolsPrompt) {
     sections.push("- `tool` — Execute a registered tool (see Available Tools above)");
   }
@@ -407,7 +409,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
   const actions: OodaAction[] = [];
 
   // Match fenced code blocks: ```type\n...\n```
-  const blockPattern = /```(goal|decision|message|strategy|schedule|learning|personality|tool|tool_sequence)\s*\n([\s\S]*?)```/g;
+  const blockPattern = /```(goal|decision|message|strategy|schedule|persistent_schedule|learning|personality|tool|tool_sequence)\s*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
 
   while ((match = blockPattern.exec(text)) !== null) {
@@ -468,6 +470,19 @@ export function parseOodaResponse(text: string): OodaAction[] {
             delayMinutes: parseInt(fields.delay_minutes, 10),
             trigger: fields.trigger ?? "timer",
             reason: fields.reason ?? "scheduled",
+          });
+        }
+        break;
+
+      case "persistent_schedule":
+        if (fields.name && fields.prompt) {
+          actions.push({
+            type: "persistent_schedule",
+            name: fields.name,
+            cronExpr: fields.cron ?? fields.cron_expr,
+            intervalMinutes: fields.interval_minutes ? parseInt(fields.interval_minutes, 10) : undefined,
+            prompt: fields.prompt,
+            maxBudgetUsd: fields.max_budget_usd ? parseFloat(fields.max_budget_usd) : undefined,
           });
         }
         break;

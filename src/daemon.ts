@@ -38,6 +38,7 @@ import { buildMemoryPrompt, saveMemoriesFromResponse } from "./memory-injector.j
 import { loadAgents, toSdkAgentMap, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
 import { buildOodaContext, buildOodaPrompt, parseOodaResponse, type OodaAction } from "./cognitive.js";
 import { ToolExecutor, type ToolContext, type ToolCategory } from "./tools.js";
+import { ScheduleEngine, type ScheduleRecord } from "./schedule.js";
 import {
   getProjectTokenUsage,
   getConversationPage,
@@ -204,6 +205,7 @@ export class Daemon {
   private sdkBridge: SdkBridge | null = null;
   private memoryDb: MemoryDb | null = null;
   private toolExecutor: ToolExecutor | null = null;
+  private scheduleEngine: ScheduleEngine | null = null;
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
   private switchboard: Switchboard = defaultSwitchboard();
@@ -478,6 +480,10 @@ export class Daemon {
     if (this.scheduledOodaTimer) {
       clearTimeout(this.scheduledOodaTimer);
       this.scheduledOodaTimer = null;
+    }
+    if (this.scheduleEngine) {
+      this.scheduleEngine.stop();
+      this.scheduleEngine = null;
     }
 
     // Cancel pending auto-tabs and auto-restart timers
@@ -2383,6 +2389,12 @@ export class Daemon {
         this.toolExecutor.registerTomlTools(this.config.tools);
       }
       this.log.info(`Tool executor initialized with ${this.toolExecutor.getAllTools().length} tools`);
+
+      // Initialize schedule engine — persistent cron/interval scheduling
+      this.scheduleEngine = new ScheduleEngine(this.memoryDb, this.log, async (schedule) => {
+        return this.executeScheduledRun(schedule);
+      });
+      this.scheduleEngine.start();
     }
 
     // Initialize SDK bridge (uses WS broadcast for streaming)
@@ -3194,10 +3206,89 @@ export class Daemon {
             }
             break;
           }
+
+          case "persistent_schedule": {
+            if (!this.scheduleEngine) break;
+            this.scheduleEngine.upsert({
+              agentName: "master-controller",
+              scheduleName: action.name,
+              cronExpr: action.cronExpr,
+              intervalMinutes: action.intervalMinutes,
+              prompt: action.prompt,
+              maxBudgetUsd: action.maxBudgetUsd,
+              createdBy: "agent",
+            });
+            this.log.info(`OODA: created persistent schedule "${action.name}"`);
+            break;
+          }
         }
       } catch (err) {
         this.log.warn(`OODA action failed (${action.type}): ${err}`);
       }
+    }
+  }
+
+  /**
+   * Execute a scheduled agent run. Called by ScheduleEngine when a schedule fires.
+   * Returns success/failure and cost for schedule bookkeeping.
+   */
+  private async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
+    if (!this.sdkBridge || !this.memoryDb) return { success: false };
+    if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) {
+      this.log.debug(`Scheduled run "${schedule.schedule_name}" deferred — SDK busy`);
+      return { success: false };
+    }
+
+    // Quota check: don't run if exceeded
+    const quota = computeQuotaStatus(this.memoryDb, this.config.orchestrator);
+    if (quota.weekly_level === "exceeded") {
+      this.log.warn(`Scheduled run "${schedule.schedule_name}" blocked — quota exceeded`);
+      return { success: false };
+    }
+
+    const agent = this.agentConfigs.find((a) => a.name === schedule.agent_name && a.enabled);
+    if (!agent) {
+      this.log.warn(`Scheduled run "${schedule.schedule_name}" — agent "${schedule.agent_name}" not found/enabled`);
+      return { success: false };
+    }
+
+    const sdkDef = toSdkAgentMap([agent])[schedule.agent_name];
+    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
+    const budget = schedule.max_budget_usd ?? agent.max_budget_usd;
+    const runId = this.memoryDb.startAgentRun(schedule.agent_name, `schedule:${schedule.schedule_name}`, "standalone");
+
+    try {
+      const result = await this.sdkBridge.runStandaloneAgent(
+        schedule.agent_name, sdkDef, cwd, schedule.prompt, budget,
+      );
+
+      this.memoryDb.completeAgentRun(runId, "completed", {
+        sessionId: result.sessionId,
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        turns: result.turns,
+      });
+
+      // Parse and execute any actions from the response
+      if (result.responseText) {
+        const actions = parseOodaResponse(result.responseText);
+        if (actions.length > 0) {
+          await this.executeOodaActions(actions);
+        }
+        this.extractAgentActions(schedule.agent_name, result.responseText);
+      }
+
+      // Trust reward for successful scheduled run
+      this.memoryDb.recordTrustDelta(schedule.agent_name, 10, `scheduled run "${schedule.schedule_name}" completed`);
+
+      this.log.info(`Scheduled run "${schedule.schedule_name}" completed: cost=$${result.costUsd.toFixed(4)}`);
+      return { success: true, costUsd: result.costUsd };
+    } catch (err) {
+      this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
+      this.memoryDb.recordTrustDelta(schedule.agent_name, -15, `scheduled run "${schedule.schedule_name}" failed: ${err}`);
+      this.log.warn(`Scheduled run "${schedule.schedule_name}" failed: ${err}`);
+      return { success: false };
     }
   }
 
@@ -5149,6 +5240,53 @@ export class Daemon {
             const revoked = this.memoryDb.revokeLeases(name, goalId);
             return { status: 200, data: { revoked } };
           }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        // -- Schedule endpoints -------------------------------------------------------
+
+        case "schedules": {
+          if (!this.scheduleEngine) return { status: 503, data: { error: "Schedule engine not initialized" } };
+
+          if (method === "GET") {
+            const agentFilter = name || (queryParams.get("agent") ?? undefined);
+            const schedules = this.scheduleEngine.getAll(agentFilter);
+            return { status: 200, data: schedules };
+          }
+
+          if (method === "POST" && body) {
+            // Create/update a schedule
+            const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+            if (!b.agent_name || !b.schedule_name || !b.prompt) {
+              return { status: 400, data: { error: "Missing required fields: agent_name, schedule_name, prompt" } };
+            }
+            const id = this.scheduleEngine.upsert({
+              agentName: String(b.agent_name),
+              scheduleName: String(b.schedule_name),
+              cronExpr: b.cron_expr ? String(b.cron_expr) : undefined,
+              intervalMinutes: b.interval_minutes ? Number(b.interval_minutes) : undefined,
+              prompt: String(b.prompt),
+              maxBudgetUsd: b.max_budget_usd ? Number(b.max_budget_usd) : undefined,
+              createdBy: "api",
+            });
+            return { status: 201, data: { id } };
+          }
+
+          if (method === "DELETE" && name) {
+            const agentName = queryParams.get("agent") ?? "master-controller";
+            const deleted = this.scheduleEngine.delete(agentName, name);
+            return { status: 200, data: { deleted } };
+          }
+
+          if (method === "PATCH" && name) {
+            // Enable/disable a schedule
+            const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+            const id = parseInt(name, 10);
+            if (isNaN(id)) return { status: 400, data: { error: "Invalid schedule ID" } };
+            this.scheduleEngine.setEnabled(id, Boolean(b.enabled));
+            return { status: 200, data: { id, enabled: Boolean(b.enabled) } };
+          }
+
           return { status: 405, data: { error: "Method not allowed" } };
         }
 

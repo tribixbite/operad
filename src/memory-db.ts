@@ -450,6 +450,45 @@ const SCHEMA_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_lease_agent ON tool_leases(agent_name, status)`,
   `CREATE INDEX IF NOT EXISTS idx_lease_tool ON tool_leases(tool_name, status)`,
+
+  // Persistent agent schedules — cron/interval based, survives restarts
+  `CREATE TABLE IF NOT EXISTS agent_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    schedule_name TEXT NOT NULL,
+    cron_expr TEXT,
+    interval_minutes INTEGER,
+    prompt TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    max_budget_usd REAL,
+    last_run_at INTEGER,
+    next_run_at INTEGER,
+    total_cost_usd REAL DEFAULT 0,
+    run_count INTEGER DEFAULT 0,
+    consecutive_failures INTEGER DEFAULT 0,
+    created_by TEXT NOT NULL DEFAULT 'agent',
+    created_at INTEGER DEFAULT (unixepoch()),
+    UNIQUE(agent_name, schedule_name)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_schedule_next ON agent_schedules(enabled, next_run_at)`,
+
+  // Event-driven triggers — reactive agent activation
+  `CREATE TABLE IF NOT EXISTS agent_triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    trigger_name TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    condition_json TEXT NOT NULL,
+    prompt_template TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    max_budget_usd REAL,
+    cooldown_s INTEGER DEFAULT 300,
+    last_fired_at INTEGER,
+    fire_count INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (unixepoch()),
+    UNIQUE(agent_name, trigger_name)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_trigger_agent ON agent_triggers(agent_name, enabled)`,
 ];
 
 /**
@@ -556,7 +595,8 @@ export class MemoryDb {
     }
   }
 
-  private requireDb(): DbHandle {
+  /** Get the underlying database handle, throwing if not initialized */
+  requireDb(): DbHandle {
     if (!this.db) throw new Error("Memory database not initialized — call init() first");
     return this.db;
   }
