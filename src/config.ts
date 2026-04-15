@@ -19,6 +19,7 @@ import type {
   SessionType,
   WakeLockPolicy,
   HealthCheckType,
+  ProtectedCheckpoints,
 } from "./types.js";
 import { parseTomlAgents, type AgentConfig } from "./agents.js";
 import { detectPlatform } from "./platform/platform.js";
@@ -202,6 +203,7 @@ function validateConfig(raw: Record<string, unknown>): TmxConfig {
     quota_warning_pct: asNumber(orc.quota_warning_pct, "orchestrator.quota_warning_pct", 75),
     quota_critical_pct: asNumber(orc.quota_critical_pct, "orchestrator.quota_critical_pct", 90),
     quota_window_hours: asNumber(orc.quota_window_hours, "orchestrator.quota_window_hours", 5),
+    protected_checkpoints: parseProtectedCheckpoints(orc),
   };
 
   // ADB section
@@ -414,6 +416,19 @@ function asStringArray(val: unknown, path: string, fallback: string[]): string[]
 }
 
 // -- Public API ---------------------------------------------------------------
+
+/** Parse [operad.checkpoints] for protected checkpoint config */
+function parseProtectedCheckpoints(orc: Record<string, unknown>): ProtectedCheckpoints {
+  const cp = (orc.checkpoints ?? {}) as Record<string, unknown>;
+  return {
+    protected_files: asStringArray(cp.protected_files, "orchestrator.checkpoints.protected_files",
+      ["*.toml", "*.env", "package.json", "Dockerfile"]),
+    protected_git: asStringArray(cp.protected_git, "orchestrator.checkpoints.protected_git",
+      ["push", "merge", "rebase"]),
+    protected_tools: asStringArray(cp.protected_tools, "orchestrator.checkpoints.protected_tools",
+      ["session-stop", "session-send"]),
+  };
+}
 
 /** Find the config file in standard locations */
 export function findConfigPath(explicit?: string): string | null {

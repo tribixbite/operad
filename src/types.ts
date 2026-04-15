@@ -215,6 +215,29 @@ export interface OrchestratorConfig {
   quota_critical_pct: number;
   /** Rolling window size in hours for velocity calculation (default: 5, matches Anthropic) */
   quota_window_hours: number;
+  /** Protected checkpoints — tools/files that always require human approval */
+  protected_checkpoints: ProtectedCheckpoints;
+}
+
+/**
+ * Agent autonomy levels — determines tool auto-approval scope.
+ * Trust calibration recommends level changes based on agent track record.
+ */
+export type AutonomyLevel =
+  | "observe"     // read-only tools auto-approved
+  | "suggest"     // read + propose changes (diffs shown, not applied)
+  | "supervised"  // all tools available, mutate+ requires approval
+  | "trusted"     // observe/analyze/mutate auto-approved; communicate/orchestrate need approval
+  | "autonomous"; // everything auto-approved; human notified post-hoc
+
+/** Protected checkpoint config — always require human approval regardless of autonomy */
+export interface ProtectedCheckpoints {
+  /** File patterns that always require approval for writes */
+  protected_files: string[];
+  /** Git operations that always require approval */
+  protected_git: string[];
+  /** Tools that always require approval */
+  protected_tools: string[];
 }
 
 /** Default health check configs by session type */

@@ -15,6 +15,7 @@ import { join, resolve, dirname, basename, extname } from "node:path";
 import { homedir } from "node:os";
 import type { MemoryDb } from "./memory-db.js";
 import type { Logger } from "./log.js";
+import type { AutonomyLevel, ProtectedCheckpoints } from "./types.js";
 
 // -- Types --------------------------------------------------------------------
 
@@ -281,15 +282,37 @@ export class ToolExecutor {
   }
 
   /**
-   * Check if a tool category is auto-approved at a given autonomy scope.
-   * Returns true if the tool can run without human approval.
+   * Check if a tool is auto-approved at a given autonomy level.
+   * Protected tools/files always require approval regardless of level.
    */
-  isAutoApproved(toolCategory: ToolCategory, allowedCategories?: ToolCategory[]): boolean {
-    if (allowedCategories && allowedCategories.length > 0) {
-      return allowedCategories.includes(toolCategory);
+  isAutoApproved(
+    toolName: string,
+    toolCategory: ToolCategory,
+    autonomyLevel: AutonomyLevel = "observe",
+    protectedCheckpoints?: ProtectedCheckpoints,
+  ): boolean {
+    // Protected tools always require approval
+    if (protectedCheckpoints?.protected_tools?.includes(toolName)) {
+      return false;
     }
-    // Default: observe and analyze are always auto-approved
-    return CATEGORY_LEVEL[toolCategory] <= CATEGORY_LEVEL["analyze"];
+
+    // Autonomy level determines category auto-approval scope
+    switch (autonomyLevel) {
+      case "observe":
+        return CATEGORY_LEVEL[toolCategory] <= CATEGORY_LEVEL["observe"];
+      case "suggest":
+        return CATEGORY_LEVEL[toolCategory] <= CATEGORY_LEVEL["analyze"];
+      case "supervised":
+        // observe + analyze auto-approved; mutate+ needs approval
+        return CATEGORY_LEVEL[toolCategory] <= CATEGORY_LEVEL["analyze"];
+      case "trusted":
+        // observe + analyze + mutate auto-approved; communicate/orchestrate needs approval
+        return CATEGORY_LEVEL[toolCategory] <= CATEGORY_LEVEL["mutate"];
+      case "autonomous":
+        return true; // everything auto-approved
+      default:
+        return CATEGORY_LEVEL[toolCategory] <= CATEGORY_LEVEL["observe"];
+    }
   }
 
   /**

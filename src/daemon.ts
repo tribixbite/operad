@@ -2473,6 +2473,11 @@ export class Daemon {
         this.maybeTriggerOoda().catch((err) => {
           this.log.warn(`Cognitive timer error: ${err}`);
         });
+        // Expire stale tool leases on each tick
+        if (this.memoryDb) {
+          const expired = this.memoryDb.expireLeases();
+          if (expired > 0) this.log.debug(`Expired ${expired} tool lease(s)`);
+        }
       }, 60_000);
 
       // Verify SDK is available (non-blocking, log result)
@@ -3137,6 +3142,14 @@ export class Daemon {
             const result = await this.toolExecutor.execute(action.name, action.params, toolCtx);
             toolCallCount++;
             this.log.info(`OODA: tool ${action.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
+            // Trust calibration: success → +2, failure → -5
+            this.memoryDb.recordTrustDelta(
+              "master-controller",
+              result.success ? 2 : -5,
+              `tool ${action.name}: ${result.success ? "success" : "failed"}`,
+            );
+            // Track lease usage if applicable
+            this.memoryDb.incrementLeaseUsage("master-controller", action.name);
             // Broadcast tool result to dashboard
             this.broadcastSwitchboard("tool_result", {
               agent: "master-controller", tool: action.name,
@@ -3167,6 +3180,13 @@ export class Daemon {
               const result = await this.toolExecutor.execute(step.name, step.params, toolCtx);
               toolCallCount++;
               this.log.info(`OODA: seq step ${step.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}`);
+              // Trust calibration for sequence steps
+              this.memoryDb.recordTrustDelta(
+                "master-controller",
+                result.success ? 2 : -5,
+                `seq ${step.name}: ${result.success ? "success" : "failed"}`,
+              );
+              this.memoryDb.incrementLeaseUsage("master-controller", step.name);
               if (!result.success) {
                 this.log.warn(`OODA: tool sequence aborted at ${step.name}: ${result.summary}`);
                 break;
@@ -5095,6 +5115,43 @@ export class Daemon {
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
+        // -- Trust & lease endpoints -------------------------------------------------
+
+        case "trust": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (method === "GET" && name) {
+            // GET /api/trust/:agentName — trust score + history + autonomy recommendation
+            const { score, recommended } = this.memoryDb.getRecommendedAutonomy(name);
+            const history = this.memoryDb.getTrustHistory(name, 20);
+            return { status: 200, data: { agent: name, score, recommended, history } };
+          }
+          // GET /api/trust — all agents' trust scores
+          if (method === "GET") {
+            const agents = this.agentConfigs.map((a) => {
+              const { score, recommended } = this.memoryDb!.getRecommendedAutonomy(a.name);
+              return { agent: a.name, score, recommended, current: a.autonomy_level ?? "observe" };
+            });
+            return { status: 200, data: agents };
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        case "leases": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (method === "GET" && name) {
+            // GET /api/leases/:agentName — active leases for an agent
+            const leases = this.memoryDb.getActiveLeases(name);
+            return { status: 200, data: leases };
+          }
+          if (method === "DELETE" && name) {
+            // DELETE /api/leases/:agentName — revoke all leases for an agent
+            const goalId = queryParams.has("goal_id") ? Number(queryParams.get("goal_id")) : undefined;
+            const revoked = this.memoryDb.revokeLeases(name, goalId);
+            return { status: 200, data: { revoked } };
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
         // -- Quota / token tracking endpoints ----------------------------------------
         case "quota": {
           if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
@@ -5824,6 +5881,10 @@ export class Daemon {
         memory: state.memory ?? null,
         battery: state.battery ?? null,
         quota: this.memoryDb ? computeQuotaStatus(this.memoryDb, this.config.orchestrator) : null,
+        trust: this.memoryDb ? this.agentConfigs.map((a) => {
+          const { score, recommended } = this.memoryDb!.getRecommendedAutonomy(a.name);
+          return { agent: a.name, score, recommended, current: a.autonomy_level ?? "observe" };
+        }) : [],
         sessions: Object.values(state.sessions).map((s) => {
           const cfg = this.config.sessions.find((c) => c.name === s.name);
           return {

@@ -424,6 +424,32 @@ const SCHEMA_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_tool_agent ON tool_executions(agent_name, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_tool_name ON tool_executions(tool_name, created_at)`,
+
+  // Trust calibration ledger — running score of agent reliability
+  `CREATE TABLE IF NOT EXISTS agent_trust_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    score_delta INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    context_goal_id INTEGER,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_trust_agent ON agent_trust_ledger(agent_name, created_at)`,
+
+  // Tool leases — goal-scoped tool permissions with usage limits
+  `CREATE TABLE IF NOT EXISTS tool_leases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    goal_id INTEGER,
+    max_executions INTEGER,
+    executions_used INTEGER DEFAULT 0,
+    expires_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_lease_agent ON tool_leases(agent_name, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_lease_tool ON tool_leases(tool_name, status)`,
 ];
 
 /**
@@ -1560,5 +1586,149 @@ export class MemoryDb {
        GROUP BY tool_name, tool_category
        ORDER BY total_calls DESC`,
     ).all(...params) as any;
+  }
+
+  // -- Trust calibration -------------------------------------------------------
+
+  /** Record a trust score delta for an agent */
+  recordTrustDelta(agentName: string, delta: number, reason: string, goalId?: number): void {
+    const db = this.requireDb();
+    db.prepare(
+      `INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, context_goal_id)
+       VALUES (?, ?, ?, ?)`,
+    ).run(agentName, delta, reason, goalId ?? null);
+  }
+
+  /** Get current trust score for an agent (sum of deltas, bounded 0-1000) */
+  getTrustScore(agentName: string): number {
+    const db = this.requireDb();
+    const row = db.prepare(
+      `SELECT COALESCE(SUM(score_delta), 0) as total FROM agent_trust_ledger WHERE agent_name = ?`,
+    ).get(agentName) as { total: number } | undefined;
+    const raw = row?.total ?? 0;
+    return Math.max(0, Math.min(1000, raw));
+  }
+
+  /** Get trust ledger history for an agent */
+  getTrustHistory(agentName: string, limit = 50): Array<{
+    id: number; score_delta: number; reason: string;
+    context_goal_id: number | null; created_at: number;
+  }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT id, score_delta, reason, context_goal_id, created_at
+       FROM agent_trust_ledger WHERE agent_name = ?
+       ORDER BY created_at DESC LIMIT ?`,
+    ).all(agentName, limit) as any;
+  }
+
+  /**
+   * Get recommended autonomy level based on trust score.
+   * Returns a recommendation — actual level change requires user approval.
+   */
+  getRecommendedAutonomy(agentName: string): { score: number; recommended: import("./types.js").AutonomyLevel } {
+    const score = this.getTrustScore(agentName);
+    let recommended: import("./types.js").AutonomyLevel;
+    if (score >= 700) {
+      recommended = "trusted";
+    } else if (score >= 300) {
+      recommended = "supervised";
+    } else {
+      recommended = "observe";
+    }
+    return { score, recommended };
+  }
+
+  // -- Tool leases -------------------------------------------------------------
+
+  /** Create a tool lease (goal-scoped tool permission) */
+  createToolLease(agentName: string, toolName: string, opts: {
+    goalId?: number; maxExecutions?: number; expiresAt?: number;
+  } = {}): number {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT INTO tool_leases (agent_name, tool_name, goal_id, max_executions, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(agentName, toolName, opts.goalId ?? null, opts.maxExecutions ?? null, opts.expiresAt ?? null);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Check if an agent has an active lease for a tool (optionally scoped to a goal) */
+  hasActiveLease(agentName: string, toolName: string, goalId?: number): boolean {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    const goalClause = goalId != null ? " AND goal_id = ?" : "";
+    const params: any[] = [agentName, toolName, now];
+    if (goalId != null) params.push(goalId);
+    const row = db.prepare(
+      `SELECT id FROM tool_leases
+       WHERE agent_name = ? AND tool_name = ? AND status = 'active'
+         AND (expires_at IS NULL OR expires_at > ?)
+         AND (max_executions IS NULL OR executions_used < max_executions)
+         ${goalClause}
+       LIMIT 1`,
+    ).get(...params);
+    return row != null;
+  }
+
+  /** Increment lease usage after tool execution, auto-exhaust if max reached */
+  incrementLeaseUsage(agentName: string, toolName: string): void {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    // Find active lease for this agent+tool
+    const lease = db.prepare(
+      `SELECT id, max_executions, executions_used FROM tool_leases
+       WHERE agent_name = ? AND tool_name = ? AND status = 'active'
+         AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(agentName, toolName, now) as { id: number; max_executions: number | null; executions_used: number } | undefined;
+    if (!lease) return;
+
+    const newUsed = lease.executions_used + 1;
+    const newStatus = lease.max_executions != null && newUsed >= lease.max_executions ? "exhausted" : "active";
+    db.prepare(
+      `UPDATE tool_leases SET executions_used = ?, status = ? WHERE id = ?`,
+    ).run(newUsed, newStatus, lease.id);
+  }
+
+  /** Revoke all active leases for an agent (e.g., on goal completion or trust violation) */
+  revokeLeases(agentName: string, goalId?: number): number {
+    const db = this.requireDb();
+    const goalClause = goalId != null ? " AND goal_id = ?" : "";
+    const params: any[] = [agentName];
+    if (goalId != null) params.push(goalId);
+    const result = db.prepare(
+      `UPDATE tool_leases SET status = 'revoked'
+       WHERE agent_name = ? AND status = 'active'${goalClause}`,
+    ).run(...params);
+    return result.changes;
+  }
+
+  /** Get active leases for an agent */
+  getActiveLeases(agentName: string): Array<{
+    id: number; tool_name: string; goal_id: number | null;
+    max_executions: number | null; executions_used: number;
+    expires_at: number | null; created_at: number;
+  }> {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    return db.prepare(
+      `SELECT id, tool_name, goal_id, max_executions, executions_used, expires_at, created_at
+       FROM tool_leases
+       WHERE agent_name = ? AND status = 'active'
+         AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC`,
+    ).all(agentName, now) as any;
+  }
+
+  /** Expire all leases past their expiry time */
+  expireLeases(): number {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    const result = db.prepare(
+      `UPDATE tool_leases SET status = 'expired'
+       WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?`,
+    ).run(now);
+    return result.changes;
   }
 }

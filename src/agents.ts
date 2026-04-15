@@ -67,6 +67,8 @@ export interface AgentConfig {
   allowed_tool_categories?: import("./tools.js").ToolCategory[];
   /** Max tool calls per single run (budget guardrail) */
   max_tool_calls_per_run?: number;
+  /** Autonomy level — controls tool auto-approval (default: "observe") */
+  autonomy_level?: import("./types.js").AutonomyLevel;
 }
 
 /** Agent run tracking record (stored in SQLite) */
@@ -111,6 +113,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       // All tool categories — MC is the primary actor
       allowed_tool_categories: ["observe", "analyze", "mutate", "communicate", "orchestrate"],
       max_tool_calls_per_run: 20,
+      autonomy_level: "supervised",
     },
     {
       name: "optimizer",
@@ -126,6 +129,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       // Read-only: observe and analyze only
       allowed_tool_categories: ["observe", "analyze"],
       max_tool_calls_per_run: 10,
+      autonomy_level: "observe",
     },
     {
       name: "preference-learner",
@@ -141,6 +145,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       // Read-only: observe and analyze only
       allowed_tool_categories: ["observe", "analyze"],
       max_tool_calls_per_run: 10,
+      autonomy_level: "observe",
     },
     {
       name: "ideator",
@@ -155,6 +160,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       // Read-only: observe and analyze only
       allowed_tool_categories: ["observe", "analyze"],
       max_tool_calls_per_run: 10,
+      autonomy_level: "observe",
     },
   ];
 }
