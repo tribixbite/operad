@@ -5,7 +5,7 @@
  * CI/node environments. Database at ~/.local/share/operad/memory.db.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -54,22 +54,67 @@ export interface CostAggregate {
 
 /** Token quota status for subscription-based rate limiting */
 export interface QuotaStatus {
+  /** Auto-detected plan info from ~/.claude/.credentials.json */
+  plan: string | null;               // e.g. "Max 20x", "Max 5x", "Pro"
+  rate_limit_tier: string | null;    // e.g. "default_claude_max_20x"
   weekly_tokens_used: number;
-  weekly_tokens_limit: number;       // 0 = unconfigured
-  weekly_pct: number;                // 0-100
+  weekly_tokens_limit: number;       // 0 = auto (plan-detected, no hard number)
+  weekly_pct: number;                // 0-100 (only meaningful if limit > 0)
   weekly_level: "ok" | "warning" | "critical" | "exceeded" | "unconfigured";
   window_tokens_used: number;
   window_hours: number;
-  tokens_per_hour: number;           // current velocity
+  tokens_per_hour: number;           // current velocity in window
+  daily_avg_tokens: number;          // average daily consumption this week
+  velocity_trend: "rising" | "falling" | "stable"; // vs daily average
   projected_weekly_total: number;    // at current rate, extrapolated to full week
   top_sessions: Array<{ name: string; tokens: number; pct: number }>;
 }
 
-/** Compute quota status from DB and config thresholds */
+/** Detected Claude plan from credentials file */
+interface ClaudePlanInfo {
+  subscriptionType: string;
+  rateLimitTier: string;
+  label: string;
+}
+
+/** Known plan tier labels by rateLimitTier prefix */
+const PLAN_LABELS: Record<string, string> = {
+  default_claude_max_20x: "Max 20x",
+  default_claude_max_5x: "Max 5x",
+  default_claude_max: "Max",
+  default_claude_pro: "Pro",
+};
+
+/**
+ * Auto-detect Claude subscription plan from ~/.claude/.credentials.json.
+ * Returns null if credentials are missing or unparseable.
+ */
+export function detectClaudePlan(): ClaudePlanInfo | null {
+  try {
+    const credPath = join(homedir(), ".claude", ".credentials.json");
+    if (!existsSync(credPath)) return null;
+    const raw = JSON.parse(readFileSync(credPath, "utf-8"));
+    const oauth = raw?.claudeAiOauth;
+    if (!oauth?.rateLimitTier) return null;
+    const tier = String(oauth.rateLimitTier);
+    const subType = String(oauth.subscriptionType ?? "unknown");
+    // Match known tier prefixes (tier may have suffixes we don't know about)
+    const label = Object.entries(PLAN_LABELS).find(([prefix]) => tier.startsWith(prefix))?.[1]
+      ?? `${subType.charAt(0).toUpperCase()}${subType.slice(1)}`;
+    return { subscriptionType: subType, rateLimitTier: tier, label };
+  } catch {
+    return null;
+  }
+}
+
+/** Compute quota status from DB, config thresholds, and auto-detected plan */
 export function computeQuotaStatus(
   db: MemoryDb,
   quotaConfig: { quota_weekly_tokens: number; quota_warning_pct: number; quota_critical_pct: number; quota_window_hours: number },
 ): QuotaStatus {
+  // Auto-detect plan tier from credentials
+  const plan = detectClaudePlan();
+
   const weekly = db.getWeeklyTokens();
   const windowTokens = db.getWindowTokens(quotaConfig.quota_window_hours);
   const windowTotal = windowTokens.reduce((sum, s) => sum + s.total_tokens, 0);
@@ -77,7 +122,7 @@ export function computeQuotaStatus(
     ? Math.round(windowTotal / quotaConfig.quota_window_hours)
     : 0;
 
-  // Project weekly total: hours elapsed this week + remaining hours at current velocity
+  // Hours elapsed this week (since Monday 00:00 UTC)
   const now = new Date();
   const dayOfWeek = now.getUTCDay();
   const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
@@ -85,11 +130,24 @@ export function computeQuotaStatus(
   const hoursRemaining = Math.max(0, 168 - hoursElapsed); // 168 hours in a week
   const projected = weekly.total_tokens + tokensPerHour * hoursRemaining;
 
+  // Daily average: total tokens this week / days elapsed (min 1)
+  const daysElapsed = Math.max(1, Math.ceil(hoursElapsed / 24));
+  const dailyAvg = Math.round(weekly.total_tokens / daysElapsed);
+
+  // Velocity trend: compare current hourly rate to the daily average hourly rate
+  const avgHourlyRate = dailyAvg / 24;
+  const ratio = avgHourlyRate > 0 ? tokensPerHour / avgHourlyRate : 1;
+  const velocityTrend: QuotaStatus["velocity_trend"] =
+    ratio > 1.5 ? "rising" : ratio < 0.5 ? "falling" : "stable";
+
+  // Use manual limit if configured, otherwise no hard limit (plan auto-detected)
   const limit = quotaConfig.quota_weekly_tokens;
   const pct = limit > 0 ? Math.round((weekly.total_tokens / limit) * 100) : 0;
 
   let level: QuotaStatus["weekly_level"];
   if (limit === 0) {
+    // No manual limit set — use velocity-based awareness instead
+    // Still useful to show "unconfigured" so dashboard knows there's no hard cap
     level = "unconfigured";
   } else if (pct >= 100) {
     level = "exceeded";
@@ -102,11 +160,7 @@ export function computeQuotaStatus(
   }
 
   // Top sessions by token usage this week
-  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysSinceMonday));
-  const mondayEpoch = Math.floor(monday.getTime() / 1000);
-  // Reuse window query pattern but for the whole week
   const weeklyBySession = db.getWindowTokens(hoursElapsed || 1);
-  // Actually get fresh weekly data with correct epoch
   const weekTotal = weekly.total_tokens || 1; // avoid div by zero
   const topSessions = weeklyBySession
     .filter(s => s.total_tokens > 0)
@@ -118,6 +172,8 @@ export function computeQuotaStatus(
     }));
 
   return {
+    plan: plan?.label ?? null,
+    rate_limit_tier: plan?.rateLimitTier ?? null,
     weekly_tokens_used: weekly.total_tokens,
     weekly_tokens_limit: limit,
     weekly_pct: pct,
@@ -125,6 +181,8 @@ export function computeQuotaStatus(
     window_tokens_used: windowTotal,
     window_hours: quotaConfig.quota_window_hours,
     tokens_per_hour: tokensPerHour,
+    daily_avg_tokens: dailyAvg,
+    velocity_trend: velocityTrend,
     projected_weekly_total: Math.round(projected),
     top_sessions: topSessions,
   };

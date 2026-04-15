@@ -351,11 +351,29 @@ function validateConfig(raw: Record<string, unknown>): TmxConfig {
     agentRaw, asString, asNumber, asBool, asEnum, asStringArray,
   );
 
+  // Tool definitions from [[tool]] sections (user-defined shell tools)
+  const toolRaw = (raw.tool ?? []) as Record<string, unknown>[];
+  const tools: import("./tools.js").TomlToolConfig[] = toolRaw.map((t, i) => ({
+    name: asString(t.name, `tool[${i}].name`, ""),
+    description: asString(t.description, `tool[${i}].description`, ""),
+    category: (t.category ? asString(t.category, `tool[${i}].category`, "analyze") : "analyze") as import("./tools.js").ToolCategory,
+    command: asString(t.command, `tool[${i}].command`, ""),
+    timeout_ms: t.timeout_ms != null ? asNumber(t.timeout_ms, `tool[${i}].timeout_ms`, 30000) : undefined,
+    params: Array.isArray(t.params)
+      ? (t.params as Record<string, unknown>[]).map((p, j) => ({
+          name: asString(p.name, `tool[${i}].params[${j}].name`, ""),
+          type: p.type ? asString(p.type, `tool[${i}].params[${j}].type`, "string") : undefined,
+          required: p.required != null ? asBool(p.required, `tool[${i}].params[${j}].required`, false) : undefined,
+          description: p.description ? asString(p.description, `tool[${i}].params[${j}].description`, "") : undefined,
+        }))
+      : undefined,
+  })).filter((t) => t.name && t.command);
+
   if (errors.length > 0) {
     throw new Error(`Config validation failed:\n  ${errors.join("\n  ")}`);
   }
 
-  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents };
+  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents, tools };
 }
 
 // -- Type coercion helpers ----------------------------------------------------

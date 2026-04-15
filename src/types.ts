@@ -233,6 +233,8 @@ export interface TmxConfig {
   health_defaults: HealthDefaults;
   /** Agent definitions from TOML [[agent]] sections */
   agents: import("./agents.js").AgentConfig[];
+  /** User-defined tool definitions from TOML [[tool]] sections */
+  tools: import("./tools.js").TomlToolConfig[];
 }
 
 // -- Runtime state (persisted to JSON) ----------------------------------------

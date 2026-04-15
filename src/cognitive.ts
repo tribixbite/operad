@@ -223,18 +223,19 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   if (ctx.observations.battery) {
     sections.push(`**Battery**: ${ctx.observations.battery.pct}% ${ctx.observations.battery.charging ? "(charging)" : "(discharging)"}`);
   }
-  // Token quota status
+  // Token quota status — plan auto-detected from ~/.claude/.credentials.json
   const q = ctx.observations.quota;
+  const trendArrow = q.velocity_trend === "rising" ? " ↑" : q.velocity_trend === "falling" ? " ↓" : "";
+  if (q.plan) {
+    sections.push(`**Plan**: Claude ${q.plan} (auto-detected)`);
+  }
   if (q.weekly_tokens_limit > 0) {
     const levelIcon = q.weekly_level === "ok" ? "OK" : q.weekly_level === "warning" ? "WARNING" : q.weekly_level === "critical" ? "CRITICAL" : "EXCEEDED";
     sections.push(`**Quota**: ${fmtTokens(q.weekly_tokens_used)} / ${fmtTokens(q.weekly_tokens_limit)} tokens this week (${q.weekly_pct}%) [${levelIcon}]`);
   } else {
-    sections.push(`**Tokens**: ${fmtTokens(q.weekly_tokens_used)} this week`);
+    sections.push(`**Tokens this week**: ${fmtTokens(q.weekly_tokens_used)} (avg ${fmtTokens(q.daily_avg_tokens)}/day)`);
   }
-  sections.push(`**Window**: ${fmtTokens(q.window_tokens_used)} in last ${q.window_hours}h | velocity: ${fmtTokens(q.tokens_per_hour)}/hr`);
-  if (q.weekly_tokens_limit > 0) {
-    sections.push(`**Projected**: ${fmtTokens(q.projected_weekly_total)} tokens/week at current rate`);
-  }
+  sections.push(`**Window**: ${fmtTokens(q.window_tokens_used)} in last ${q.window_hours}h | velocity: ${fmtTokens(q.tokens_per_hour)}/hr${trendArrow}`);
   if (q.top_sessions.length > 0) {
     const topStr = q.top_sessions.slice(0, 3).map(s => `${s.name} (${fmtTokens(s.tokens)}, ${s.pct}%)`).join(", ");
     sections.push(`**Top consumers**: ${topStr}`);

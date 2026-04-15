@@ -300,6 +300,10 @@ export interface DailyCost {
 
 /** Token quota status for subscription-based rate limiting */
 export interface QuotaStatus {
+  /** Auto-detected plan label, e.g. "Max 20x", "Pro" */
+  plan: string | null;
+  /** Raw rate limit tier from credentials, e.g. "default_claude_max_20x" */
+  rate_limit_tier: string | null;
   weekly_tokens_used: number;
   weekly_tokens_limit: number;
   weekly_pct: number;
@@ -307,6 +311,8 @@ export interface QuotaStatus {
   window_tokens_used: number;
   window_hours: number;
   tokens_per_hour: number;
+  daily_avg_tokens: number;
+  velocity_trend: "rising" | "falling" | "stable";
   projected_weekly_total: number;
   top_sessions: Array<{ name: string; tokens: number; pct: number }>;
 }

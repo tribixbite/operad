@@ -26,6 +26,14 @@ export type ToolCategory =
   | "communicate"  // external: HTTP request, notification
   | "orchestrate"; // meta: session start/stop, agent spawn
 
+/** Where a tool comes from — used for filtering and audit */
+export type ToolSource =
+  | "builtin"      // hardcoded in tools.ts
+  | "toml"         // user-defined in operad.toml [[tool]] section
+  | "skill"        // from .claude/skills/ with tool frontmatter
+  | "plugin"       // npm package export
+  | "mcp";         // MCP server tool bridge
+
 /** Tool parameter definition (JSON Schema subset for validation) */
 export interface ToolParam {
   name: string;
@@ -77,6 +85,39 @@ export interface ToolDef {
   parallelizable: boolean;
   /** The actual implementation */
   execute: (input: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
+  /** Where this tool came from (default: "builtin") */
+  source?: ToolSource;
+  /** Identifier for external tools — e.g. "mcp:sqlite", "plugin:my-pkg" */
+  sourceId?: string;
+}
+
+/**
+ * ToolProvider — lifecycle interface for external tool sources.
+ * Plugins, MCP servers, and skill loaders implement this to register
+ * their tools with the ToolExecutor at daemon startup.
+ */
+export interface ToolProvider {
+  /** Provider name (e.g. "mcp:sqlite", "plugin:my-pkg") */
+  name: string;
+  /** Tool source type */
+  source: ToolSource;
+  /** Discover and register tools with the executor */
+  initialize(executor: ToolExecutor): Promise<void>;
+  /** Clean up connections (called on daemon shutdown) */
+  shutdown?(): Promise<void>;
+}
+
+/**
+ * TOML-defined tool config — user-defined tools in operad.toml [[tool]] sections.
+ * Executes shell commands with parameter substitution.
+ */
+export interface TomlToolConfig {
+  name: string;
+  description: string;
+  category?: ToolCategory;
+  command: string;
+  timeout_ms?: number;
+  params?: Array<{ name: string; type?: string; required?: boolean; description?: string }>;
 }
 
 /** Category privilege ordering (lower = safer) */
@@ -96,6 +137,7 @@ const CATEGORY_LEVEL: Record<ToolCategory, number> = {
  */
 export class ToolExecutor {
   private tools = new Map<string, ToolDef>();
+  private providers: ToolProvider[] = [];
   private db: MemoryDb;
   private log: Logger;
 
@@ -110,7 +152,99 @@ export class ToolExecutor {
     if (this.tools.has(tool.name)) {
       this.log.warn(`Tool "${tool.name}" already registered, overwriting`);
     }
+    // Default source to builtin if not specified
+    if (!tool.source) tool.source = "builtin";
     this.tools.set(tool.name, tool);
+  }
+
+  /**
+   * Register a ToolProvider — external tool source with lifecycle management.
+   * Calls provider.initialize() which should call executor.register() for each tool.
+   */
+  async registerProvider(provider: ToolProvider): Promise<void> {
+    try {
+      await provider.initialize(this);
+      this.providers.push(provider);
+      const count = this.getToolsBySource(provider.source).length;
+      this.log.info(`Tool provider "${provider.name}" registered ${count} tools`);
+    } catch (err) {
+      this.log.warn(`Tool provider "${provider.name}" failed to initialize: ${err}`);
+    }
+  }
+
+  /** Shutdown all registered providers (called on daemon shutdown) */
+  async shutdownProviders(): Promise<void> {
+    for (const provider of this.providers) {
+      try {
+        await provider.shutdown?.();
+      } catch (err) {
+        this.log.warn(`Tool provider "${provider.name}" shutdown error: ${err}`);
+      }
+    }
+    this.providers = [];
+  }
+
+  /**
+   * Register tools from TOML [[tool]] config sections.
+   * Each tool is a shell command with parameter substitution.
+   */
+  registerTomlTools(tools: TomlToolConfig[]): void {
+    for (const t of tools) {
+      if (!t.name || !t.command) {
+        this.log.warn(`TOML tool missing name or command, skipping`);
+        continue;
+      }
+
+      const params: ToolParam[] = (t.params ?? []).map((p) => ({
+        name: p.name,
+        type: (p.type as ToolParam["type"]) || "string",
+        required: p.required ?? false,
+        description: p.description ?? "",
+      }));
+
+      this.register({
+        name: t.name,
+        description: t.description || `User-defined tool: ${t.name}`,
+        category: t.category ?? "analyze",
+        params,
+        timeout_ms: t.timeout_ms ?? 30_000,
+        parallelizable: true,
+        source: "toml",
+        sourceId: `toml:${t.name}`,
+        execute: async (input, _ctx) => {
+          const start = Date.now();
+          try {
+            // Substitute {{param}} placeholders in command
+            let cmd = t.command;
+            for (const [key, value] of Object.entries(input)) {
+              cmd = cmd.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), String(value));
+            }
+
+            const output = execSync(cmd, {
+              encoding: "utf-8",
+              timeout: t.timeout_ms ?? 30_000,
+              maxBuffer: 1024 * 1024,
+            }).trim();
+
+            return {
+              success: true,
+              data: { output },
+              summary: output.slice(0, 2000),
+              sideEffects: [`exec: ${t.name}`],
+              duration_ms: Date.now() - start,
+            };
+          } catch (err: any) {
+            return {
+              success: false,
+              data: null,
+              summary: `Command failed: ${err.message ?? err}`.slice(0, 2000),
+              sideEffects: [],
+              duration_ms: Date.now() - start,
+            };
+          }
+        },
+      });
+    }
   }
 
   /** Get a tool by name */
@@ -123,16 +257,27 @@ export class ToolExecutor {
     return Array.from(this.tools.values());
   }
 
+  /** Get tools filtered by source */
+  getToolsBySource(source: ToolSource): ToolDef[] {
+    return this.getAllTools().filter((t) => t.source === source);
+  }
+
   /**
-   * Get tools available to a specific agent based on allowed categories.
+   * Get tools available to a specific agent based on allowed categories and sources.
    * If allowedCategories is empty/undefined, all categories are allowed.
+   * If allowedSources is empty/undefined, all sources are allowed.
    */
-  getAvailableTools(allowedCategories?: ToolCategory[]): ToolDef[] {
-    if (!allowedCategories || allowedCategories.length === 0) {
-      return this.getAllTools();
+  getAvailableTools(allowedCategories?: ToolCategory[], allowedSources?: ToolSource[]): ToolDef[] {
+    let tools = this.getAllTools();
+    if (allowedCategories && allowedCategories.length > 0) {
+      const catSet = new Set(allowedCategories);
+      tools = tools.filter((t) => catSet.has(t.category));
     }
-    const catSet = new Set(allowedCategories);
-    return this.getAllTools().filter((t) => catSet.has(t.category));
+    if (allowedSources && allowedSources.length > 0) {
+      const srcSet = new Set(allowedSources);
+      tools = tools.filter((t) => srcSet.has(t.source ?? "builtin"));
+    }
+    return tools;
   }
 
   /**
@@ -256,8 +401,8 @@ export class ToolExecutor {
   }
 
   /** Format tool list for injection into OODA prompt */
-  formatToolsForPrompt(allowedCategories?: ToolCategory[]): string {
-    const tools = this.getAvailableTools(allowedCategories);
+  formatToolsForPrompt(allowedCategories?: ToolCategory[], allowedSources?: ToolSource[]): string {
+    const tools = this.getAvailableTools(allowedCategories, allowedSources);
     if (tools.length === 0) return "_No tools available._";
 
     const lines: string[] = [];
@@ -282,7 +427,8 @@ export class ToolExecutor {
           .map((p) => `${p.name}?`)
           .join(", ");
         const allParams = [paramStr, optParams].filter(Boolean).join(", ");
-        lines.push(`- \`${t.name}\`: ${t.description} (params: ${allParams || "none"})`);
+        const srcTag = t.source && t.source !== "builtin" ? ` [${t.source}]` : "";
+        lines.push(`- \`${t.name}\`${srcTag}: ${t.description} (params: ${allParams || "none"})`);
       }
       lines.push("");
     }

@@ -2378,6 +2378,10 @@ export class Daemon {
     // Initialize tool executor (requires memoryDb)
     if (this.memoryDb) {
       this.toolExecutor = new ToolExecutor(this.memoryDb, this.log);
+      // Register user-defined TOML tools
+      if (this.config.tools && this.config.tools.length > 0) {
+        this.toolExecutor.registerTomlTools(this.config.tools);
+      }
       this.log.info(`Tool executor initialized with ${this.toolExecutor.getAllTools().length} tools`);
     }
 
@@ -4982,6 +4986,56 @@ export class Daemon {
           }
 
           return { status: 400, data: { error: "Invalid memories request" } };
+        }
+
+        // -- Tool registry endpoints ---------------------------------------------------
+        case "tools": {
+          if (!this.toolExecutor) return { status: 503, data: { error: "Tool executor not initialized" } };
+
+          if (method === "GET") {
+            if (name) {
+              // GET /api/tools/:name — single tool definition
+              const tool = this.toolExecutor.getTool(name);
+              if (!tool) return { status: 404, data: { error: `Tool "${name}" not found` } };
+              const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+              if (arg === "history" && this.memoryDb) {
+                // GET /api/tools/:name/history — execution history for a tool
+                const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+                const executions = this.memoryDb.getToolExecutions(undefined, limit)
+                  .filter((e) => e.tool_name === name);
+                return { status: 200, data: executions };
+              }
+              return {
+                status: 200,
+                data: {
+                  name: tool.name, description: tool.description, category: tool.category,
+                  params: tool.params, timeout_ms: tool.timeout_ms, parallelizable: tool.parallelizable,
+                  source: tool.source ?? "builtin", sourceId: tool.sourceId,
+                },
+              };
+            }
+            // GET /api/tools — list all tools (filterable by source, category)
+            const sourceFilter = queryParams.get("source") as import("./tools.js").ToolSource | null;
+            const catFilter = queryParams.get("category") as import("./tools.js").ToolCategory | null;
+            let tools = this.toolExecutor.getAllTools();
+            if (sourceFilter) tools = tools.filter((t) => t.source === sourceFilter);
+            if (catFilter) tools = tools.filter((t) => t.category === catFilter);
+            return {
+              status: 200,
+              data: tools.map((t) => ({
+                name: t.name, description: t.description, category: t.category,
+                source: t.source ?? "builtin", sourceId: t.sourceId,
+                paramCount: t.params.length,
+              })),
+            };
+          }
+
+          if (method === "GET" && name === "stats" && this.memoryDb) {
+            // GET /api/tools/stats — tool usage statistics
+            return { status: 200, data: this.memoryDb.getToolStats() };
+          }
+
+          return { status: 405, data: { error: "Method not allowed" } };
         }
 
         // -- Quota / token tracking endpoints ----------------------------------------
