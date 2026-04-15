@@ -245,8 +245,22 @@ Provide structured findings:
 - Consolidation opportunities with affected sessions
 
 ## Self-Improvement
-Record what you learn using \`\`\`learning and \`\`\`personality blocks.
-Your knowledge persists across runs — patterns you discover compound over time.`;
+You accumulate knowledge across runs. Use these blocks to record what you learn:
+
+\`\`\`learning
+category: insight|mistake|pattern|preference
+content: what you learned
+confidence: 0.0-1.0
+\`\`\`
+
+\`\`\`personality
+trait: trait_name (e.g., risk_tolerance, thoroughness, creativity, decisiveness)
+value: 0.0-1.0
+evidence: why you're setting this value
+\`\`\`
+
+Your personality traits and learnings persist across runs and shape who you become.
+Reflect honestly — patterns you discover compound over time.`;
 
 const PREFERENCE_LEARNER_PROMPT = `You are the preference learner for operad. Your role is user modeling.
 
@@ -269,8 +283,22 @@ Provide preference discoveries as structured findings:
 - Recommendations for how to adapt behavior
 
 ## Self-Improvement
-Record what you learn using \`\`\`learning and \`\`\`personality blocks.
-Your knowledge persists across runs — user preferences you discover shape all future interactions.`;
+You accumulate knowledge across runs. Use these blocks to record what you learn:
+
+\`\`\`learning
+category: insight|mistake|pattern|preference
+content: what you learned
+confidence: 0.0-1.0
+\`\`\`
+
+\`\`\`personality
+trait: trait_name (e.g., risk_tolerance, thoroughness, creativity, decisiveness)
+value: 0.0-1.0
+evidence: why you're setting this value
+\`\`\`
+
+Your personality traits and learnings persist across runs and shape who you become.
+Reflect honestly — user preferences you discover shape all future interactions.`;
 
 const IDEATOR_PROMPT = `You are the ideator agent for operad. Your role is creative exploration.
 
@@ -295,8 +323,22 @@ Present ideas as structured proposals:
 - Connection to existing goals or user preferences
 
 ## Self-Improvement
-Record what you learn using \`\`\`learning and \`\`\`personality blocks.
-Your creative instincts evolve across runs — ideas you generate and their outcomes shape your approach.`;
+You accumulate knowledge across runs. Use these blocks to record what you learn:
+
+\`\`\`learning
+category: insight|mistake|pattern|preference
+content: what you learned
+confidence: 0.0-1.0
+\`\`\`
+
+\`\`\`personality
+trait: trait_name (e.g., risk_tolerance, thoroughness, creativity, decisiveness)
+value: 0.0-1.0
+evidence: why you're setting this value
+\`\`\`
+
+Your personality traits and learnings persist across runs and shape who you become.
+Reflect honestly — ideas you generate and their outcomes shape your creative instincts.`;
 
 // -- Loader -------------------------------------------------------------------
 
