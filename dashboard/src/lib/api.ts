@@ -508,6 +508,29 @@ export async function fetchCostTimeline(days = 14): Promise<DailyCost[]> {
   return checkedJson(res);
 }
 
+// -- Token quota --------------------------------------------------------------
+
+/** Fetch current quota status */
+export async function fetchQuotaStatus(): Promise<import("./types").QuotaStatus> {
+  const res = await fetch("/api/quota");
+  return checkedJson(res);
+}
+
+/** Fetch daily token usage */
+export async function fetchDailyTokens(days = 14): Promise<import("./types").DailyTokens[]> {
+  const res = await fetch(`/api/tokens-daily?days=${days}`);
+  return checkedJson(res);
+}
+
+/** Fetch per-session token usage for current window */
+export async function fetchWindowTokens(): Promise<Array<{
+  session_name: string; input_tokens: number; output_tokens: number;
+  total_tokens: number; num_turns: number;
+}>> {
+  const res = await fetch("/api/tokens-window");
+  return checkedJson(res);
+}
+
 // -- Notification history -----------------------------------------------------
 
 /** Fetch notification history */

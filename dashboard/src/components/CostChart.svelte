@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { fetchCostTimeline } from "../lib/api";
-  import type { DailyCost } from "../lib/types";
+  import { fetchDailyTokens } from "../lib/api";
+  import { store } from "../lib/store.svelte";
+  import type { DailyTokens } from "../lib/types";
 
   // -- Reactive state ----------------------------------------------------------
 
-  let days: DailyCost[] = $state([]);
+  let days: DailyTokens[] = $state([]);
   let loading = $state(true);
   let error: string | null = $state(null);
 
@@ -14,9 +15,6 @@
   /** Pixel position of tooltip anchor (relative to chart container) */
   let tooltipX = $state(0);
   let tooltipY = $state(0);
-
-  /** Index of the day expanded for per-session breakdown (-1 = none) */
-  let expandedIdx = $state(-1);
 
   /** Reference to the SVG element for coordinate mapping */
   let svgEl: SVGSVGElement | undefined = $state(undefined);
@@ -34,20 +32,26 @@
   // -- Derived values ----------------------------------------------------------
 
   /** Maximum daily total across all loaded days (for Y scale) */
-  const maxCost = $derived(
+  const maxTokens = $derived(
     days.length > 0
-      ? Math.max(...days.map((d) => d.total_cost), 0.01)
+      ? Math.max(...days.map((d) => d.total_tokens), 1)
       : 1,
   );
+
+  /** 14-day total tokens */
+  const totalTokens = $derived(days.reduce((s, d) => s + d.total_tokens, 0));
+
+  /** Quota data from SSE store */
+  const quota = $derived(store.daemon?.quota ?? null);
 
   // -- Data loading ------------------------------------------------------------
 
   async function load() {
     try {
-      days = await fetchCostTimeline(14);
+      days = await fetchDailyTokens(14);
       error = null;
     } catch (e: any) {
-      error = e.message ?? "Failed to load cost data";
+      error = e.message ?? "Failed to load token data";
     } finally {
       loading = false;
     }
@@ -56,7 +60,6 @@
   $effect(() => {
     if (typeof window === "undefined") return;
     load();
-    // Refresh every 60s — cost data changes slowly
     const timer = setInterval(load, 60_000);
     return () => clearInterval(timer);
   });
@@ -70,10 +73,11 @@
     return `${months[d.getMonth()]} ${d.getDate()}`;
   }
 
-  /** Format a dollar amount for display */
-  function fmtCost(usd: number): string {
-    if (usd < 0.005) return "$0.00";
-    return `$${usd.toFixed(2)}`;
+  /** Format token count with K/M suffix */
+  function fmtTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+    return String(n);
   }
 
   /** Compute bar geometry for a given day index within a known viewBox width */
@@ -85,25 +89,22 @@
     const usableH = CHART_H - PAD_TOP - PAD_BOTTOM;
 
     const day = days[idx];
-    const totalH = (day.total_cost / maxCost) * usableH;
-    const inputH = (day.input_cost / maxCost) * usableH;
-    const outputH = (day.output_cost / maxCost) * usableH;
-    const cacheH = (day.cache_cost / maxCost) * usableH;
+    const totalH = (day.total_tokens / maxTokens) * usableH;
+    const inputH = (day.input_tokens / maxTokens) * usableH;
+    const outputH = (day.output_tokens / maxTokens) * usableH;
 
-    // Stack bottom-up: cache, output, input
+    // Stack bottom-up: output, input
     const barBottom = CHART_H - PAD_BOTTOM;
-    const cacheY = barBottom - cacheH;
-    const outputY = cacheY - outputH;
+    const outputY = barBottom - outputH;
     const inputY = outputY - inputH;
 
-    return { x, barW, slotW, inputY, inputH, outputY, outputH, cacheY, cacheH, totalH, barBottom };
+    return { x, barW, slotW, inputY, inputH, outputY, outputH, totalH, barBottom };
   }
 
   /** Handle pointer move over the SVG to position tooltip */
   function onPointerMove(e: PointerEvent) {
     if (!svgEl || days.length === 0) return;
     const rect = svgEl.getBoundingClientRect();
-    // Map client coords into the container-relative position (for the HTML overlay)
     tooltipX = e.clientX - rect.left;
     tooltipY = e.clientY - rect.top;
   }
@@ -120,31 +121,75 @@
     if (idx < 0 || idx >= days.length) return -1;
     return idx;
   }
+
+  /** Quota level to CSS color variable */
+  function levelColor(level: string): string {
+    switch (level) {
+      case "ok": return "var(--accent-green)";
+      case "warning": return "var(--accent-yellow)";
+      case "critical": case "exceeded": return "var(--accent-red)";
+      default: return "var(--text-muted)";
+    }
+  }
 </script>
 
 <div class="card cost-chart-card">
+  <!-- Quota status bar (if configured) -->
+  {#if quota && quota.weekly_tokens_limit > 0}
+    <div class="quota-bar">
+      <div class="quota-info">
+        <span class="quota-label">Weekly Quota</span>
+        <span class="quota-value" style="color: {levelColor(quota.weekly_level)}">
+          {fmtTokens(quota.weekly_tokens_used)} / {fmtTokens(quota.weekly_tokens_limit)}
+          ({quota.weekly_pct}%)
+        </span>
+      </div>
+      <div class="quota-track">
+        <div
+          class="quota-fill"
+          style="width: {Math.min(quota.weekly_pct, 100)}%; background: {levelColor(quota.weekly_level)};"
+        ></div>
+      </div>
+      <div class="quota-meta">
+        <span>{fmtTokens(quota.tokens_per_hour)}/hr</span>
+        <span>projected: {fmtTokens(quota.projected_weekly_total)}/week</span>
+      </div>
+    </div>
+  {:else if quota}
+    <div class="quota-bar">
+      <div class="quota-info">
+        <span class="quota-label">This Week</span>
+        <span class="quota-value">{fmtTokens(quota.weekly_tokens_used)} tokens</span>
+      </div>
+      <div class="quota-meta">
+        <span>{fmtTokens(quota.tokens_per_hour)}/hr</span>
+        <span>{fmtTokens(quota.window_tokens_used)} in last {quota.window_hours}h</span>
+      </div>
+    </div>
+  {/if}
+
   <div class="card-title">
-    <span class="label">Daily Cost</span>
+    <span class="label">Daily Tokens</span>
     {#if !loading && days.length > 0}
       <span class="total-badge">
-        {fmtCost(days.reduce((s, d) => s + d.total_cost, 0))}
+        {fmtTokens(totalTokens)}
         <span class="unit">{days.length}d</span>
       </span>
     {/if}
   </div>
 
   {#if loading}
-    <div class="placeholder">Loading cost data...</div>
+    <div class="placeholder">Loading token data...</div>
   {:else if error}
     <div class="placeholder error-msg">{error}</div>
   {:else if days.length === 0}
-    <div class="placeholder">No cost data available</div>
+    <div class="placeholder">No token data available</div>
   {:else}
-    <!-- Chart container (relative for tooltip positioning) -->
+    <!-- Chart container -->
     <div
       class="chart-container"
       role="img"
-      aria-label="Daily API cost stacked bar chart"
+      aria-label="Daily token usage stacked bar chart"
     >
       <svg
         bind:this={svgEl}
@@ -155,7 +200,7 @@
         onpointermove={onPointerMove}
         onpointerleave={() => (hoverIdx = -1)}
       >
-        <!-- Y-axis grid lines (faint) -->
+        <!-- Y-axis grid lines -->
         {#each [0.25, 0.5, 0.75, 1.0] as frac}
           {@const y = CHART_H - PAD_BOTTOM - (CHART_H - PAD_TOP - PAD_BOTTOM) * frac}
           <line
@@ -172,7 +217,7 @@
         <!-- Bars -->
         {#each days as day, i}
           {@const g = barGeom(i, 600)}
-          <!-- Invisible hit area covering the full slot height -->
+          <!-- Hit area -->
           <rect
             x={PAD_LEFT + g.slotW * i}
             y={PAD_TOP}
@@ -180,22 +225,9 @@
             height={CHART_H - PAD_TOP - PAD_BOTTOM}
             fill="transparent"
             onpointerenter={() => (hoverIdx = i)}
-            onclick={() => (expandedIdx = expandedIdx === i ? -1 : i)}
             style="cursor: pointer;"
           />
-          <!-- Cache (bottom) -->
-          {#if g.cacheH > 0.2}
-            <rect
-              x={g.x}
-              y={g.cacheY}
-              width={g.barW}
-              height={g.cacheH}
-              rx="1"
-              fill="#666"
-              opacity={hoverIdx === i ? 1 : 0.85}
-            />
-          {/if}
-          <!-- Output (middle) -->
+          <!-- Output (bottom) -->
           {#if g.outputH > 0.2}
             <rect
               x={g.x}
@@ -219,20 +251,20 @@
               opacity={hoverIdx === i ? 1 : 0.85}
             />
           {/if}
-          <!-- Hover highlight outline -->
+          <!-- Hover outline -->
           {#if hoverIdx === i && g.totalH > 0.2}
             <rect
               x={g.x - 0.5}
               y={g.inputY - 0.5}
               width={g.barW + 1}
-              height={g.cacheY + g.cacheH - g.inputY + 1}
+              height={g.outputY + g.outputH - g.inputY + 1}
               rx="1.5"
               fill="none"
               stroke="var(--text-secondary)"
               stroke-width="1"
             />
           {/if}
-          <!-- X-axis date labels (every bar, or skip if too many) -->
+          <!-- X-axis date labels -->
           {#if days.length <= 14 || i % 2 === 0}
             <text
               x={g.x + g.barW / 2}
@@ -255,11 +287,11 @@
           font-size="8"
           font-family="inherit"
         >
-          {fmtCost(maxCost)}
+          {fmtTokens(maxTokens)}
         </text>
       </svg>
 
-      <!-- Hover tooltip (HTML overlay positioned via CSS) -->
+      <!-- Hover tooltip -->
       {#if hoverIdx >= 0 && hoverIdx < days.length}
         {@const day = days[hoverIdx]}
         <div
@@ -267,14 +299,11 @@
           style="left: {tooltipX}px; top: {tooltipY}px;"
         >
           <div class="tooltip-date">{fmtDate(day.date)}</div>
-          <div class="tooltip-total">{fmtCost(day.total_cost)} total</div>
+          <div class="tooltip-total">{fmtTokens(day.total_tokens)} tokens</div>
           <div class="tooltip-detail">{day.turns} turn{day.turns !== 1 ? "s" : ""}</div>
           <div class="tooltip-breakdown">
-            <span class="tb-input">{fmtCost(day.input_cost)} in</span>
-            <span class="tb-output">{fmtCost(day.output_cost)} out</span>
-            {#if day.cache_cost > 0}
-              <span class="tb-cache">{fmtCost(day.cache_cost)} cache</span>
-            {/if}
+            <span class="tb-input">{fmtTokens(day.input_tokens)} in</span>
+            <span class="tb-output">{fmtTokens(day.output_tokens)} out</span>
           </div>
         </div>
       {/if}
@@ -284,37 +313,32 @@
     <div class="legend">
       <span class="legend-item"><span class="swatch swatch-input"></span>Input</span>
       <span class="legend-item"><span class="swatch swatch-output"></span>Output</span>
-      <span class="legend-item"><span class="swatch swatch-cache"></span>Cache</span>
     </div>
 
-    <!-- Per-session breakdown table (when a bar is clicked) -->
-    {#if expandedIdx >= 0 && expandedIdx < days.length}
-      {@const day = days[expandedIdx]}
+    <!-- Top sessions this week -->
+    {#if quota && quota.top_sessions.length > 0}
       <div class="breakdown">
         <div class="breakdown-header">
-          <span>{fmtDate(day.date)} — {fmtCost(day.total_cost)}</span>
-          <button class="close-btn" onclick={() => (expandedIdx = -1)}>x</button>
+          <span>Top consumers this week</span>
         </div>
-        {#if day.sessions.length === 0}
-          <p class="breakdown-empty">No per-session data</p>
-        {:else}
-          <table class="breakdown-table">
-            <thead>
+        <table class="breakdown-table">
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th class="right">Tokens</th>
+              <th class="right">%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each quota.top_sessions as sess}
               <tr>
-                <th>Session</th>
-                <th class="right">Cost</th>
+                <td class="sess-name">{sess.name}</td>
+                <td class="right nums">{fmtTokens(sess.tokens)}</td>
+                <td class="right nums">{sess.pct}%</td>
               </tr>
-            </thead>
-            <tbody>
-              {#each day.sessions.sort((a, b) => b.cost - a.cost) as sess (sess.session_id)}
-                <tr>
-                  <td class="sess-name" title={sess.session_id}>{sess.name || sess.session_id.slice(0, 12)}</td>
-                  <td class="right nums">{fmtCost(sess.cost)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
+            {/each}
+          </tbody>
+        </table>
       </div>
     {/if}
   {/if}
@@ -325,6 +349,58 @@
     padding: 0;
     overflow: hidden;
   }
+
+  /* -- Quota bar ------------------------------------------------------------- */
+
+  .quota-bar {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .quota-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.25rem;
+  }
+
+  .quota-label {
+    font-size: 0.625rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .quota-value {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .quota-track {
+    height: 4px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 0.25rem;
+  }
+
+  .quota-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .quota-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.5625rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* -- Card title ------------------------------------------------------------ */
 
   .card-title {
     display: flex;
@@ -378,7 +454,6 @@
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
     background: var(--bg-primary);
-    /* Prevent touch-scroll from interfering with pointer events */
     touch-action: none;
   }
 
@@ -429,7 +504,6 @@
 
   .tb-input { color: #58a6ff; }
   .tb-output { color: #22c55e; }
-  .tb-cache { color: #888; }
 
   /* -- Legend -------------------------------------------------------------- */
 
@@ -457,7 +531,6 @@
 
   .swatch-input { background: #58a6ff; }
   .swatch-output { background: #22c55e; }
-  .swatch-cache { background: #666; }
 
   /* -- Per-session breakdown ----------------------------------------------- */
 
@@ -474,29 +547,6 @@
     font-weight: 600;
     color: var(--text-secondary);
     margin-bottom: 0.375rem;
-  }
-
-  .close-btn {
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--text-muted);
-    font-size: 0.625rem;
-    padding: 0 0.375rem;
-    cursor: pointer;
-    line-height: 1.4;
-  }
-
-  .close-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--text-muted);
-  }
-
-  .breakdown-empty {
-    color: var(--text-muted);
-    font-size: 0.625rem;
-    text-align: center;
-    padding: 0.25rem 0;
   }
 
   .breakdown-table {

@@ -49,6 +49,7 @@ export interface DaemonStatus {
   procs: ProcessCount;
   wake_lock: boolean;
   memory: SystemMemory | null;
+  quota: QuotaStatus | null;
   sessions: SessionState[];
 }
 
@@ -293,6 +294,30 @@ export interface DailyCost {
   total_cost: number;
   turns: number;
   sessions: Array<{ session_id: string; name: string; cost: number }>;
+}
+
+// -- Token quota status -------------------------------------------------------
+
+/** Token quota status for subscription-based rate limiting */
+export interface QuotaStatus {
+  weekly_tokens_used: number;
+  weekly_tokens_limit: number;
+  weekly_pct: number;
+  weekly_level: "ok" | "warning" | "critical" | "exceeded" | "unconfigured";
+  window_tokens_used: number;
+  window_hours: number;
+  tokens_per_hour: number;
+  projected_weekly_total: number;
+  top_sessions: Array<{ name: string; tokens: number; pct: number }>;
+}
+
+/** Daily token usage breakdown */
+export interface DailyTokens {
+  date: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  turns: number;
 }
 
 // -- Conversation delta (live streaming) --------------------------------------
