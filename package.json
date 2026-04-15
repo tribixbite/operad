@@ -1,6 +1,6 @@
 {
   "name": "operadic",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "commonjs",
   "description": "operad — manage all your Claude Code sessions from one dashboard. Web UI for skills, memories, and prompt history across projects. Auto-boots saved projects with health checks and crash recovery.",
   "author": "tribixbite",
@@ -28,6 +28,7 @@
   ],
   "scripts": {
     "build": "node build.cjs",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/fix-android-binaries.mjs || true"
   },
@@ -36,6 +37,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/bun": "latest",
     "@types/ws": "^8.5.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",

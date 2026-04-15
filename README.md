@@ -9,6 +9,11 @@ Cross-platform orchestrator for managing Claude Code sessions via tmux. Designed
 - **Full prompt history** across all projects with search and the ability to star/save important conversations
 - **Session lifecycle management** — health checks, auto-restart on failure, memory pressure response, battery awareness
 - **Real-time monitoring** — system memory, per-session RSS, battery, process budget — all via SSE-powered dashboard
+- **Agentic AI system** — 4 built-in agents (master controller, optimizer, preference learner, ideator) with OODA cognitive loop, goal trees, and inter-agent messaging
+- **Token quota management** — weekly quota tracking with velocity trends, daily breakdowns, and per-session usage attribution
+- **Tool registry** — extensible tool system with autonomy levels, trust calibration, and persistent scheduling
+- **Memory consolidation** — automatic learning decay, pruning, merging, and cross-agent knowledge sharing during idle periods
+- **Agent specialization** — domain expertise tracking with roundtable protocol for multi-agent collaboration
 
 Supports **Android/Termux**, **Linux**, and **macOS**.
 
@@ -90,13 +95,13 @@ Session types: `claude` (Claude Code with readiness detection), `daemon` (long-r
 
 ## Dashboard
 
-Web dashboard on port 18970 with real-time SSE updates.
+The web dashboard at `http://localhost:18970` provides:
 
-**Overview** — session table with start/stop/restart controls, memory/battery/ADB gauges, recent projects with search
-**Memory** — system memory breakdown, per-session RSS, process manager
-**Logs** — real-time structured log tail, filterable by level and session
-**Settings** — skills, memories, and configuration across all projects
-**Telemetry** — prompt history with search, starring, and token usage tracking
+- **Overview** — session status, system memory, budget gauges, prompt history
+- **Memory** — per-session RSS tracking, AI memory management (SQLite + FTS5), process manager
+- **Logs** — real-time daemon logs with level filtering
+- **Telemetry** — captured telemetry sink with SDK breakdown
+- **Settings** — MCP servers, plugins, skills, plans, CLAUDE.md management, agent control, cognitive system
 
 ## Platform support
 

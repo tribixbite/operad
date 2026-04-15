@@ -427,6 +427,12 @@ export class DashboardServer {
       const dirIndex = join(fullPath, "index.html");
       if (existsSync(dirIndex) && statSync(dirIndex).isFile()) {
         fullPath = dirIndex;
+      } else {
+        // Try appending .html (SvelteKit adapter-static flat output: /memory → memory.html)
+        const htmlFile = fullPath + ".html";
+        if (existsSync(htmlFile) && statSync(htmlFile).isFile()) {
+          fullPath = htmlFile;
+        }
       }
     }
 

@@ -3837,6 +3837,39 @@ export class Daemon {
         }
       }
 
+      // 4.5. Plans — from ~/.claude/plans/ + project .claude/plans/
+      const plans: Array<{ name: string; path: string; scope: string }> = [];
+
+      const userPlansDir = join(claudeDir, "plans");
+      if (existsSync(userPlansDir)) {
+        try {
+          for (const f of readdirSync(userPlansDir)) {
+            if (!f.endsWith(".md")) continue;
+            plans.push({
+              name: f.replace(/\.md$/, ""),
+              path: join(userPlansDir, f),
+              scope: "user",
+            });
+          }
+        } catch { /* skip */ }
+      }
+
+      if (projectPath) {
+        const projPlansDir = join(projectPath, ".claude", "plans");
+        if (existsSync(projPlansDir)) {
+          try {
+            for (const f of readdirSync(projPlansDir)) {
+              if (!f.endsWith(".md")) continue;
+              plans.push({
+                name: f.replace(/\.md$/, ""),
+                path: join(projPlansDir, f),
+                scope: "project",
+              });
+            }
+          } catch { /* skip */ }
+        }
+      }
+
       // 5. CLAUDE.md files
       const claudeMds: Array<{ label: string; path: string; scope: string }> = [];
 
@@ -3999,6 +4032,7 @@ export class Daemon {
           mcpServers,
           plugins,
           skills,
+          plans,
           claudeMds: claudeMds,
           hooks,
           marketplace: {

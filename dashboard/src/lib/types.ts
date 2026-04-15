@@ -156,6 +156,13 @@ export interface SkillInfo {
   source?: string;
 }
 
+/** Plan file (.md) from ~/.claude/plans/ or project .claude/plans/ */
+export interface PlanInfo {
+  name: string;
+  path: string;
+  scope: "user" | "project";
+}
+
 /** CLAUDE.md / MEMORY.md file reference */
 export interface ClaudeMdInfo {
   label: string;
@@ -418,6 +425,7 @@ export interface CustomizationResponse {
   mcpServers: McpServerInfo[];
   plugins: PluginInfo[];
   skills: SkillInfo[];
+  plans: PlanInfo[];
   claudeMds: ClaudeMdInfo[];
   hooks: HookInfo[];
   marketplace: MarketplaceInfo;

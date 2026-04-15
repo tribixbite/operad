@@ -526,7 +526,6 @@ async function openDatabase(dbPath: string): Promise<DbHandle> {
   // Try bun:sqlite first (zero-dep on Termux)
   if (typeof (globalThis as any).Bun !== "undefined") {
     try {
-      // @ts-expect-error — bun:sqlite is a bun built-in, no TS declarations
       const { Database } = await import("bun:sqlite");
       const db = new Database(dbPath);
       db.exec("PRAGMA journal_mode=WAL");
