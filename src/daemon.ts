@@ -45,6 +45,11 @@ import {
   type AgentStateBundle, type ImportOptions,
 } from "./agent-state.js";
 import {
+  shouldConsolidate, runConsolidation, buildReflectionPrompt,
+  getLastConsolidationTime, getConsolidationHistory,
+  type IdleConditions,
+} from "./consolidation.js";
+import {
   getProjectTokenUsage,
   getConversationPage,
   readTimeline,
@@ -212,6 +217,7 @@ export class Daemon {
   private toolExecutor: ToolExecutor | null = null;
   private scheduleEngine: ScheduleEngine | null = null;
   private lastSnapshotDate: string | null = null;
+  private lastUserActivityEpoch: number = Math.floor(Date.now() / 1000);
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
   private switchboard: Switchboard = defaultSwitchboard();
@@ -2498,6 +2504,8 @@ export class Daemon {
         }
         // Daily agent snapshot (check every tick, only run once per day)
         this.maybeDailySnapshot();
+        // Memory consolidation during idle periods
+        this.maybeConsolidate();
       }, 60_000);
 
       // Verify SDK is available (non-blocking, log result)
@@ -2830,6 +2838,8 @@ export class Daemon {
     if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
     if (!this.memoryDb) throw new Error("Memory DB not initialized");
     if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) throw new Error("SDK bridge busy — try again shortly");
+    // Track user activity for idle detection (consolidation)
+    this.lastUserActivityEpoch = Math.floor(Date.now() / 1000);
 
     const agent = this.agentConfigs.find((a) => a.name === agentName);
     if (!agent) throw new Error(`Agent not found: ${agentName}`);
@@ -3351,6 +3361,29 @@ export class Daemon {
       }
     }
     this.log.info(`Daily agent snapshots saved (${this.agentConfigs.filter((a) => a.enabled).length} agents)`);
+  }
+
+  /** Check if conditions are met for memory consolidation and run it */
+  private maybeConsolidate(): void {
+    if (!this.memoryDb) return;
+
+    const state = this.state.getState();
+    const now = Math.floor(Date.now() / 1000);
+    const idleSeconds = now - this.lastUserActivityEpoch;
+
+    const conditions: IdleConditions = {
+      idleSeconds,
+      batteryPct: state.battery?.percentage ?? 100,
+      charging: state.battery?.charging ?? true,
+      sdkBusy: this.sdkBridge?.isAttached ?? false,
+    };
+
+    const lastRun = getLastConsolidationTime(this.memoryDb);
+    if (!shouldConsolidate(conditions, lastRun)) return;
+
+    const agentNames = this.agentConfigs.filter((a) => a.enabled).map((a) => a.name);
+    const result = runConsolidation(this.memoryDb, agentNames, this.log);
+    this.broadcastSwitchboard("consolidation", result);
   }
 
   /** Start telemetry sink server if enabled in config */
@@ -5313,6 +5346,29 @@ export class Daemon {
             const revoked = this.memoryDb.revokeLeases(name, goalId);
             return { status: 200, data: { revoked } };
           }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        // -- Consolidation endpoints --------------------------------------------------
+
+        case "consolidation": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+
+          if (method === "GET") {
+            // GET /api/consolidation — history of consolidation runs
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 10;
+            const history = getConsolidationHistory(this.memoryDb, limit);
+            const lastRun = getLastConsolidationTime(this.memoryDb);
+            return { status: 200, data: { last_run_at: lastRun, history } };
+          }
+
+          if (method === "POST") {
+            // POST /api/consolidation — trigger manual consolidation
+            const agentNames = this.agentConfigs.filter((a) => a.enabled).map((a) => a.name);
+            const result = runConsolidation(this.memoryDb, agentNames, this.log);
+            return { status: 200, data: result };
+          }
+
           return { status: 405, data: { error: "Method not allowed" } };
         }
 

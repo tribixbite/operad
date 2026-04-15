@@ -489,6 +489,18 @@ const SCHEMA_STATEMENTS: string[] = [
     UNIQUE(agent_name, trigger_name)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_trigger_agent ON agent_triggers(agent_name, enabled)`,
+
+  // Memory consolidation run history
+  `CREATE TABLE IF NOT EXISTS consolidation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at INTEGER DEFAULT (unixepoch()),
+    completed_at INTEGER,
+    learnings_reviewed INTEGER DEFAULT 0,
+    learnings_merged INTEGER DEFAULT 0,
+    learnings_pruned INTEGER DEFAULT 0,
+    syntheses_created INTEGER DEFAULT 0,
+    duration_ms INTEGER DEFAULT 0
+  )`,
 ];
 
 /**
