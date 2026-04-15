@@ -87,7 +87,8 @@ export type OodaAction =
   | { type: "learning"; content: string; category: string; confidence?: number }
   | { type: "personality"; trait: string; value: number; evidence: string }
   | { type: "tool_call"; name: string; params: Record<string, unknown>; id?: string }
-  | { type: "tool_sequence"; steps: Array<{ name: string; params: Record<string, unknown> }>; reason: string };
+  | { type: "tool_sequence"; steps: Array<{ name: string; params: Record<string, unknown> }>; reason: string }
+  | { type: "roundtable"; topic: string; agents: string[]; context?: string };
 
 // -- Context assembly ---------------------------------------------------------
 
@@ -392,6 +393,7 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   sections.push("- `learning` — Record something you've learned (persists across runs)");
   sections.push("- `personality` — Update a personality trait based on evidence");
   sections.push("- `persistent_schedule` — Create a recurring schedule (cron or interval, survives restarts)");
+  sections.push("- `roundtable` — Convene a multi-agent discussion on a topic (agents respond sequentially)");
   if (ctx.availableToolsPrompt) {
     sections.push("- `tool` — Execute a registered tool (see Available Tools above)");
   }
@@ -409,7 +411,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
   const actions: OodaAction[] = [];
 
   // Match fenced code blocks: ```type\n...\n```
-  const blockPattern = /```(goal|decision|message|strategy|schedule|persistent_schedule|learning|personality|tool|tool_sequence)\s*\n([\s\S]*?)```/g;
+  const blockPattern = /```(goal|decision|message|strategy|schedule|persistent_schedule|learning|personality|tool|tool_sequence|roundtable)\s*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
 
   while ((match = blockPattern.exec(text)) !== null) {
@@ -557,6 +559,21 @@ export function parseOodaResponse(text: string): OodaAction[] {
         }
         break;
       }
+
+      case "roundtable":
+        if (fields.topic && fields.agents) {
+          // Parse comma-separated agent names
+          const agentList = fields.agents.split(",").map((a) => a.trim()).filter(Boolean);
+          if (agentList.length > 0) {
+            actions.push({
+              type: "roundtable",
+              topic: fields.topic,
+              agents: agentList,
+              context: fields.context,
+            });
+          }
+        }
+        break;
     }
   }
 

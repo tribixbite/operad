@@ -988,6 +988,37 @@ export async function fetchDecisionMetrics(): Promise<Array<{
   return checkedJson(res);
 }
 
+// -- Specializations API ------------------------------------------------------
+
+/** Fetch agent specializations (all or per-agent) */
+export async function fetchSpecializations(agentName?: string): Promise<import("./types").AgentSpecialization[]> {
+  const url = agentName
+    ? `/api/specializations/${encodeURIComponent(agentName)}`
+    : "/api/specializations";
+  const res = await fetch(url);
+  return checkedJson(res);
+}
+
+// -- Roundtable API -----------------------------------------------------------
+
+/** Fetch recent roundtable discussions */
+export async function fetchRoundtables(limit = 20): Promise<Record<string, unknown>[]> {
+  const res = await fetch(`/api/roundtables?limit=${limit}`);
+  return checkedJson(res);
+}
+
+/** Trigger a manual roundtable discussion */
+export async function triggerRoundtable(
+  topic: string, agents: string[], context?: string,
+): Promise<{ transcript: string; contributions: Array<{ agent: string; response: string }> }> {
+  const res = await fetch("/api/roundtables", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic, agents, context }),
+  });
+  return checkedJson(res);
+}
+
 // -- SDK cost tracking API ----------------------------------------------------
 
 /** Fetch aggregate SDK costs */

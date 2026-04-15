@@ -501,6 +501,21 @@ const SCHEMA_STATEMENTS: string[] = [
     syntheses_created INTEGER DEFAULT 0,
     duration_ms INTEGER DEFAULT 0
   )`,
+
+  // Agent specialization registry — tracks domain expertise per agent
+  `CREATE TABLE IF NOT EXISTS agent_specializations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    confidence REAL DEFAULT 0.5,
+    evidence TEXT,
+    reinforcement_count INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (unixepoch()),
+    updated_at INTEGER DEFAULT (unixepoch()),
+    UNIQUE(agent_name, domain)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_spec_agent ON agent_specializations(agent_name)`,
+  `CREATE INDEX IF NOT EXISTS idx_spec_domain ON agent_specializations(domain, confidence DESC)`,
 ];
 
 /**
@@ -1432,6 +1447,83 @@ export class MemoryDb {
     return db.prepare(
       `SELECT * FROM agent_learnings WHERE agent_name != ? AND confidence >= ? ORDER BY confidence DESC LIMIT ?`,
     ).all(excludeAgent, minConfidence, limit);
+  }
+
+  // -- Agent specializations (domain expertise tracking) ----------------------
+
+  /** Insert or update+reinforce an agent specialization */
+  upsertSpecialization(
+    agentName: string, domain: string, confidence: number, evidence?: string,
+  ): number {
+    const db = this.requireDb();
+    const clamped = Math.max(0, Math.min(1, confidence));
+
+    const existing = db.prepare(
+      `SELECT id, confidence, reinforcement_count FROM agent_specializations WHERE agent_name = ? AND domain = ?`,
+    ).get(agentName, domain) as { id: number; confidence: number; reinforcement_count: number } | undefined;
+
+    if (existing) {
+      // Reinforce: nudge confidence toward new value, increment count
+      const blended = Math.min(1.0, existing.confidence * 0.7 + clamped * 0.3 + 0.02);
+      db.prepare(
+        `UPDATE agent_specializations SET confidence = ?, reinforcement_count = reinforcement_count + 1,
+         evidence = COALESCE(?, evidence), updated_at = unixepoch() WHERE id = ?`,
+      ).run(blended, evidence ?? null, existing.id);
+      return existing.id;
+    }
+
+    const result = db.prepare(
+      `INSERT INTO agent_specializations (agent_name, domain, confidence, evidence) VALUES (?, ?, ?, ?)`,
+    ).run(agentName, domain, clamped, evidence ?? null);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Get specializations for one or all agents */
+  getSpecializations(agentName?: string): Array<{
+    id: number; agent_name: string; domain: string; confidence: number;
+    evidence: string | null; reinforcement_count: number;
+    created_at: number; updated_at: number;
+  }> {
+    const db = this.requireDb();
+    if (agentName) {
+      return db.prepare(
+        `SELECT * FROM agent_specializations WHERE agent_name = ? ORDER BY confidence DESC`,
+      ).all(agentName) as Array<{
+        id: number; agent_name: string; domain: string; confidence: number;
+        evidence: string | null; reinforcement_count: number;
+        created_at: number; updated_at: number;
+      }>;
+    }
+    return db.prepare(
+      `SELECT * FROM agent_specializations ORDER BY agent_name, confidence DESC`,
+    ).all() as Array<{
+      id: number; agent_name: string; domain: string; confidence: number;
+      evidence: string | null; reinforcement_count: number;
+      created_at: number; updated_at: number;
+    }>;
+  }
+
+  /** Find agents most qualified for a domain */
+  getSpecialistsFor(domain: string, minConfidence = 0.3): Array<{
+    agent_name: string; confidence: number; reinforcement_count: number;
+  }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT agent_name, confidence, reinforcement_count FROM agent_specializations
+       WHERE domain = ? AND confidence >= ? ORDER BY confidence DESC`,
+    ).all(domain, minConfidence) as Array<{
+      agent_name: string; confidence: number; reinforcement_count: number;
+    }>;
+  }
+
+  /** Decay unreinforced specializations (called during consolidation) */
+  decaySpecializations(daysStale = 60): number {
+    const db = this.requireDb();
+    const cutoff = Math.floor(Date.now() / 1000) - daysStale * 86400;
+    return db.prepare(
+      `UPDATE agent_specializations SET confidence = MAX(0.1, confidence * 0.9), updated_at = unixepoch()
+       WHERE updated_at < ? AND confidence > 0.1`,
+    ).run(cutoff).changes;
   }
 
   // -- Agent personality (trait evolution) -------------------------------------

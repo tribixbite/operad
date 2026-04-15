@@ -5,12 +5,14 @@
     fetchAgentMessages, fetchAgentConversationPairs, sendAgentMessage,
     fetchAgentLearnings, fetchAgentPersonality, fetchAgentDrift,
     fetchDecisionMetrics, fetchAgents, fetchStrategyHistory,
+    fetchSpecializations,
   } from "../lib/api";
   import type { StrategyVersion } from "../lib/api";
   import { connect, on } from "../lib/ws.svelte";
   import type {
     GoalRecord, DecisionRecord,
     AgentMessage, ConversationPair, PersonalityTrait, AgentLearning, AgentInfo,
+    AgentSpecialization,
   } from "../lib/types";
 
   // -- State ------------------------------------------------------------------
@@ -98,6 +100,10 @@
   let strategyHistories: Map<string, StrategyVersion[]> = $state(new Map());
   /** Derived strategy history for selected growth agent */
   let growthStrategyHistory = $derived(growthAgent ? (strategyHistories.get(growthAgent) ?? []) : []);
+  /** Per-agent specializations */
+  let specializations: Map<string, AgentSpecialization[]> = $state(new Map());
+  /** Derived specializations for selected growth agent */
+  let growthSpecs = $derived(growthAgent ? (specializations.get(growthAgent) ?? []) : []);
 
   // -- Load data --------------------------------------------------------------
 
@@ -174,12 +180,22 @@
   /** Load growth tab data for all agents */
   async function loadGrowth() {
     try {
-      const [agents, metrics] = await Promise.all([
+      const [agents, metrics, allSpecs] = await Promise.all([
         fetchAgents(),
         fetchDecisionMetrics(),
+        fetchSpecializations(),
       ]);
       agentNames = agents.map((a: AgentInfo) => a.name);
       decisionMetrics = metrics;
+
+      // Group specializations by agent
+      const specMap = new Map<string, AgentSpecialization[]>();
+      for (const s of allSpecs) {
+        const arr = specMap.get(s.agent_name) ?? [];
+        arr.push(s);
+        specMap.set(s.agent_name, arr);
+      }
+      specializations = specMap;
 
       // Load personality + learnings + drift + strategy history for each agent in parallel
       const pMap = new Map<string, PersonalityTrait[]>();
@@ -709,6 +725,29 @@
                         {d.direction === "up" ? "↑" : "↓"}{Math.abs(d.delta).toFixed(2)}
                       </span>
                     {/each}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <!-- Specializations -->
+          <div class="growth-card">
+            <h4 class="growth-card-title">Specializations</h4>
+            {#if growthSpecs.length === 0}
+              <div class="empty-sm">No specializations tracked yet.</div>
+            {:else}
+              <div class="trait-list">
+                {#each growthSpecs as s}
+                  <div class="trait-row">
+                    <span class="trait-name">{s.domain}</span>
+                    <div class="trait-bar-wrap">
+                      <div class="trait-bar spec-bar" style="width: {Math.round(s.confidence * 100)}%"></div>
+                    </div>
+                    <span class="trait-value">{s.confidence.toFixed(2)}</span>
+                    {#if s.reinforcement_count > 0}
+                      <span class="learning-meta">{s.reinforcement_count}x</span>
+                    {/if}
                   </div>
                 {/each}
               </div>
@@ -1313,6 +1352,9 @@
     height: 100%;
     background: linear-gradient(90deg, #6c3fa0, #a855f7);
     border-radius: 3px;
+  }
+  .trait-bar.spec-bar {
+    background: linear-gradient(90deg, #0e7490, #22d3ee);
   }
   .trait-value { font-family: monospace; font-size: 0.6rem; color: var(--text-muted); width: 2rem; text-align: right; flex-shrink: 0; }
   .drift-indicator { font-size: 0.55rem; font-weight: 600; flex-shrink: 0; }

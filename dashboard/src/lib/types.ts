@@ -695,6 +695,18 @@ export interface AgentLearning {
   last_reinforced_at: number;
 }
 
+/** Agent specialization record */
+export interface AgentSpecialization {
+  id: number;
+  agent_name: string;
+  domain: string;
+  confidence: number;
+  evidence: string | null;
+  reinforcement_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
 // -- Switchboard --------------------------------------------------------------
 
 /** Switchboard — master control for enabling/disabling subsystems */

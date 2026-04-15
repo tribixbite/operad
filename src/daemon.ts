@@ -2703,7 +2703,36 @@ export class Daemon {
     if (this.sdkBridge) {
       this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
     }
+
+    // Seed default specializations for builtin agents (idempotent — upsert won't overwrite)
+    this.seedSpecializations();
+
     this.log.info(`Reloaded agents: ${enabledAgents.length} enabled`);
+  }
+
+  /** Seed default specializations for builtin agents (upsert is idempotent) */
+  private seedSpecializations(): void {
+    if (!this.memoryDb) return;
+
+    const defaults: Record<string, string[]> = {
+      "optimizer": ["performance", "resource-management", "token-efficiency"],
+      "preference-learner": ["user-preferences", "coding-style", "communication"],
+      "ideator": ["architecture", "creative-solutions", "exploration"],
+      "master-controller": ["orchestration", "planning", "delegation"],
+    };
+
+    for (const [agent, domains] of Object.entries(defaults)) {
+      // Only seed if agent is actually loaded
+      if (!this.agentConfigs.some((a) => a.name === agent)) continue;
+      for (const domain of domains) {
+        try {
+          // upsert with low confidence — will be reinforced by actual evidence
+          this.memoryDb.upsertSpecialization(agent, domain, 0.5, "builtin default");
+        } catch {
+          // Table may not exist during first migration — silently skip
+        }
+      }
+    }
   }
 
   /** Handle a standalone agent run (from WS or REST API) */
@@ -2827,6 +2856,18 @@ export class Daemon {
       }
     }
 
+    // Domain specializations — what you're good at
+    try {
+      const specs = this.memoryDb.getSpecializations(agentName);
+      if (specs.length > 0) {
+        parts.push("## Your Specializations");
+        for (const s of specs) {
+          const reinforced = s.reinforcement_count > 0 ? ` (reinforced ${s.reinforcement_count}x)` : "";
+          parts.push(`- ${s.domain}: ${s.confidence.toFixed(2)}${reinforced}`);
+        }
+      }
+    } catch { /* table may not exist yet */ }
+
     return parts.join("\n");
   }
 
@@ -2939,6 +2980,18 @@ export class Daemon {
           confidence: action.confidence,
         });
         this.log.info(`Agent ${agentName} learned: [${action.category}] ${action.content.slice(0, 60)}`);
+
+        // Auto-reinforce specialization matching the learning category
+        try {
+          const specs = this.memoryDb.getSpecializations(agentName);
+          const match = specs.find((s) => s.domain === action.category);
+          if (match) {
+            this.memoryDb.upsertSpecialization(
+              agentName, action.category, action.confidence ?? 0.6,
+              `reinforced by learning: ${action.content.slice(0, 40)}`,
+            );
+          }
+        } catch { /* specialization table may not exist yet */ }
       } else if (action.type === "personality") {
         this.memoryDb.setPersonalityTrait(agentName, action.trait, action.value, action.evidence);
         this.log.info(`Agent ${agentName} personality: ${action.trait}=${action.value}`);
@@ -3239,11 +3292,156 @@ export class Daemon {
             this.log.info(`OODA: created persistent schedule "${action.name}"`);
             break;
           }
+
+          case "roundtable": {
+            this.log.info(`OODA: convening roundtable on "${action.topic}" with [${action.agents.join(", ")}]`);
+            // Run async — don't block remaining OODA actions
+            this.executeRoundtable(action.topic, action.agents, action.context).catch((err) => {
+              this.log.warn(`Roundtable failed: ${err}`);
+            });
+            break;
+          }
         }
       } catch (err) {
         this.log.warn(`OODA action failed (${action.type}): ${err}`);
       }
     }
+  }
+
+  /**
+   * Execute a roundtable discussion — sequential multi-agent consultation on a topic.
+   * Each agent sees the accumulated transcript from prior agents and contributes
+   * from their specialization. Result is sent to master-controller as an inbox message.
+   */
+  private async executeRoundtable(
+    topic: string, agentNames: string[], context?: string,
+  ): Promise<{ transcript: string; contributions: Array<{ agent: string; response: string }> }> {
+    if (!this.sdkBridge || !this.memoryDb) throw new Error("SDK bridge or DB not ready");
+    if (this.sdkBridge.isAttached) throw new Error("SDK session already active");
+
+    const contributions: Array<{ agent: string; response: string }> = [];
+    let transcript = "";
+    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
+
+    this.broadcastSwitchboard("roundtable_status", { running: true, topic, agents: agentNames });
+
+    for (const agentName of agentNames) {
+      const agent = this.agentConfigs.find((a) => a.name === agentName);
+      if (!agent) {
+        this.log.warn(`Roundtable: agent "${agentName}" not found, skipping`);
+        continue;
+      }
+      if (!this.isAgentEnabled(agentName)) {
+        this.log.warn(`Roundtable: agent "${agentName}" disabled, skipping`);
+        continue;
+      }
+      // Wait for SDK to be free between agents
+      if (this.sdkBridge.isBusy) {
+        this.log.debug(`Roundtable: waiting for SDK bridge to free up for ${agentName}`);
+        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        if (this.sdkBridge.isBusy) {
+          this.log.warn(`Roundtable: SDK still busy, skipping ${agentName}`);
+          continue;
+        }
+      }
+
+      // Build specialization context for this agent
+      let specContext = "";
+      try {
+        const specs = this.memoryDb.getSpecializations(agentName);
+        if (specs.length > 0) {
+          specContext = specs.map((s) => `${s.domain} (${s.confidence.toFixed(2)})`).join(", ");
+        }
+      } catch { /* table may not exist */ }
+
+      // Assemble roundtable prompt for this participant
+      const agentContext = this.buildAgentContext(agentName);
+      const otherAgents = agentNames.filter((a) => a !== agentName);
+      const promptParts: string[] = [];
+
+      if (agentContext) promptParts.push(agentContext);
+
+      promptParts.push("## Roundtable Discussion\n");
+      promptParts.push(`**Topic**: ${topic}`);
+      if (specContext) {
+        promptParts.push(`**Your Role**: You are contributing as a specialist in ${specContext}.`);
+      }
+      promptParts.push(`**Other Participants**: ${otherAgents.join(", ") || "none"}`);
+      if (context) promptParts.push(`\n${context}`);
+
+      if (transcript) {
+        promptParts.push("\n### Prior Contributions\n");
+        promptParts.push(transcript);
+      }
+
+      promptParts.push("\n### Your Turn");
+      promptParts.push("Provide your analysis of this topic from your area of expertise.");
+      promptParts.push("Be specific, cite evidence from your knowledge base where relevant.");
+      promptParts.push("Keep your response focused — 2-4 key points max.\n");
+      promptParts.push("You may use `learning` and `personality` blocks to capture new insights.");
+
+      const fullPrompt = promptParts.join("\n");
+      const sdkDef = toSdkAgentMap([agent])[agentName];
+      const runId = this.memoryDb.startAgentRun(agentName, `roundtable:${topic.slice(0, 50)}`, "standalone");
+
+      try {
+        const result = await this.sdkBridge.runStandaloneAgent(
+          agentName, sdkDef, cwd, fullPrompt, agent.max_budget_usd,
+        );
+
+        this.memoryDb.completeAgentRun(runId, "completed", {
+          sessionId: result.sessionId,
+          costUsd: result.costUsd,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          turns: result.turns,
+        });
+
+        // Extract learnings from roundtable response
+        this.extractAgentActions(agentName, result.responseText);
+
+        // Append to transcript
+        const contribution = result.responseText.trim();
+        contributions.push({ agent: agentName, response: contribution });
+        transcript += `**${agentName}**:\n${contribution}\n\n`;
+
+        this.log.info(`Roundtable: ${agentName} contributed (${result.costUsd.toFixed(4)} USD)`);
+      } catch (err) {
+        this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
+        this.log.warn(`Roundtable: ${agentName} failed: ${err}`);
+        contributions.push({ agent: agentName, response: `[Error: ${String(err)}]` });
+      }
+    }
+
+    // Deliver consolidated transcript to master-controller as inbox message
+    if (contributions.length > 0) {
+      const summaryContent = `## Roundtable Summary: ${topic}\n\n${transcript}`;
+      this.memoryDb.sendAgentMessage("roundtable", "master-controller", summaryContent, {
+        messageType: "roundtable_summary",
+      });
+
+      // Record as a decision
+      this.memoryDb.recordDecision(
+        "master-controller",
+        `Convened roundtable on: ${topic}`,
+        `${contributions.length} agents contributed: ${contributions.map((c) => c.agent).join(", ")}`,
+      );
+
+      this.broadcastSwitchboard("agent_message", {
+        from_agent: "roundtable",
+        to_agent: "master-controller",
+        message_type: "roundtable_summary",
+        content: summaryContent.slice(0, 500),
+        created_at: Math.floor(Date.now() / 1000),
+      });
+    }
+
+    this.broadcastSwitchboard("roundtable_status", {
+      running: false, topic, agents: agentNames,
+      contributions: contributions.length,
+    });
+
+    return { transcript, contributions };
   }
 
   /**
@@ -5372,6 +5570,68 @@ export class Daemon {
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
+        // -- Specialization endpoints --------------------------------------------------
+
+        case "specializations": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+
+          if (method === "GET") {
+            // GET /api/specializations — all agent specializations
+            // GET /api/specializations/:agent — specializations for one agent
+            try {
+              const specs = this.memoryDb.getSpecializations(name || undefined);
+              return { status: 200, data: specs };
+            } catch {
+              return { status: 200, data: [] };
+            }
+          }
+
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        // -- Roundtable endpoints -----------------------------------------------------
+
+        case "roundtables": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+
+          if (method === "GET") {
+            // GET /api/roundtables — recent roundtable discussions (from agent_messages)
+            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            try {
+              const dbHandle = this.memoryDb.requireDb();
+              const messages = dbHandle.prepare(
+                `SELECT * FROM agent_messages WHERE message_type LIKE 'roundtable_%'
+                 ORDER BY created_at DESC LIMIT ?`,
+              ).all(limit);
+              return { status: 200, data: messages };
+            } catch {
+              return { status: 200, data: [] };
+            }
+          }
+
+          if (method === "POST" && body) {
+            // POST /api/roundtables — manually trigger a roundtable
+            if (!this.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+
+            try {
+              const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+              const topic = String(b.topic ?? "");
+              const agents = (b.agents as string[]) ?? [];
+              const ctx = b.context ? String(b.context) : undefined;
+
+              if (!topic) return { status: 400, data: { error: "topic required" } };
+              if (!agents.length) return { status: 400, data: { error: "agents array required" } };
+
+              const result = await this.executeRoundtable(topic, agents, ctx);
+              return { status: 200, data: result };
+            } catch (err) {
+              return { status: 500, data: { error: String(err) } };
+            }
+          }
+
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
         // -- Schedule endpoints -------------------------------------------------------
 
         case "schedules": {
@@ -6152,6 +6412,22 @@ export class Daemon {
           const { score, recommended } = this.memoryDb!.getRecommendedAutonomy(a.name);
           return { agent: a.name, score, recommended, current: a.autonomy_level ?? "observe" };
         }) : [],
+        specializations: this.memoryDb ? (() => {
+          try {
+            const allSpecs = this.memoryDb!.getSpecializations();
+            // Lightweight summary: top domain per agent
+            const byAgent = new Map<string, { domain: string; confidence: number }>();
+            for (const s of allSpecs) {
+              const existing = byAgent.get(s.agent_name);
+              if (!existing || s.confidence > existing.confidence) {
+                byAgent.set(s.agent_name, { domain: s.domain, confidence: s.confidence });
+              }
+            }
+            return Array.from(byAgent.entries()).map(([agent, top]) => ({
+              agent, top_domain: top.domain, confidence: top.confidence,
+            }));
+          } catch { return []; }
+        })() : [],
         sessions: Object.values(state.sessions).map((s) => {
           const cfg = this.config.sessions.find((c) => c.name === s.name);
           return {

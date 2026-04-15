@@ -109,7 +109,15 @@ export function runConsolidation(
     if (merged > 0) log.debug(`Consolidation: merged ${merged} learnings for ${agentName}`);
   }
 
-  // 4. Cross-pollinate high-confidence learnings between agents
+  // 4. Decay stale specializations (unreinforced 60+ days)
+  try {
+    const specDecayed = db.decaySpecializations(60);
+    if (specDecayed > 0) log.debug(`Consolidation: decayed ${specDecayed} specializations`);
+  } catch {
+    // Table may not exist in older DBs — silently ignore
+  }
+
+  // 5. Cross-pollinate high-confidence learnings between agents
   if (agentNames.length > 1) {
     for (const agent of agentNames) {
       const insights = db.getSharedInsights(agent, 0.8, 3);
