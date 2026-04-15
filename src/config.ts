@@ -198,6 +198,10 @@ function validateConfig(raw: Record<string, unknown>): TmxConfig {
     memory_warning_mb: asNumber(orc.memory_warning_mb, "orchestrator.memory_warning_mb", 2000),
     memory_critical_mb: asNumber(orc.memory_critical_mb, "orchestrator.memory_critical_mb", 1200),
     memory_emergency_mb: asNumber(orc.memory_emergency_mb, "orchestrator.memory_emergency_mb", 800),
+    quota_weekly_tokens: asNumber(orc.quota_weekly_tokens, "orchestrator.quota_weekly_tokens", 0),
+    quota_warning_pct: asNumber(orc.quota_warning_pct, "orchestrator.quota_warning_pct", 75),
+    quota_critical_pct: asNumber(orc.quota_critical_pct, "orchestrator.quota_critical_pct", 90),
+    quota_window_hours: asNumber(orc.quota_window_hours, "orchestrator.quota_window_hours", 5),
   };
 
   // ADB section

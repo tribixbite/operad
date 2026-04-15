@@ -33,7 +33,7 @@ import { DashboardServer } from "./http.js";
 import type { WsClientMessage } from "./http.js";
 import { TelemetrySinkServer } from "./telemetry-sink.js";
 import { SdkBridge } from "./sdk-bridge.js";
-import { MemoryDb } from "./memory-db.js";
+import { MemoryDb, computeQuotaStatus } from "./memory-db.js";
 import { buildMemoryPrompt, saveMemoriesFromResponse } from "./memory-injector.js";
 import { loadAgents, toSdkAgentMap, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
 import { buildOodaContext, buildOodaPrompt, parseOodaResponse, type OodaAction } from "./cognitive.js";
@@ -2951,7 +2951,7 @@ export class Daemon {
     }
 
     const state = this.state.getState();
-    const ctx = buildOodaContext(state, this.memoryDb);
+    const ctx = buildOodaContext(state, this.memoryDb, this.config.orchestrator);
     // Strip profile data if mind meld is disabled
     if (!this.switchboard.mindMeld) {
       ctx.userProfile = { traits: [], notes: [], styles: [], chat_export_count: 0 };
@@ -4653,7 +4653,7 @@ export class Daemon {
           if (subCmd === "state" && method === "GET") {
             // GET /api/cognitive/state — current OODA context
             const state = this.state.getState();
-            const ctx = buildOodaContext(state, this.memoryDb);
+            const ctx = buildOodaContext(state, this.memoryDb, this.config.orchestrator);
             return { status: 200, data: ctx };
           }
 
@@ -4909,7 +4909,34 @@ export class Daemon {
           return { status: 400, data: { error: "Invalid memories request" } };
         }
 
-        // -- Cost tracking endpoints ------------------------------------------------
+        // -- Quota / token tracking endpoints ----------------------------------------
+        case "quota": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (method === "GET") {
+            return { status: 200, data: computeQuotaStatus(this.memoryDb, this.config.orchestrator) };
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        case "tokens-daily": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (method === "GET") {
+            const days = queryParams.has("days") ? Number(queryParams.get("days")) : 14;
+            return { status: 200, data: this.memoryDb.getDailyTokens(days) };
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        case "tokens-window": {
+          if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (method === "GET") {
+            const hours = this.config.orchestrator.quota_window_hours;
+            return { status: 200, data: this.memoryDb.getWindowTokens(hours) };
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        // -- Cost tracking endpoints (kept for backward compat) ---------------------
         case "costs": {
           if (!this.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
@@ -5610,6 +5637,7 @@ export class Daemon {
         wake_lock: this.wake.isHeld(),
         memory: state.memory ?? null,
         battery: state.battery ?? null,
+        quota: this.memoryDb ? computeQuotaStatus(this.memoryDb, this.config.orchestrator) : null,
         sessions: Object.values(state.sessions).map((s) => {
           const cfg = this.config.sessions.find((c) => c.name === s.name);
           return {

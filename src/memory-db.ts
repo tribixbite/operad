@@ -52,6 +52,84 @@ export interface CostAggregate {
   query_count: number;
 }
 
+/** Token quota status for subscription-based rate limiting */
+export interface QuotaStatus {
+  weekly_tokens_used: number;
+  weekly_tokens_limit: number;       // 0 = unconfigured
+  weekly_pct: number;                // 0-100
+  weekly_level: "ok" | "warning" | "critical" | "exceeded" | "unconfigured";
+  window_tokens_used: number;
+  window_hours: number;
+  tokens_per_hour: number;           // current velocity
+  projected_weekly_total: number;    // at current rate, extrapolated to full week
+  top_sessions: Array<{ name: string; tokens: number; pct: number }>;
+}
+
+/** Compute quota status from DB and config thresholds */
+export function computeQuotaStatus(
+  db: MemoryDb,
+  quotaConfig: { quota_weekly_tokens: number; quota_warning_pct: number; quota_critical_pct: number; quota_window_hours: number },
+): QuotaStatus {
+  const weekly = db.getWeeklyTokens();
+  const windowTokens = db.getWindowTokens(quotaConfig.quota_window_hours);
+  const windowTotal = windowTokens.reduce((sum, s) => sum + s.total_tokens, 0);
+  const tokensPerHour = quotaConfig.quota_window_hours > 0
+    ? Math.round(windowTotal / quotaConfig.quota_window_hours)
+    : 0;
+
+  // Project weekly total: hours elapsed this week + remaining hours at current velocity
+  const now = new Date();
+  const dayOfWeek = now.getUTCDay();
+  const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const hoursElapsed = daysSinceMonday * 24 + now.getUTCHours() + now.getUTCMinutes() / 60;
+  const hoursRemaining = Math.max(0, 168 - hoursElapsed); // 168 hours in a week
+  const projected = weekly.total_tokens + tokensPerHour * hoursRemaining;
+
+  const limit = quotaConfig.quota_weekly_tokens;
+  const pct = limit > 0 ? Math.round((weekly.total_tokens / limit) * 100) : 0;
+
+  let level: QuotaStatus["weekly_level"];
+  if (limit === 0) {
+    level = "unconfigured";
+  } else if (pct >= 100) {
+    level = "exceeded";
+  } else if (pct >= quotaConfig.quota_critical_pct) {
+    level = "critical";
+  } else if (pct >= quotaConfig.quota_warning_pct) {
+    level = "warning";
+  } else {
+    level = "ok";
+  }
+
+  // Top sessions by token usage this week
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysSinceMonday));
+  const mondayEpoch = Math.floor(monday.getTime() / 1000);
+  // Reuse window query pattern but for the whole week
+  const weeklyBySession = db.getWindowTokens(hoursElapsed || 1);
+  // Actually get fresh weekly data with correct epoch
+  const weekTotal = weekly.total_tokens || 1; // avoid div by zero
+  const topSessions = weeklyBySession
+    .filter(s => s.total_tokens > 0)
+    .slice(0, 5)
+    .map(s => ({
+      name: s.session_name,
+      tokens: s.total_tokens,
+      pct: Math.round((s.total_tokens / weekTotal) * 100),
+    }));
+
+  return {
+    weekly_tokens_used: weekly.total_tokens,
+    weekly_tokens_limit: limit,
+    weekly_pct: pct,
+    weekly_level: level,
+    window_tokens_used: windowTotal,
+    window_hours: quotaConfig.quota_window_hours,
+    tokens_per_hour: tokensPerHour,
+    projected_weekly_total: Math.round(projected),
+    top_sessions: topSessions,
+  };
+}
+
 /** SQLite database abstraction — supports bun:sqlite and better-sqlite3 */
 interface DbHandle {
   exec(sql: string): void;
@@ -601,6 +679,105 @@ export class MemoryDb {
       ORDER BY total_cost DESC
       LIMIT ?`,
     ).all(limit) as unknown as Array<{ session_name: string; total_cost: number; queries: number }>;
+  }
+
+  // -- Token aggregation (quota management) ------------------------------------
+
+  /** Get aggregate token usage in a time range */
+  getAggregateTokens(fromEpoch?: number, toEpoch?: number): {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    num_entries: number;
+  } {
+    const db = this.requireDb();
+    let sql = `SELECT
+      COALESCE(SUM(input_tokens), 0) as input_tokens,
+      COALESCE(SUM(output_tokens), 0) as output_tokens,
+      COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) as total_tokens,
+      COUNT(*) as num_entries
+    FROM costs`;
+    const params: number[] = [];
+
+    if (fromEpoch !== undefined || toEpoch !== undefined) {
+      const conditions: string[] = [];
+      if (fromEpoch !== undefined) {
+        conditions.push("created_at >= ?");
+        params.push(fromEpoch);
+      }
+      if (toEpoch !== undefined) {
+        conditions.push("created_at <= ?");
+        params.push(toEpoch);
+      }
+      sql += ` WHERE ${conditions.join(" AND ")}`;
+    }
+
+    const row = db.prepare(sql).get(...params) as { input_tokens: number; output_tokens: number; total_tokens: number; num_entries: number } | undefined;
+    return row ?? { input_tokens: 0, output_tokens: 0, total_tokens: 0, num_entries: 0 };
+  }
+
+  /** Get per-session token usage for the current rolling window */
+  getWindowTokens(windowHours: number): Array<{
+    session_name: string;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    num_turns: number;
+  }> {
+    const db = this.requireDb();
+    const windowEpoch = Math.floor(Date.now() / 1000) - windowHours * 3600;
+    return db.prepare(
+      `SELECT
+        session_name,
+        COALESCE(SUM(input_tokens), 0) as input_tokens,
+        COALESCE(SUM(output_tokens), 0) as output_tokens,
+        COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) as total_tokens,
+        COALESCE(SUM(num_turns), 0) as num_turns
+      FROM costs
+      WHERE created_at >= ?
+      GROUP BY session_name
+      ORDER BY total_tokens DESC`,
+    ).all(windowEpoch) as unknown as Array<{
+      session_name: string; input_tokens: number; output_tokens: number;
+      total_tokens: number; num_turns: number;
+    }>;
+  }
+
+  /** Get daily token totals */
+  getDailyTokens(days = 14): Array<{
+    date: string;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    turns: number;
+  }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT
+        date(created_at, 'unixepoch') as date,
+        COALESCE(SUM(input_tokens), 0) as input_tokens,
+        COALESCE(SUM(output_tokens), 0) as output_tokens,
+        COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) as total_tokens,
+        COALESCE(SUM(num_turns), 0) as turns
+      FROM costs
+      WHERE created_at >= unixepoch() - (? * 86400)
+      GROUP BY date(created_at, 'unixepoch')
+      ORDER BY date DESC`,
+    ).all(days) as unknown as Array<{
+      date: string; input_tokens: number; output_tokens: number;
+      total_tokens: number; turns: number;
+    }>;
+  }
+
+  /** Get weekly token total since last Monday 00:00 UTC */
+  getWeeklyTokens(): { input_tokens: number; output_tokens: number; total_tokens: number } {
+    const now = new Date();
+    // Monday = 1 in getUTCDay(), Sunday = 0
+    const dayOfWeek = now.getUTCDay();
+    const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysSinceMonday));
+    const mondayEpoch = Math.floor(monday.getTime() / 1000);
+    return this.getAggregateTokens(mondayEpoch);
   }
 
   // -- Agent runs ---------------------------------------------------------------

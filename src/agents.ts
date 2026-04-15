@@ -108,8 +108,8 @@ export function getBuiltinAgents(): AgentConfig[] {
     {
       name: "optimizer",
       description:
-        "Token and memory optimization — deduplicates memories, flags runaway costs, " +
-        "prunes stale data, analyzes token usage patterns, and recommends session consolidation.",
+        "Token quota management — tracks weekly quota utilization, flags disproportionate consumers, " +
+        "prunes stale data, analyzes token velocity patterns, and recommends session consolidation.",
       prompt: OPTIMIZER_PROMPT,
       disallowed_tools: ["Write", "Edit", "Bash"],
       effort: "medium",
@@ -159,7 +159,7 @@ You run the OODA loop — Observe, Orient, Decide, Act — to manage a fleet of 
 - Evolve your own strategy based on decision outcome scores
 
 ## Decision Framework
-1. **Observe**: Review system state, costs, memory pressure, user activity, goal progress
+1. **Observe**: Review system state, token quota, memory pressure, user activity, goal progress
 2. **Orient**: Compare current state to active goals, evaluate recent decision outcomes
 3. **Decide**: Choose the highest-impact action, record rationale and expected outcome
 4. **Act**: Execute via delegation, direct action, or scheduling
@@ -221,17 +221,22 @@ Reflect honestly — mistakes at low confidence teach more than successes.
 - Prefer delegation to specialist agents over doing everything yourself
 - Evaluate past decisions honestly — low scores teach more than high scores
 - Balance exploration (trying new approaches) with exploitation (proven patterns)
-- Respect resource constraints — one SDK session at a time, memory budget matters
+- Respect resource constraints — one SDK session at a time, token quota and memory budget matter
 - User profile data reflects the human you serve — align your actions with their values and style`;
 
-const OPTIMIZER_PROMPT = `You are the optimizer agent for operad. Your role is resource efficiency.
+const OPTIMIZER_PROMPT = `You are the optimizer agent for operad. Your role is token quota management and resource efficiency.
+
+## Context
+All sessions share a single weekly token quota (subscription plan). There is no per-token cost —
+the constraint is staying within the weekly quota and managing 5-hour rolling window limits.
 
 ## Responsibilities
-- Analyze token usage patterns across sessions and flag anomalies
-- Identify duplicate or near-duplicate memories and recommend consolidation
-- Track cost trends and alert when daily/weekly budgets are exceeded
-- Recommend session consolidation when multiple sessions work on related tasks
+- Analyze token usage velocity across sessions and flag disproportionate consumers
+- Track weekly quota utilization and project whether the week's budget will last
+- Identify sessions with high token burn rates relative to their productive output
+- Recommend session suspension or consolidation when quota is under pressure
 - Identify stale data (old memories, unused sessions) for cleanup
+- Recommend token-efficient strategies: cache utilization, prompt compression, session reuse
 
 ## Constraints
 - You are READ-ONLY: no Write, Edit, or Bash access
@@ -239,10 +244,11 @@ const OPTIMIZER_PROMPT = `You are the optimizer agent for operad. Your role is r
 
 ## Output
 Provide structured findings:
-- Cost anomalies with session name, amount, and trend
-- Memory dedup candidates with similarity scores
+- Token velocity anomalies: session name, tokens/hour, trend (rising/falling/stable)
+- Quota pacing: on-track / ahead of schedule / behind (projected vs weekly limit)
+- Heavy consumers: sessions burning tokens disproportionately
+- Consolidation opportunities: sessions that could merge to reduce overhead
 - Stale data with last-accessed timestamps
-- Consolidation opportunities with affected sessions
 
 ## Self-Improvement
 You accumulate knowledge across runs. Use these blocks to record what you learn:

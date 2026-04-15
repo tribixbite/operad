@@ -207,6 +207,14 @@ export interface OrchestratorConfig {
   memory_critical_mb: number;
   /** MemAvailable threshold for emergency pressure (MB) */
   memory_emergency_mb: number;
+  /** Approximate weekly token budget (0 = unconfigured / unlimited) */
+  quota_weekly_tokens: number;
+  /** Warn at this % of weekly quota (default: 75) */
+  quota_warning_pct: number;
+  /** Critical alert at this % of weekly quota (default: 90) */
+  quota_critical_pct: number;
+  /** Rolling window size in hours for velocity calculation (default: 5, matches Anthropic) */
+  quota_window_hours: number;
 }
 
 /** Default health check configs by session type */

@@ -7,8 +7,9 @@
  * response and returns them for execution by the daemon.
  */
 
-import type { MemoryDb } from "./memory-db.js";
-import type { TmxState } from "./types.js";
+import type { MemoryDb, QuotaStatus } from "./memory-db.js";
+import { computeQuotaStatus } from "./memory-db.js";
+import type { TmxState, OrchestratorConfig } from "./types.js";
 
 // -- Types --------------------------------------------------------------------
 
@@ -16,7 +17,7 @@ import type { TmxState } from "./types.js";
 export interface SystemObservation {
   sessions: Array<{ name: string; status: string; activity: string | null; rss_mb: number | null }>;
   memory: { available_mb: number; pressure: string } | null;
-  costs: { today_usd: number; week_usd: number; month_usd: number };
+  quota: QuotaStatus;
   battery: { pct: number; charging: boolean } | null;
   pending_goals: number;
   unread_messages: number;
@@ -92,6 +93,7 @@ export type OodaAction =
 export function buildOodaContext(
   state: TmxState,
   db: MemoryDb,
+  quotaConfig?: Pick<OrchestratorConfig, "quota_weekly_tokens" | "quota_warning_pct" | "quota_critical_pct" | "quota_window_hours">,
 ): OodaContext {
   // Observe: system state
   const sessions = Object.values(state.sessions).map((s) => ({
@@ -101,7 +103,8 @@ export function buildOodaContext(
     rss_mb: s.rss_mb,
   }));
 
-  const costData = buildCostObservation(db);
+  const qc = quotaConfig ?? { quota_weekly_tokens: 0, quota_warning_pct: 75, quota_critical_pct: 90, quota_window_hours: 5 };
+  const quotaData = computeQuotaStatus(db, qc);
 
   const observations: SystemObservation = {
     sessions,
@@ -109,7 +112,7 @@ export function buildOodaContext(
       available_mb: state.memory.available_mb,
       pressure: state.memory.pressure,
     } : null,
-    costs: costData,
+    quota: quotaData,
     battery: state.battery ? {
       pct: state.battery.percentage,
       charging: state.battery.charging,
@@ -158,22 +161,11 @@ export function buildOodaContext(
   return { observations, goals, decisionHistory, decisionTrend, inbox, strategy, userProfile, personality, agentLearnings, sharedInsights, personalityDrift };
 }
 
-/** Build cost observation from recent data */
-function buildCostObservation(db: MemoryDb): { today_usd: number; week_usd: number; month_usd: number } {
-  const now = Math.floor(Date.now() / 1000);
-  const dayAgo = now - 86400;
-  const weekAgo = now - 7 * 86400;
-  const monthAgo = now - 30 * 86400;
-
-  const todayCosts = db.getAggregateCosts(dayAgo);
-  const weekCosts = db.getAggregateCosts(weekAgo);
-  const monthCosts = db.getAggregateCosts(monthAgo);
-
-  return {
-    today_usd: todayCosts.total_cost_usd,
-    week_usd: weekCosts.total_cost_usd,
-    month_usd: monthCosts.total_cost_usd,
-  };
+/** Format token count with K/M suffix */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
 }
 
 /** Build profile snapshot from user_profile table */
@@ -227,7 +219,22 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   if (ctx.observations.battery) {
     sections.push(`**Battery**: ${ctx.observations.battery.pct}% ${ctx.observations.battery.charging ? "(charging)" : "(discharging)"}`);
   }
-  sections.push(`**Costs**: today=$${ctx.observations.costs.today_usd.toFixed(2)} | week=$${ctx.observations.costs.week_usd.toFixed(2)} | month=$${ctx.observations.costs.month_usd.toFixed(2)}`);
+  // Token quota status
+  const q = ctx.observations.quota;
+  if (q.weekly_tokens_limit > 0) {
+    const levelIcon = q.weekly_level === "ok" ? "OK" : q.weekly_level === "warning" ? "WARNING" : q.weekly_level === "critical" ? "CRITICAL" : "EXCEEDED";
+    sections.push(`**Quota**: ${fmtTokens(q.weekly_tokens_used)} / ${fmtTokens(q.weekly_tokens_limit)} tokens this week (${q.weekly_pct}%) [${levelIcon}]`);
+  } else {
+    sections.push(`**Tokens**: ${fmtTokens(q.weekly_tokens_used)} this week`);
+  }
+  sections.push(`**Window**: ${fmtTokens(q.window_tokens_used)} in last ${q.window_hours}h | velocity: ${fmtTokens(q.tokens_per_hour)}/hr`);
+  if (q.weekly_tokens_limit > 0) {
+    sections.push(`**Projected**: ${fmtTokens(q.projected_weekly_total)} tokens/week at current rate`);
+  }
+  if (q.top_sessions.length > 0) {
+    const topStr = q.top_sessions.slice(0, 3).map(s => `${s.name} (${fmtTokens(s.tokens)}, ${s.pct}%)`).join(", ");
+    sections.push(`**Top consumers**: ${topStr}`);
+  }
 
   // 2. Active goals
   sections.push("\n## Active Goals\n");
