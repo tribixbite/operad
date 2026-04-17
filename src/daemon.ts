@@ -95,6 +95,7 @@ import {
   capturePane,
 } from "./session.js";
 import { AgentEngine } from "./agent-engine.js";
+import { ToolEngine } from "./tool-engine.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -207,6 +208,7 @@ export class Daemon {
   private log: Logger;
   private sessionController!: SessionController;
   private agentEngine!: AgentEngine;
+  private toolEngine!: ToolEngine;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -322,6 +324,8 @@ export class Daemon {
       executeOodaActions: (actions) => this.executeOodaActions(actions),
     };
     this.agentEngine = new AgentEngine(ctx);
+    // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
+    this.toolEngine = new ToolEngine(ctx);
   }
 
   /**
@@ -3442,37 +3446,12 @@ export class Daemon {
     }
   }
 
-  /** Build a ToolContext for a specific agent with session state accessors */
+  /**
+   * Build a ToolContext for a specific agent with session state accessors.
+   * Logic lives in ToolEngine — this is a thin delegation stub.
+   */
   private buildToolContext(agentName: string): ToolContext {
-    const state = this.state.getState();
-    return {
-      agentName,
-      cwd: this.config.sessions.find((s) => s.path)?.path ?? homedir(),
-      db: this.memoryDb!,
-      log: this.log,
-      signal: new AbortController().signal,
-      getSessionStates: () => {
-        const result: Record<string, { status: string; activity: string | null; rss_mb: number | null }> = {};
-        for (const [name, s] of Object.entries(state.sessions)) {
-          result[name] = { status: s.status, activity: s.activity, rss_mb: s.rss_mb };
-        }
-        return result;
-      },
-      getSystemMemory: () => state.memory ? { available_mb: state.memory.available_mb, pressure: state.memory.pressure } : null,
-      getBattery: () => state.battery ? { pct: state.battery.percentage, charging: state.battery.charging } : null,
-      captureSessionOutput: (name: string, lines: number) => {
-        try {
-          const output = execSync(
-            `tmux capture-pane -t ${JSON.stringify(name)} -p -S -${lines}`,
-            { encoding: "utf-8", timeout: 3000 },
-          ).trim();
-          return output || null;
-        } catch { return null; }
-      },
-      sendToSession: (name: string, text: string) => {
-        sendKeys(name, text);
-      },
-    };
+    return this.toolEngine.buildToolContext(agentName);
   }
 
   /** Run daily agent snapshots (called on each cognitive tick, self-deduplicates) */
