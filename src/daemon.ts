@@ -3637,7 +3637,7 @@ export class Daemon {
     try {
       if (!existsSync(path)) return null;
       return JSON.parse(readFileSync(path, "utf-8"));
-    } catch {
+    } catch { /* file missing or invalid JSON — best-effort read returns null */
       return null;
     }
   }
@@ -4654,7 +4654,7 @@ export class Daemon {
               if (!state || state.status === "stopped" || state.status === "failed") continue;
               try {
                 results.push(await getProjectTokenUsage(cfg.name, cfg.path));
-              } catch { /* skip */ }
+              } catch { /* best-effort — skip sessions with unreadable JSONL */ }
             }
             // Also check registry entries
             for (const entry of this.registry.entries()) {
@@ -4665,7 +4665,7 @@ export class Daemon {
               if (results.some(r => r.path === entry.path)) continue;
               try {
                 results.push(await getProjectTokenUsage(entry.name, entry.path));
-              } catch { /* skip */ }
+              } catch { /* best-effort — skip sessions with unreadable JSONL */ }
             }
             return { status: 200, data: results };
           } catch (err) {
@@ -5632,7 +5632,8 @@ export class Daemon {
             try {
               const specs = this.memoryDb.getSpecializations(name || undefined);
               return { status: 200, data: specs };
-            } catch {
+            } catch (err) {
+              this.log.warn("getSpecializations failed", { err: String(err) });
               return { status: 200, data: [] };
             }
           }
@@ -5655,7 +5656,8 @@ export class Daemon {
                  ORDER BY created_at DESC LIMIT ?`,
               ).all(limit);
               return { status: 200, data: messages };
-            } catch {
+            } catch (err) {
+              this.log.warn("roundtables query failed", { err: String(err) });
               return { status: 200, data: [] };
             }
           }
@@ -6237,7 +6239,8 @@ export class Daemon {
           return { serial: serial.trim(), state: state.trim() };
         });
       return { devices };
-    } catch {
+    } catch (err) {
+      this.log.warn("getAdbDevices failed", { err: String(err) });
       return { devices: [] };
     }
   }
@@ -6477,7 +6480,7 @@ export class Daemon {
             return Array.from(byAgent.entries()).map(([agent, top]) => ({
               agent, top_domain: top.domain, confidence: top.confidence,
             }));
-          } catch { return []; }
+          } catch { /* specializations table may not exist during first run */ return []; }
         })() : [],
         sessions: Object.values(state.sessions).map((s) => {
           const cfg = this.config.sessions.find((c) => c.name === s.name);
