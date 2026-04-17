@@ -96,6 +96,7 @@ import {
 } from "./session.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
+import { PersistenceEngine } from "./persistence.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -209,6 +210,7 @@ export class Daemon {
   private sessionController!: SessionController;
   private agentEngine!: AgentEngine;
   private toolEngine!: ToolEngine;
+  private persistenceEngine!: PersistenceEngine;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -223,7 +225,6 @@ export class Daemon {
   private memoryDb: MemoryDb | null = null;
   private toolExecutor: ToolExecutor | null = null;
   private scheduleEngine: ScheduleEngine | null = null;
-  private lastSnapshotDate: string | null = null;
   private lastUserActivityEpoch: number = Math.floor(Date.now() / 1000);
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
@@ -326,6 +327,9 @@ export class Daemon {
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
     this.toolEngine = new ToolEngine(ctx);
+    // PersistenceEngine owns daily snapshots and will absorb more persistence
+    // concerns incrementally as daemon.ts dependencies are disentangled.
+    this.persistenceEngine = new PersistenceEngine(ctx);
   }
 
   /**
@@ -3454,24 +3458,12 @@ export class Daemon {
     return this.toolEngine.buildToolContext(agentName);
   }
 
-  /** Run daily agent snapshots (called on each cognitive tick, self-deduplicates) */
+  /**
+   * Run daily agent snapshots (called on each cognitive tick, self-deduplicates).
+   * Logic lives in PersistenceEngine — this is a thin delegation stub.
+   */
   private maybeDailySnapshot(): void {
-    if (!this.memoryDb) return;
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.lastSnapshotDate === today) return;
-    this.lastSnapshotDate = today;
-
-    const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
-    for (const agent of this.agentConfigs) {
-      if (!agent.enabled) continue;
-      try {
-        saveSnapshot(this.memoryDb, agent, snapshotDir);
-        pruneSnapshots(snapshotDir, agent.name);
-      } catch (err) {
-        this.log.warn(`Snapshot failed for ${agent.name}: ${err}`);
-      }
-    }
-    this.log.info(`Daily agent snapshots saved (${this.agentConfigs.filter((a) => a.enabled).length} agents)`);
+    this.persistenceEngine.maybeDailySnapshot();
   }
 
   /** Check if conditions are met for memory consolidation and run it */
