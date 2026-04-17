@@ -313,15 +313,15 @@ export interface Switchboard {
   agents: Record<string, boolean>;
 }
 
-/** Default switchboard — everything on */
+/** Default switchboard — core features on, autonomous subsystems opt-in */
 export function defaultSwitchboard(): Switchboard {
   return {
     all: true,
     sdkBridge: true,
-    cognitive: true,
-    oodaAutoTrigger: true,
+    cognitive: false,
+    oodaAutoTrigger: false,
     memoryInjection: true,
-    mindMeld: true,
+    mindMeld: false,
     agents: {},
   };
 }

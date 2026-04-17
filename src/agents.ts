@@ -108,7 +108,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       prompt: MASTER_CONTROLLER_PROMPT,
       max_turns: 100,
       effort: "max",
-      enabled: true,
+      enabled: false,
       source: "builtin",
       // All tool categories — MC is the primary actor
       allowed_tool_categories: ["observe", "analyze", "mutate", "communicate", "orchestrate"],
@@ -124,7 +124,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       disallowed_tools: ["Write", "Edit", "Bash"],
       effort: "medium",
       model: "sonnet",
-      enabled: true,
+      enabled: false,
       source: "builtin",
       // Read-only: observe and analyze only
       allowed_tool_categories: ["observe", "analyze"],
@@ -140,7 +140,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       disallowed_tools: ["Write", "Edit", "Bash"],
       memory: "user",
       effort: "high",
-      enabled: true,
+      enabled: false,
       source: "builtin",
       // Read-only: observe and analyze only
       allowed_tool_categories: ["observe", "analyze"],
@@ -155,7 +155,7 @@ export function getBuiltinAgents(): AgentConfig[] {
       prompt: IDEATOR_PROMPT,
       max_turns: 50,
       effort: "max",
-      enabled: true,
+      enabled: false,
       source: "builtin",
       // Read-only: observe and analyze only
       allowed_tool_categories: ["observe", "analyze"],
