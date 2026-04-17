@@ -510,7 +510,7 @@ Example usage or output
   {:else if data}
 
     <!-- Section 0: Switchboard -->
-    <div class="card section-card">
+    <div id="switchboard" class="card section-card">
       <button class="section-header" onclick={() => toggleSection("switchboard")}>
         <span class="chevron">{sections.switchboard ? "▾" : "▸"}</span>
         <span class="section-title">Switchboard</span>

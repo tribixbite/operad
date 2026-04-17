@@ -15,10 +15,12 @@
   <!-- Tab bar -->
   <div class="flex gap-2 border-b border-zinc-700">
     <button
+      type="button"
       class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'core' ? 'text-white border-b-2 border-blue-500' : 'text-zinc-400 hover:text-zinc-200'}"
       onclick={() => activeTab = 'core'}
     >Core Features</button>
     <button
+      type="button"
       class="px-4 py-2 text-sm font-medium transition-colors {activeTab === 'agentic' ? 'text-white border-b-2 border-purple-500' : 'text-zinc-400 hover:text-zinc-200'}"
       onclick={() => activeTab = 'agentic'}
     >Advanced: Autonomous Layer</button>
@@ -128,7 +130,7 @@ enabled = true</pre>
 
       <div class="bg-purple-950/40 border border-purple-700/50 rounded-lg p-4">
         <div class="flex items-start gap-3">
-          <span class="text-purple-400 text-xl">⚠</span>
+          <span class="text-purple-400 text-xl" aria-hidden="true">⚠</span>
           <div>
             <p class="text-purple-200 font-medium">Opt-in. Disabled by default.</p>
             <p class="text-purple-300/80 text-sm mt-1">These features run AI agents autonomously inside your sessions. Enable them in <a href="/settings#switchboard" class="text-purple-300 hover:underline">Settings → Switchboard</a> after reading the docs below. Start with individual agents before enabling auto-trigger.</p>
