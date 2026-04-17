@@ -1,6 +1,7 @@
 import { spawnSync } from "child_process";
-import { existsSync, accessSync, constants, readFileSync, readdirSync } from "fs";
+import { existsSync, accessSync, constants, readFileSync, readdirSync, realpathSync } from "fs";
 import { join, dirname } from "path";
+import * as net from "net";
 import { detectPlatform, type PlatformId } from "./platform/platform.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
@@ -116,10 +117,9 @@ function checkConfig(configPath?: string): CheckResult {
   }
 }
 
-function checkStateDir(platformId: PlatformId): CheckResult {
-  const stateDir = platformId === "android" && process.env.PREFIX
-    ? join(process.env.PREFIX, "var/lib/tmx")
-    : join(process.env.HOME ?? "/", ".local/share/tmx");
+function checkStateDir(_platformId: PlatformId): CheckResult {
+  // State dir is always $HOME/.local/share/tmx on all platforms (matching android.ts and memory-db.ts)
+  const stateDir = join(process.env.HOME ?? "/", ".local/share/tmx");
   try {
     if (!existsSync(stateDir)) {
       return { name: "state-dir", status: "warn", message: `State dir not found: ${stateDir} (will be created on first boot)` };
@@ -137,9 +137,15 @@ function checkStateDir(platformId: PlatformId): CheckResult {
 }
 
 function checkDashboard(): CheckResult {
-  const localDist = join(dirname(__filename ?? ""), "../dashboard/dist");
+  // Use realpathSync to resolve symlinks (matching tmx.ts pattern); fall back to null if it throws
+  let localDist: string | null = null;
+  try {
+    localDist = join(dirname(realpathSync(__filename)), "../dashboard/dist");
+  } catch {
+    localDist = null;
+  }
   const homeDist = join(process.env.HOME ?? "/", "git/operad/dashboard/dist");
-  const dir = existsSync(localDist) ? localDist : existsSync(homeDist) ? homeDist : null;
+  const dir = (localDist && existsSync(localDist)) ? localDist : existsSync(homeDist) ? homeDist : null;
   if (!dir) {
     return {
       name: "dashboard",
@@ -167,7 +173,6 @@ function checkDashboard(): CheckResult {
 async function checkPort(): Promise<CheckResult> {
   const port = 18970;
   return new Promise((resolve) => {
-    const net = require("net");
     const server = net.createServer();
     server.once("error", (err: NodeJS.ErrnoException) => {
       if (err.code === "EADDRINUSE") {
@@ -199,13 +204,14 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
       results.push({ name: "termux-prefix", status: "ok", message: `$PREFIX = ${process.env.PREFIX}` });
     }
 
-    const ti = spawnSync("termux-info", [], { encoding: "utf8", timeout: 3000 });
-    if (ti.error) {
+    // termux-battery-status (from termux-api package) is what battery monitoring actually uses
+    const ti = spawnSync("termux-battery-status", [], { encoding: "utf8", timeout: 3000 });
+    if (ti.error || ti.status !== 0) {
       results.push({
         name: "termux-api",
         status: "warn",
-        message: "termux-info not available — battery monitoring disabled",
-        fix: "Install Termux:API app and run: pkg install termux-api",
+        message: "termux-battery-status not available — battery monitoring disabled",
+        fix: "Install Termux:API app from F-Droid and run: pkg install termux-api",
       });
     } else {
       results.push({ name: "termux-api", status: "ok", message: "termux-api available" });
@@ -215,37 +221,27 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
   return results;
 }
 
-async function checkDatabase(platformId: PlatformId): Promise<CheckResult> {
-  const stateDir = platformId === "android" && process.env.PREFIX
-    ? join(process.env.PREFIX, "var/lib/tmx")
-    : join(process.env.HOME ?? "/", ".local/share/tmx");
-  const dbPath = join(stateDir, "memory.db");
+async function checkDatabase(_platformId: PlatformId): Promise<CheckResult> {
+  // Database is always at $HOME/.local/share/operad/memory.db (matching memory-db.ts)
+  const dbPath = join(process.env.HOME ?? "/", ".local/share/operad/memory.db");
   if (!existsSync(dbPath)) {
     return { name: "database", status: "ok", message: "No database yet (created on first agent run)" };
   }
   try {
-    try {
-      const { Database } = await import("bun:sqlite");
-      const db = new Database(dbPath, { readonly: true });
-      const row = db.prepare("PRAGMA integrity_check").get() as { integrity_check: string };
-      db.close();
-      if (row.integrity_check === "ok") {
-        return { name: "database", status: "ok", message: `${dbPath} — integrity ok` };
-      }
-      return {
-        name: "database",
-        status: "fail",
-        message: `Database corruption: ${row.integrity_check}`,
-        fix: `Back up and remove ${dbPath}, then restart daemon to recreate`,
-      };
-    } catch {
-      return { name: "database", status: "ok", message: `${dbPath} exists (integrity check skipped in node env)` };
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(dbPath, { readonly: true });
+    const row = db.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | null;
+    db.close();
+    if (!row || row.integrity_check === "ok") {
+      return { name: "database", status: "ok", message: `${dbPath} — integrity ok` };
     }
-  } catch (err: any) {
     return {
       name: "database",
-      status: "warn",
-      message: `Could not check database: ${err.message}`,
+      status: "fail",
+      message: `Database corruption: ${row.integrity_check}`,
+      fix: `Back up and remove ${dbPath}, then restart daemon to recreate`,
     };
+  } catch {
+    return { name: "database", status: "ok", message: `${dbPath} exists (integrity check skipped in node env)` };
   }
 }
