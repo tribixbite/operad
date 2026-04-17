@@ -26,14 +26,16 @@
     key: keyof Switchboard;
     label: string;
     description: string;
+    /** Anchor on /help page for documentation link */
+    helpAnchor: string;
   }
 
   const subsystems: SubsystemDef[] = [
-    { key: "sdkBridge",       label: "SDK Bridge",       description: "Claude Agent SDK streaming and session management" },
-    { key: "cognitive",       label: "Cognitive Timer",   description: "Periodic OODA trigger condition checks (60s interval)" },
-    { key: "oodaAutoTrigger", label: "OODA Auto-Trigger", description: "Automatic master controller runs when conditions met" },
-    { key: "memoryInjection", label: "Memory Injection",  description: "Inject project memories into SDK queries" },
-    { key: "mindMeld",        label: "Mind Meld",         description: "Inject user profile/personality into OODA prompts" },
+    { key: "sdkBridge",       label: "SDK Bridge",       description: "Claude Agent SDK streaming and session management",          helpAnchor: "sessions" },
+    { key: "cognitive",       label: "Cognitive Timer",  description: "Periodic OODA trigger condition checks (60s interval)",     helpAnchor: "ooda" },
+    { key: "oodaAutoTrigger", label: "OODA Auto-Trigger",description: "Automatic master controller runs when conditions met",      helpAnchor: "ooda" },
+    { key: "memoryInjection", label: "Memory Injection", description: "Inject project memories into SDK queries",                  helpAnchor: "memory-system" },
+    { key: "mindMeld",        label: "Mind Meld",        description: "Inject user profile/personality into OODA prompts",        helpAnchor: "memory-system" },
   ];
 
   // -- Load initial state via REST, then stream updates via WS ----------------
@@ -148,6 +150,12 @@
       <div class="error-msg">{error}</div>
     {/if}
 
+    <!-- Opt-in notice -->
+    <div class="optin-notice">
+      All autonomous features are disabled on fresh installs. Enable them progressively —
+      <a href="/help#agentic-overview" class="optin-link">read the docs</a> before enabling.
+    </div>
+
     <!-- Subsystems -->
     <div class="section-title">Subsystems</div>
     <div class="toggle-grid">
@@ -162,7 +170,10 @@
             <span class="toggle-dot" class:on={isEffective(sub.key)}></span>
           </button>
           <div class="toggle-info">
-            <span class="toggle-label">{sub.label}</span>
+            <span class="toggle-label">
+              {sub.label}
+              <a href="/help#{sub.helpAnchor}" class="help-link" title="Documentation">?</a>
+            </span>
             <span class="toggle-desc">{sub.description}</span>
           </div>
           {#if sub.key === "oodaAutoTrigger" && oodaRunning}
@@ -272,6 +283,39 @@
   }
   .master-label { font-size: 0.9rem; }
   .master-hint { font-size: 0.65rem; color: var(--text-muted); }
+
+  /* Opt-in notice */
+  .optin-notice {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem 0.625rem;
+    line-height: 1.5;
+  }
+  .optin-link {
+    color: #c084fc;
+    text-decoration: none;
+  }
+  .optin-link:hover { text-decoration: underline; }
+
+  /* Help documentation link on toggle labels */
+  .help-link {
+    display: inline-block;
+    color: var(--text-muted);
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-decoration: none;
+    margin-left: 0.25rem;
+    opacity: 0.6;
+    vertical-align: middle;
+    line-height: 1;
+  }
+  .help-link:hover {
+    color: var(--text-secondary);
+    opacity: 1;
+  }
 
   /* Section titles */
   .section-title {
