@@ -1,29 +1,20 @@
 # operad
 
-Cross-platform orchestrator for managing Claude Code sessions via tmux. Designed for developers running multiple Claude Code projects simultaneously.
+Cross-platform tmux session orchestrator for Claude Code sessions. Designed for developers running multiple Claude Code projects simultaneously.
 
-## What it does
+**What it does:**
+- Boot and manage tmux sessions with dependency ordering
+- Health checks, auto-restart, and session lifecycle management
+- Web dashboard: session status, memory, logs, telemetry, settings
+- Prompt history: search, star, and replay Claude prompts across all projects
+- Battery and memory awareness on Android/Termux
+- Token quota tracking with velocity trends and per-session attribution
 
-- **Web dashboard** for managing all your Claude Code sessions, skills, memories, and prompt history across every project — searchable, with starring/saving
-- **Auto-boot saved projects** — all your active projects start automatically on boot, dependency-ordered with health monitoring
-- **Full prompt history** across all projects with search and the ability to star/save important conversations
-- **Session lifecycle management** — health checks, auto-restart on failure, memory pressure response, battery awareness
-- **Real-time monitoring** — system memory, per-session RSS, battery, process budget — all via SSE-powered dashboard
-- **Agentic AI system** — 4 built-in agents (master controller, optimizer, preference learner, ideator) with OODA cognitive loop, goal trees, and inter-agent messaging
-- **Token quota management** — weekly quota tracking with velocity trends, daily breakdowns, and per-session usage attribution
-- **Tool registry** — extensible tool system with autonomy levels, trust calibration, and persistent scheduling
-- **Memory consolidation** — automatic learning decay, pruning, merging, and cross-agent knowledge sharing during idle periods
-- **Agent specialization** — domain expertise tracking with roundtable protocol for multi-agent collaboration
-
-Supports **Android/Termux**, **Linux**, and **macOS**.
-
-## Install
+## Quick Start
 
 ```sh
-npm i -g operadic
+npm install -g operadic
 ```
-
-## Quick start
 
 ```sh
 mkdir -p ~/.config/operad
@@ -39,16 +30,15 @@ type = "claude"
 path = "$HOME/git/my-project"
 EOF
 
-# Boot everything
 operad boot
-
-# Open dashboard
-open http://localhost:18970
+# Dashboard: http://localhost:18970
 ```
 
-## Configuration
+Run `operad doctor` to diagnose any setup issues.
 
-Default: `~/.config/operad/operad.toml` (TOML with `$ENV_VAR` expansion)
+## Config
+
+Default location: `~/.config/operad/operad.toml` (TOML with `$ENV_VAR` expansion)
 
 ```toml
 [operad]
@@ -76,21 +66,27 @@ url = "http://localhost:3000/health"
 
 Session types: `claude` (Claude Code with readiness detection), `daemon` (long-running command), `service` (headless).
 
-## CLI
+## CLI Commands
 
 | Command | Description |
-|---|---|
-| `operad boot` | Start daemon + boot all sessions in dependency order |
+|---------|-------------|
+| `operad boot` | Start daemon + all sessions in dependency order |
 | `operad status` | Session table with memory, battery, uptime |
 | `operad health` | Run health sweep |
+| `operad start <name>` | Start a specific session |
+| `operad stop <name>` | Stop a specific session |
+| `operad restart <name>` | Restart a specific session |
 | `operad go <name>` | Send "go" to a Claude session |
-| `operad start/stop/restart <name>` | Control individual sessions |
 | `operad open <path>` | Register and start a dynamic session |
 | `operad close <name>` | Stop and unregister a dynamic session |
 | `operad recent` | Recent Claude projects from history |
 | `operad tabs` | Open terminal tabs for running sessions |
 | `operad memory` | System memory + per-session RSS |
-| `operad suspend/resume <name>` | SIGSTOP/SIGCONT a session |
+| `operad suspend <name>` | SIGSTOP a session |
+| `operad resume <name>` | SIGCONT a session |
+| `operad logs` | Stream daemon logs |
+| `operad doctor` | Diagnose install issues |
+| `operad upgrade` | Rebuild and hot-swap daemon |
 | `operad shutdown` | Stop daemon (sessions persist in tmux) |
 
 ## Dashboard
@@ -101,12 +97,12 @@ The web dashboard at `http://localhost:18970` provides:
 - **Memory** — per-session RSS tracking, AI memory management (SQLite + FTS5), process manager
 - **Logs** — real-time daemon logs with level filtering
 - **Telemetry** — captured telemetry sink with SDK breakdown
-- **Settings** — MCP servers, plugins, skills, plans, CLAUDE.md management, agent control, cognitive system
+- **Settings** — MCP servers, plugins, skills, plans, CLAUDE.md management
 
-## Platform support
+## Platforms
 
 | Feature | Android/Termux | Linux | macOS |
-|---|---|---|---|
+|---------|---------------|-------|-------|
 | Notifications | termux-notification | notify-send | osascript |
 | Battery | termux-battery-status | /sys/power_supply | pmset |
 | Wake lock | termux-wake-lock | systemd-inhibit | caffeinate |
@@ -114,11 +110,40 @@ The web dashboard at `http://localhost:18970` provides:
 | Terminal tabs | am intents | n/a | Terminal.app |
 | ADB protections | phantom fix + Doze | n/a | n/a |
 
-## Crash resilience
+## Crash Resilience
 
 On Android, the daemon, watchdog, and tmux server all run as independent processes (PPid: 1). When Android kills the Termux app, only the terminal UI dies — all sessions continue running. The watchdog auto-restarts the daemon, which re-adopts existing sessions.
 
 Defense layers: wake lock (never released), phantom process killer fix, Doze whitelist, process detach, IPC socket self-healing, watchdog loop, crash-safe trace log.
+
+---
+
+## Advanced: Autonomous Layer
+
+> **Opt-in. Disabled by default.** These features run AI agents autonomously.
+> Enable via dashboard Settings → Switchboard after reading the [in-app docs](http://localhost:18970/help#agentic-overview).
+
+operad includes an agentic layer for self-improving orchestration:
+
+- **OODA loop** — periodic Observe→Orient→Decide→Act cycles via master-controller agent
+- **Agents** — optimizer, preference-learner, ideator, master-controller
+- **Scheduling engine** — cron/interval triggers for agents and commands
+- **Memory system** — decay, consolidation, cross-pollination of agent learnings
+- **Agent specialization** — domain expertise tracking with roundtable protocol for multi-agent collaboration
+- **Tool registry** — extensible tool system with autonomy levels, trust calibration, and persistent leases
+- **Tuning** — feed notes, personality traits, and chat logs to shape autonomous decisions
+
+See in-app `/help` for full documentation.
+
+## Development
+
+```sh
+bun install
+bun run build       # bundle to dist/tmx.js
+bun run typecheck   # TypeScript check
+bun test            # unit tests
+cd dashboard && bun run build  # build dashboard
+```
 
 ## Docs
 
