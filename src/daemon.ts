@@ -1094,7 +1094,8 @@ export class Daemon {
 
       this.adbSerialExpiry = now + Daemon.ADB_SERIAL_TTL_MS;
       return this.adbSerial;
-    } catch {
+    } catch (err) {
+      this.log.debug("resolveAdbSerial failed", { err: String(err) });
       return null;
     }
   }
