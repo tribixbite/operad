@@ -14,31 +14,37 @@ Cross-platform tmux session orchestrator for managing Claude Code sessions. npm 
 ### Source Structure
 ```
 src/
-  tmx.ts              — CLI entry point (~1050 lines)
-  daemon.ts           — Main daemon (~4380 lines)
-  config.ts           — TOML config parser with env var expansion
-  session.ts          — Session lifecycle, tmux interaction (~780 lines)
-  http.ts             — Dashboard HTTP server + SSE + REST API
-  ipc.ts              — Unix socket IPC (newline-delimited JSON)
-  health.ts           — Health check engine (tmux/http/process/custom)
-  memory.ts           — System memory monitoring via /proc or platform API
-  activity.ts         — Per-session CPU tracking via /proc/PID/stat
-  battery.ts          — Battery monitoring + radio control
-  wake.ts             — Wake lock management (acquire-only, never release)
-  budget.ts           — Android phantom process budget tracking
-  state.ts            — State persistence (~/.local/share/tmx/state.json)
-  registry.ts         — Dynamic session registry
-  log.ts              — Structured logging + crash-safe trace log
-  notifications.ts    — Claude session notification parsing
-  claude-session.ts   — Claude readiness detection
-  prompts.ts          — Prompt history extraction from Claude JSONL
-  migrate.ts          — Legacy config migration
-  types.ts            — Type definitions (~530 lines)
-  deps.ts             — Dependency graph (topological sort)
-  git-info.ts         — Git repo metadata
-  telemetry-sink.ts   — Token usage tracking
-  display-types.ts    — Dashboard display types
-  import-meta-shim.js — esbuild CJS inject for import.meta
+  tmx.ts                  — CLI entry point (~1050 lines)
+  daemon.ts               — Main daemon (~6523 lines; engines extracted below)
+  agent-engine.ts         — OODA cognitive loop, agent dispatch (extracted from daemon)
+  tool-engine.ts          — ToolContext builder for agent tool dispatch (extracted from daemon)
+  persistence.ts          — Daily snapshot persistence for agents (extracted from daemon)
+  server-engine.ts        — HTTP/WS payload helpers for DashboardServer (extracted from daemon)
+  session-controller.ts   — Session lifecycle state machine (extracted, unit-testable)
+  orchestrator-context.ts — Shared dependency interface for extracted engines
+  config.ts               — TOML config parser with env var expansion
+  session.ts              — Session lifecycle, tmux interaction (~780 lines)
+  http.ts                 — Dashboard HTTP server + SSE + REST API
+  ipc.ts                  — Unix socket IPC (newline-delimited JSON)
+  health.ts               — Health check engine (tmux/http/process/custom)
+  memory.ts               — System memory monitoring via /proc or platform API
+  activity.ts             — Per-session CPU tracking via /proc/PID/stat
+  battery.ts              — Battery monitoring + radio control
+  wake.ts                 — Wake lock management (acquire-only, never release)
+  budget.ts               — Android phantom process budget tracking
+  state.ts                — State persistence (~/.local/share/tmx/state.json)
+  registry.ts             — Dynamic session registry
+  log.ts                  — Structured logging + crash-safe trace log
+  notifications.ts        — Claude session notification parsing
+  claude-session.ts       — Claude readiness detection
+  prompts.ts              — Prompt history extraction from Claude JSONL
+  migrate.ts              — Legacy config migration
+  types.ts                — Type definitions (~530 lines)
+  deps.ts                 — Dependency graph (topological sort)
+  git-info.ts             — Git repo metadata
+  telemetry-sink.ts       — Token usage tracking
+  display-types.ts        — Dashboard display types
+  import-meta-shim.js     — esbuild CJS inject for import.meta
   platform/
     platform.ts       — Platform interface + detectPlatform() factory
     common.ts         — Shared /proc helpers (android + linux)
@@ -56,11 +62,13 @@ src/
 - **Runtime**: `bun` (shebang `#!/usr/bin/env node`, works with both bun and node)
 
 ### Dashboard
-- **Stack**: Astro 5 + Svelte 5 + Tailwind v4
+- **Stack**: SvelteKit 2 + Svelte 5 + Tailwind v4 (migrated from Astro 5; adapter-static, SPA mode)
 - **Location**: `dashboard/`
 - **Build**: `cd dashboard && bun install && node scripts/fix-android-binaries.mjs && bun run build`
 - **Served by**: `http.ts` DashboardServer on port 18970
 - **Pages**: Overview, Memory, Logs, Settings, Telemetry
+- **Components**: `dashboard/src/lib/components/`; routes: `dashboard/src/routes/`
+- **SSE client**: shared store in `store.svelte.ts` (Svelte 5 `$state` pattern)
 
 ### Landing Page
 - **Stack**: Astro 5 + Tailwind v4

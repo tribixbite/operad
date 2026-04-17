@@ -2545,7 +2545,7 @@ export class Daemon {
 
       // Start cognitive timer — checks OODA trigger conditions every 60s
       this.cognitiveTimer = setInterval(() => {
-        this.maybeTriggerOoda().catch((err) => {
+        this.agentEngine.maybeTriggerOoda().catch((err) => {
           this.log.warn(`Cognitive timer error: ${err}`);
         });
         // Expire stale tool leases on each tick
@@ -2554,7 +2554,7 @@ export class Daemon {
           if (expired > 0) this.log.debug(`Expired ${expired} tool lease(s)`);
         }
         // Daily agent snapshot (check every tick, only run once per day)
-        this.maybeDailySnapshot();
+        this.persistenceEngine.maybeDailySnapshot();
         // Memory consolidation during idle periods
         this.maybeConsolidate();
       }, 60_000);
@@ -3052,24 +3052,6 @@ export class Daemon {
   }
 
   /**
-   * Check OODA trigger conditions and run master controller if warranted.
-   * Called every 60s by cognitiveTimer.
-   * Logic lives in AgentEngine — this is a thin delegation stub.
-   */
-  private async maybeTriggerOoda(): Promise<void> {
-    return this.agentEngine.maybeTriggerOoda();
-  }
-
-  /**
-   * Run a full OODA cycle — build context, run master controller, parse and
-   * execute actions from its response.
-   * Logic lives in AgentEngine — this is a thin delegation stub.
-   */
-  private async runOodaCycle(): Promise<void> {
-    return this.agentEngine.runOodaCycle();
-  }
-
-  /**
    * Execute parsed OODA actions from master controller response.
    * Called after parseOodaResponse() returns structured actions.
    */
@@ -3145,7 +3127,7 @@ export class Daemon {
             if (this.scheduledOodaTimer) clearTimeout(this.scheduledOodaTimer);
             const delayMs = action.delayMinutes * 60 * 1000;
             this.scheduledOodaTimer = setTimeout(() => {
-              this.runOodaCycle().catch((err) => {
+              this.agentEngine.runOodaCycle().catch((err) => {
                 this.log.warn(`Scheduled OODA cycle failed: ${err}`);
               });
             }, delayMs);
@@ -3168,7 +3150,7 @@ export class Daemon {
                 break;
               }
             }
-            const toolCtx = this.buildToolContext("master-controller");
+            const toolCtx = this.toolEngine.buildToolContext("master-controller");
             const result = await this.toolExecutor.execute(action.name, action.params, toolCtx);
             toolCallCount++;
             this.log.info(`OODA: tool ${action.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
@@ -3191,7 +3173,7 @@ export class Daemon {
 
           case "tool_sequence": {
             if (!this.toolExecutor || !this.memoryDb) break;
-            const toolCtx = this.buildToolContext("master-controller");
+            const toolCtx = this.toolEngine.buildToolContext("master-controller");
             this.log.info(`OODA: executing tool sequence (${action.steps.length} steps): ${action.reason}`);
             for (const step of action.steps) {
               // Enforce per-run tool call budget across sequences
@@ -3453,22 +3435,6 @@ export class Daemon {
       this.log.warn(`Scheduled run "${schedule.schedule_name}" failed: ${err}`);
       return { success: false };
     }
-  }
-
-  /**
-   * Build a ToolContext for a specific agent with session state accessors.
-   * Logic lives in ToolEngine — this is a thin delegation stub.
-   */
-  private buildToolContext(agentName: string): ToolContext {
-    return this.toolEngine.buildToolContext(agentName);
-  }
-
-  /**
-   * Run daily agent snapshots (called on each cognitive tick, self-deduplicates).
-   * Logic lives in PersistenceEngine — this is a thin delegation stub.
-   */
-  private maybeDailySnapshot(): void {
-    this.persistenceEngine.maybeDailySnapshot();
   }
 
   /** Check if conditions are met for memory consolidation and run it */
@@ -5157,7 +5123,7 @@ export class Daemon {
             if (this.sdkBridge?.isAttached) {
               return { status: 409, data: { error: "SDK session active" } };
             }
-            this.runOodaCycle().catch((err) => {
+            this.agentEngine.runOodaCycle().catch((err) => {
               this.log.error(`Manual OODA trigger failed: ${err}`);
             });
             return { status: 202, data: { ok: true, message: "OODA cycle triggered" } };
