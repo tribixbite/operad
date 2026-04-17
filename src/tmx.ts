@@ -93,6 +93,9 @@ async function main(): Promise<void> {
     case "upgrade":
       return runUpgrade();
 
+    case "init":
+      return runInit();
+
     case "doctor":
       return runDoctor();
 
@@ -353,6 +356,49 @@ async function runUpgrade(): Promise<void> {
 }
 
 /** Run diagnostic checks and report results */
+/**
+ * Init: generate a minimal config at ~/.config/operad/operad.toml.
+ * No-op if a config already exists — prints instructions instead.
+ */
+async function runInit(): Promise<void> {
+  const { existsSync: fsExists, mkdirSync: fsMkdir, writeFileSync: fsWrite } = await import("node:fs");
+  const { join: pathJoin } = await import("node:path");
+
+  const configDir = pathJoin(process.env.HOME ?? "/", ".config/operad");
+  const configPath = pathJoin(configDir, "operad.toml");
+
+  if (fsExists(configPath)) {
+    console.log(`${YELLOW}Config already exists at ${configPath}${RESET}`);
+    console.log(`Edit it directly or delete it and re-run 'operad init'.`);
+    return;
+  }
+
+  fsMkdir(configDir, { recursive: true });
+
+  const template = `# operad configuration
+# Full docs: http://localhost:18970/help (after first boot)
+
+[operad]
+port = 18970
+log_level = "info"
+
+# Add your sessions below. Each session is a process managed by operad.
+# Run 'operad doctor' to validate this config before booting.
+
+[[session]]
+name = "my-session"
+command = "claude"
+cwd = "${process.env.HOME ?? "~"}/git/my-project"
+enabled = true
+`;
+
+  fsWrite(configPath, template, "utf8");
+  console.log(`\n${GREEN}Created ${configPath}${RESET}`);
+  console.log(`\nEdit it to add your sessions, then run:\n`);
+  console.log(`  ${CYAN}operad boot${RESET}    # start the daemon`);
+  console.log(`  ${CYAN}operad doctor${RESET}  # validate your setup\n`);
+}
+
 async function runDoctor(): Promise<void> {
   const { runChecks } = await import("./doctor.js");
   console.log(`\n${CYAN}operad doctor${RESET}\n`);
@@ -1042,6 +1088,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}shutdown --kill${RESET}       Exit daemon + kill all tmux sessions
   ${CYAN}upgrade${RESET}               Rebuild, shutdown daemon, let watchdog auto-restart
   ${CYAN}doctor${RESET}                Diagnose install issues and report fix steps
+  ${CYAN}init${RESET}                  Generate a minimal config at ~/.config/operad/operad.toml
 
 ${BOLD}OPTIONS${RESET}
   -c, --config <path>  Config file path (default: ~/.config/operad/operad.toml)
