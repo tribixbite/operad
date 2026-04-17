@@ -2118,7 +2118,7 @@ export class Daemon {
             const st = statSync(full);
             if (!st.isDirectory()) return null;
             return { name: n, path: full, mtime: st.mtimeMs };
-          } catch { return null; }
+          } catch { /* stat failed — skip entry */ return null; }
         })
         .filter((e): e is NonNullable<typeof e> => e !== null);
       entries.sort((a, b) => b.mtime - a.mtime);
@@ -2977,6 +2977,7 @@ export class Daemon {
       this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
 
     } catch (err) {
+      this.log.error("Agent run failed", { agent: agentName, runId, err: String(err) });
       this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
       this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "failed", error: String(err) });
       throw err;
