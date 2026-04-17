@@ -97,6 +97,7 @@ import {
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
 import { PersistenceEngine } from "./persistence.js";
+import { ServerEngine } from "./server-engine.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -211,6 +212,7 @@ export class Daemon {
   private agentEngine!: AgentEngine;
   private toolEngine!: ToolEngine;
   private persistenceEngine!: PersistenceEngine;
+  private serverEngine!: ServerEngine;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -330,6 +332,9 @@ export class Daemon {
     // PersistenceEngine owns daily snapshots and will absorb more persistence
     // concerns incrementally as daemon.ts dependencies are disentangled.
     this.persistenceEngine = new PersistenceEngine(ctx);
+    // ServerEngine is the extraction target for HTTP/IPC/WS/SSE handler logic.
+    // Initial shell — pure utility helpers extracted; full handler migration is incremental.
+    this.serverEngine = new ServerEngine(ctx);
   }
 
   /**
