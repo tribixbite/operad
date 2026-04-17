@@ -1,0 +1,12 @@
+01-gate-agentic.md
+02-doctor-command.md
+03-session-lifecycle-tests.md
+04-error-recovery-audit.md
+05-first-run-experience.md
+06-daemon-split-1-agents.md
+07-daemon-split-2-tools.md
+08-daemon-split-3-scheduling.md
+09-daemon-split-4-http-ipc.md
+10-daemon-split-5-core.md
+11-e2e-test-ci.md
+12-api-freeze.md
