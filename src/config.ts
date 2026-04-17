@@ -168,10 +168,18 @@ function parseTomlValue(raw: string): unknown {
 
 // -- Validation ---------------------------------------------------------------
 
-class ConfigError extends Error {
+/** Structured config validation error with actionable fix instructions */
+export interface ConfigError {
+  field: string;
+  message: string;
+  fix: string;
+}
+
+/** Internal error class used by type coercion helpers */
+class ConfigParseError extends Error {
   constructor(public path: string, message: string) {
     super(`Config error at '${path}': ${message}`);
-    this.name = "ConfigError";
+    this.name = "ConfigParseError";
   }
 }
 
@@ -180,7 +188,11 @@ const VALID_WAKE_POLICIES: WakeLockPolicy[] = ["always", "active_sessions", "boo
 const VALID_HEALTH_CHECKS: HealthCheckType[] = ["tmux_alive", "http", "process", "custom"];
 const NAME_PATTERN = /^[a-z0-9-]+$/;
 
-function validateConfig(raw: Record<string, unknown>): TmxConfig {
+/**
+ * Parse and validate raw TOML data into a fully typed TmxConfig.
+ * Throws on structural errors (wrong types, invalid enum values, etc.).
+ */
+function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
   const errors: string[] = [];
 
   // Orchestrator section — accepts [operad] or [orchestrator] for backwards compat
@@ -384,13 +396,13 @@ function asString(val: unknown, path: string, fallback: string): string {
   if (val == null) return fallback;
   if (typeof val === "string") return val;
   if (typeof val === "number" || typeof val === "boolean") return String(val);
-  throw new ConfigError(path, `expected string, got ${typeof val}`);
+  throw new ConfigParseError(path, `expected string, got ${typeof val}`);
 }
 
 function asNumber(val: unknown, path: string, fallback: number): number {
   if (val == null) return fallback;
   const n = Number(val);
-  if (isNaN(n)) throw new ConfigError(path, `expected number, got '${val}'`);
+  if (isNaN(n)) throw new ConfigParseError(path, `expected number, got '${val}'`);
   return n;
 }
 
@@ -399,20 +411,20 @@ function asBool(val: unknown, path: string, fallback: boolean): boolean {
   if (typeof val === "boolean") return val;
   if (val === "true") return true;
   if (val === "false") return false;
-  throw new ConfigError(path, `expected boolean, got '${val}'`);
+  throw new ConfigParseError(path, `expected boolean, got '${val}'`);
 }
 
 function asEnum<T extends string>(val: unknown, valid: T[], path: string, fallback: T): T {
   if (val == null) return fallback;
   const s = String(val);
   if (valid.includes(s as T)) return s as T;
-  throw new ConfigError(path, `must be one of: ${valid.join(", ")} (got '${s}')`);
+  throw new ConfigParseError(path, `must be one of: ${valid.join(", ")} (got '${s}')`);
 }
 
 function asStringArray(val: unknown, path: string, fallback: string[]): string[] {
   if (val == null) return fallback;
   if (Array.isArray(val)) return val.map(String);
-  throw new ConfigError(path, `expected array, got '${typeof val}'`);
+  throw new ConfigParseError(path, `expected array, got '${typeof val}'`);
 }
 
 // -- Public API ---------------------------------------------------------------
@@ -428,6 +440,35 @@ function parseProtectedCheckpoints(orc: Record<string, unknown>): ProtectedCheck
     protected_tools: asStringArray(cp.protected_tools, "orchestrator.checkpoints.protected_tools",
       ["session-stop", "session-send"]),
   };
+}
+
+/**
+ * Validate a fully-parsed TmxConfig and return structured errors with fix instructions.
+ * Returns an empty array if the config is valid.
+ * Note: sessions are optional — a config with no sessions is valid (user may add them later).
+ * Only truly broken entries (missing required fields) are flagged.
+ */
+export function validateConfig(config: TmxConfig): ConfigError[] {
+  const errors: ConfigError[] = [];
+
+  for (const session of config.sessions ?? []) {
+    if (!session.name) {
+      errors.push({
+        field: "session.name",
+        message: "Session missing required field: name",
+        fix: 'Add name = "my-session"',
+      });
+    }
+    if (!session.command && (session.type === "service")) {
+      errors.push({
+        field: `session.${session.name || "?"}.command`,
+        message: `Session '${session.name || "?"}' (type=service) missing required field: command`,
+        fix: 'Add command = "my-command"',
+      });
+    }
+  }
+
+  return errors;
 }
 
 /** Find the config file in standard locations */
@@ -456,7 +497,21 @@ export function loadConfig(configPath?: string): TmxConfig {
   const content = readFileSync(path, "utf-8");
   const raw = parseTOML(content);
   const expanded = expandDeep(raw) as Record<string, unknown>;
-  return validateConfig(expanded);
+  const config = parseRawConfig(expanded);
+
+  // Run structured validation and print actionable errors
+  const errors = validateConfig(config);
+  if (errors.length > 0) {
+    console.error(`\nConfig validation failed (${path}):\n`);
+    for (const e of errors) {
+      console.error(`  ✗ ${e.field}: ${e.message}`);
+      console.error(`    Fix: ${e.fix}\n`);
+    }
+    console.error(`Run 'operad doctor' for a full diagnostic.\n`);
+    process.exit(1);
+  }
+
+  return config;
 }
 
 /** Validate a config file and return errors (empty array = valid) */
@@ -465,7 +520,12 @@ export function validateConfigFile(configPath: string): string[] {
     const content = readFileSync(configPath, "utf-8");
     const raw = parseTOML(content);
     const expanded = expandDeep(raw) as Record<string, unknown>;
-    validateConfig(expanded);
+    const config = parseRawConfig(expanded);
+    // Also run structured validation and include those errors
+    const structuredErrors = validateConfig(config);
+    if (structuredErrors.length > 0) {
+      return structuredErrors.map((e) => `${e.field}: ${e.message} (Fix: ${e.fix})`);
+    }
     return [];
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
