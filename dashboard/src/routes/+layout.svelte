@@ -16,6 +16,8 @@
       icon: '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M2.5 13V9.5M6 13V5.5M9.5 13V8M13 13V3"/></svg>' },
     { href: "/settings", label: "Settings", id: "settings",
       icon: '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5V3.5M8 12.5V14.5M1.5 8H3.5M12.5 8H14.5M3.3 3.3L4.7 4.7M11.3 11.3L12.7 12.7M12.7 3.3L11.3 4.7M4.7 11.3L3.3 12.7"/></svg>' },
+    { href: "/help", label: "Help", id: "help",
+      icon: '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.5"/><path d="M6 6.5C6 5.4 6.9 4.5 8 4.5S10 5.4 10 6.5C10 7.6 8 8.5 8 9.5"/><circle cx="8" cy="11.5" r="0.5" fill="currentColor" stroke="none"/></svg>' },
   ];
 
   /** Derive active nav item from current pathname */
