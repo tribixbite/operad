@@ -94,6 +94,8 @@ import {
   runScriptInTab,
   capturePane,
 } from "./session.js";
+import { AgentEngine } from "./agent-engine.js";
+import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
  * "esc to interrupt" appears in the status bar only when Claude is mid-task. */
@@ -204,6 +206,7 @@ export class Daemon {
   private config: TmxConfig;
   private log: Logger;
   private sessionController!: SessionController;
+  private agentEngine!: AgentEngine;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -300,6 +303,21 @@ export class Daemon {
       (cmd) => this.handleIpcCommand(cmd),
       this.log,
     );
+
+    // AgentEngine injection point — extraction target for agent/OODA logic.
+    // Built late in constructor so all dependencies are available.
+    const ctx: OrchestratorContext = {
+      config: this.config,
+      state: this.state,
+      memoryDb: this.memoryDb ?? null,
+      switchboard: this.switchboard,
+      sdkBridge: this.sdkBridge ?? null,
+      log: this.log,
+      agentConfigs: this.agentConfigs ?? [],
+      broadcast: (type, payload) => this.broadcastSwitchboard(type, payload),
+      updateSwitchboard: (patch) => this.updateSwitchboard(patch),
+    };
+    this.agentEngine = new AgentEngine(ctx);
   }
 
   /**
