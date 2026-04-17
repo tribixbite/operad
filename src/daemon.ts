@@ -316,6 +316,10 @@ export class Daemon {
       agentConfigs: this.agentConfigs ?? [],
       broadcast: (type, payload) => this.broadcastSwitchboard(type, payload),
       updateSwitchboard: (patch) => this.updateSwitchboard(patch),
+      // Lazy getter — toolExecutor is null at construction time, set in start()
+      getToolExecutor: () => this.toolExecutor,
+      // Delegate — executeOodaActions stays in Daemon until its deep deps are extracted
+      executeOodaActions: (actions) => this.executeOodaActions(actions),
     };
     this.agentEngine = new AgentEngine(ctx);
   }
@@ -3037,124 +3041,19 @@ export class Daemon {
   /**
    * Check OODA trigger conditions and run master controller if warranted.
    * Called every 60s by cognitiveTimer.
+   * Logic lives in AgentEngine — this is a thin delegation stub.
    */
   private async maybeTriggerOoda(): Promise<void> {
-    // Don't run if SDK is busy or no memory DB
-    if (!this.sdkBridge || !this.memoryDb) return;
-    if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) return;
-
-    // Check switchboard — both cognitive and oodaAutoTrigger must be on
-    if (!this.switchboard.cognitive || !this.switchboard.oodaAutoTrigger) return;
-
-    // Check trigger conditions
-    const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller" && a.enabled);
-    if (!masterAgent) return;
-
-    // Quota guardrail: suppress auto-triggers when weekly quota is exceeded
-    const quota = computeQuotaStatus(this.memoryDb, this.config.orchestrator);
-    if (quota.weekly_level === "exceeded") {
-      this.log.debug("OODA auto-trigger suppressed — weekly quota exceeded");
-      return;
-    }
-
-    // Condition: unread messages waiting >5 min
-    const unread = this.memoryDb.getUnreadMessages("master-controller");
-    const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
-    const urgentMessages = unread.filter((m) => (m.created_at as number) < fiveMinAgo);
-
-    if (urgentMessages.length > 0) {
-      this.log.info(`OODA trigger: ${urgentMessages.length} unread messages older than 5min`);
-      await this.runOodaCycle();
-      return;
-    }
-
-    // Other triggers can be added here:
-    // - Cost threshold exceeded
-    // - Memory pressure escalation
-    // - Agent run completion (evaluate outcome)
-    // Note: timer-based runs use scheduledOodaTimer from ```schedule``` blocks
+    return this.agentEngine.maybeTriggerOoda();
   }
 
   /**
    * Run a full OODA cycle — build context, run master controller, parse and
    * execute actions from its response.
+   * Logic lives in AgentEngine — this is a thin delegation stub.
    */
   private async runOodaCycle(): Promise<void> {
-    if (!this.sdkBridge || !this.memoryDb) return;
-    if (this.sdkBridge.isAttached) {
-      this.log.debug("OODA cycle skipped — SDK session active");
-      return;
-    }
-
-    // Check switchboard
-    if (!this.switchboard.oodaAutoTrigger) {
-      this.log.debug("OODA cycle skipped — disabled by switchboard");
-      return;
-    }
-
-    // Quota circuit breaker: block when exceeded, warn on critical
-    const quota = computeQuotaStatus(this.memoryDb, this.config.orchestrator);
-    if (quota.weekly_level === "exceeded") {
-      this.log.warn(`OODA cycle blocked — weekly quota exceeded (${quota.weekly_pct}%)`);
-      this.broadcastSwitchboard("ooda_status", { running: false, blocked: "quota_exceeded" });
-      return;
-    }
-    if (quota.weekly_level === "critical") {
-      this.log.warn(`OODA cycle running under critical quota (${quota.weekly_pct}%) — consider reducing activity`);
-    }
-
-    const state = this.state.getState();
-    const ctx = buildOodaContext(state, this.memoryDb, this.config.orchestrator);
-    // Strip profile data if mind meld is disabled
-    if (!this.switchboard.mindMeld) {
-      ctx.userProfile = { traits: [], notes: [], styles: [], chat_export_count: 0 };
-    }
-    // Inject available tools for master controller
-    if (this.toolExecutor) {
-      const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller");
-      ctx.availableToolsPrompt = this.toolExecutor.formatToolsForPrompt(masterAgent?.allowed_tool_categories);
-    }
-    const oodaPrompt = buildOodaPrompt(ctx);
-
-    this.log.info("Running OODA cycle for master-controller");
-    this.broadcastSwitchboard("ooda_status", { running: true });
-
-    try {
-      const masterAgent = this.agentConfigs.find((a) => a.name === "master-controller");
-      if (!masterAgent) return;
-
-      const sdkDef = toSdkAgentMap([masterAgent])["master-controller"];
-      const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
-
-      const runId = this.memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone");
-
-      const result = await this.sdkBridge.runStandaloneAgent(
-        "master-controller", sdkDef, cwd, oodaPrompt, masterAgent.max_budget_usd,
-      );
-
-      this.memoryDb.completeAgentRun(runId, "completed", {
-        sessionId: result.sessionId,
-        costUsd: result.costUsd,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        turns: result.turns,
-      });
-
-      // Parse and execute structured OODA actions from response text
-      if (result.responseText) {
-        const actions = parseOodaResponse(result.responseText);
-        if (actions.length > 0) {
-          this.log.info(`OODA: parsed ${actions.length} actions from response`);
-          await this.executeOodaActions(actions);
-        }
-      }
-
-      this.log.info(`OODA cycle completed: cost=$${result.costUsd.toFixed(4)}, turns=${result.turns}`);
-      this.broadcastSwitchboard("ooda_status", { running: false, lastRun: new Date().toISOString(), cost: result.costUsd });
-    } catch (err) {
-      this.log.error(`OODA cycle failed: ${err}`);
-      this.broadcastSwitchboard("ooda_status", { running: false, error: String(err) });
-    }
+    return this.agentEngine.runOodaCycle();
   }
 
   /**
