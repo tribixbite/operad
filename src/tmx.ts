@@ -93,6 +93,9 @@ async function main(): Promise<void> {
     case "upgrade":
       return runUpgrade();
 
+    case "doctor":
+      return runDoctor();
+
     // Commands that proxy to daemon via IPC
     case "status":
     case "start":
@@ -347,6 +350,33 @@ async function runUpgrade(): Promise<void> {
     stdio: "inherit",
   });
   process.exit(bootResult.status ?? 1);
+}
+
+/** Run diagnostic checks and report results */
+async function runDoctor(): Promise<void> {
+  const { runChecks } = await import("./doctor.js");
+  console.log(`\n${CYAN}operad doctor${RESET}\n`);
+  const results = await runChecks({ configPath: getConfigFlag() ?? undefined });
+
+  let hasFailures = false;
+  for (const r of results) {
+    const icon = r.status === "ok"   ? `${GREEN}[OK]  ${RESET}` :
+                 r.status === "warn" ? `${YELLOW}[WARN]${RESET}` :
+                                      `${RED}[FAIL]${RESET}`;
+    console.log(`${icon} ${r.name.padEnd(16)} ${r.message}`);
+    if (r.fix) {
+      console.log(`       ${DIM}Fix: ${r.fix}${RESET}`);
+    }
+    if (r.status === "fail") hasFailures = true;
+  }
+
+  console.log();
+  if (hasFailures) {
+    console.log(`${RED}Some checks failed. Fix the issues above and re-run: operad doctor${RESET}\n`);
+    process.exit(1);
+  } else {
+    console.log(`${GREEN}All checks passed.${RESET}\n`);
+  }
 }
 
 /** Print diagnostic info when daemon fails to start */
@@ -1011,6 +1041,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}shutdown${RESET}              Exit daemon (sessions left for adoption by next daemon)
   ${CYAN}shutdown --kill${RESET}       Exit daemon + kill all tmux sessions
   ${CYAN}upgrade${RESET}               Rebuild, shutdown daemon, let watchdog auto-restart
+  ${CYAN}doctor${RESET}                Diagnose install issues and report fix steps
 
 ${BOLD}OPTIONS${RESET}
   -c, --config <path>  Config file path (default: ~/.config/operad/operad.toml)
