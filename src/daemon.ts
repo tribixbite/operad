@@ -850,14 +850,14 @@ export class Daemon {
           process.kill(-pid, "SIGTERM");
         } catch {
           // Process group kill may fail — fall back to direct PID kill
-          try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+          try { process.kill(pid, "SIGTERM"); } catch { /* already dead — race between PID check and kill */ }
         }
       }
       await sleep(1500);
       // Force-kill any survivors
       for (const pid of pidsToKill) {
         if (existsSync(`/proc/${pid}`)) {
-          try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
+          try { process.kill(pid, "SIGKILL"); } catch { /* already dead — race between PID check and kill */ }
         }
       }
       this.adoptedPids.delete(name);
