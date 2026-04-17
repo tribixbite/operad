@@ -68,3 +68,27 @@ jobs:
           export HOME=$(mktemp -d)
           node dist/tmx.js init
           node dist/tmx.js doctor || echo "doctor reported issues (expected on CI)"
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install tmux
+        run: sudo apt-get install -y tmux
+
+      - name: Build CLI
+        run: bun run build
+
+      - name: Build dashboard
+        run: cd dashboard && bun install && bun run build
+
+      - name: E2E tests
+        run: bun test src/__tests__/e2e.test.ts --timeout 60000
