@@ -37,6 +37,19 @@ jobs:
       - name: Smoke test (--version)
         run: node dist/tmx.js --version
 
+      - name: Check API docs updated if API source changed
+        if: github.event_name == 'pull_request'
+        run: |
+          API_CHANGED=$(git diff --name-only origin/main HEAD -- src/http.ts src/ipc.ts 2>/dev/null | wc -l)
+          if [ "$API_CHANGED" -gt "0" ]; then
+            DOCS_CHANGED=$(git diff --name-only origin/main HEAD -- docs/api.md | wc -l)
+            if [ "$DOCS_CHANGED" -eq "0" ]; then
+              echo "ERROR: API source changed (src/http.ts or src/ipc.ts) but docs/api.md was not updated."
+              echo "Please update docs/api.md to reflect the API changes."
+              exit 1
+            fi
+          fi
+
   first-run:
     runs-on: ubuntu-latest
     steps:
