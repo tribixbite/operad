@@ -1,7 +1,3 @@
-01-gate-agentic.md
-02-doctor-command.md
-03-session-lifecycle-tests.md
-04-error-recovery-audit.md
 05-first-run-experience.md
 06-daemon-split-1-agents.md
 07-daemon-split-2-tools.md
