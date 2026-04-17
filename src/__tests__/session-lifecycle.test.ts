@@ -56,7 +56,7 @@ describe("SessionController", () => {
 
   describe("handleHealthFailure()", () => {
     test("first failure restarts and reaches running", async () => {
-      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: healthyChecker, log });
+      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: healthyChecker, log, restartDelayMs: 0 });
       await ctrl.start("app", makeConfig("app"));
       const state = await ctrl.handleHealthFailure("app", makeConfig("app"));
       expect(state.status).toBe("running");
@@ -65,7 +65,7 @@ describe("SessionController", () => {
 
     test("exceeds max_restarts → failed", async () => {
       const config = makeConfig("app", { max_restarts: 2 });
-      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: unhealthyChecker, log });
+      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: unhealthyChecker, log, restartDelayMs: 0 });
       await ctrl.start("app", config);
 
       for (let i = 0; i < 2; i++) {
@@ -77,7 +77,7 @@ describe("SessionController", () => {
 
     test("restart cascade stops at max_restarts", async () => {
       const config = makeConfig("app", { max_restarts: 3 });
-      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: unhealthyChecker, log });
+      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: unhealthyChecker, log, restartDelayMs: 0 });
       await ctrl.start("app", config);
 
       let state = ctrl.getState("app")!;
@@ -91,7 +91,7 @@ describe("SessionController", () => {
     });
 
     test("unknown session → failed", async () => {
-      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: healthyChecker, log });
+      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: healthyChecker, log, restartDelayMs: 0 });
       const state = await ctrl.handleHealthFailure("nonexistent", makeConfig("nonexistent"));
       expect(state.status).toBe("failed");
     });

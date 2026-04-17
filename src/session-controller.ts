@@ -47,9 +47,9 @@ export class SessionController {
 
   constructor(opts: SessionControllerOptions) {
     this.opts = {
+      ...opts,
       maxRestarts: opts.maxRestarts ?? 5,
       restartDelayMs: opts.restartDelayMs ?? 3000,
-      ...opts,
     };
   }
 
@@ -115,6 +115,9 @@ export class SessionController {
     this.transition(name, "degraded", { restartCount: state.restartCount + 1 });
 
     await this.stop(name);
+    if (this.opts.restartDelayMs > 0) {
+      await new Promise(r => setTimeout(r, this.opts.restartDelayMs));
+    }
     return this.start(name, config);
   }
 }
