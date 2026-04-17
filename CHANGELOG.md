@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `operad doctor` command — diagnoses install issues with colored checklist
+- `operad init` command — generates minimal config on fresh install
+- `/help` documentation page in dashboard (core features + agentic layer docs)
+- Help links on Switchboard toggles pointing to /help anchors
+- Session lifecycle integration tests (`SessionController`)
+- End-to-end CI test (boots daemon, exercises REST + dashboard routes)
+- Full REST/SSE/IPC API documentation (`docs/api.md`)
+- Full config reference (`docs/config.md`)
+- `OrchestratorContext` + engine scaffolding (AgentEngine, ToolEngine, PersistenceEngine, ServerEngine)
+
+### Changed
+- **BREAKING DEFAULT**: Agentic features (cognitive, oodaAutoTrigger, mindMeld) now default off on fresh installs
+- All 4 builtin agents now default `enabled: false`
+- Config validation now prints structured errors and exits 1 on failure
+- README restructured: core daemon leads, agentic is opt-in advanced section
+
+### Fixed
+- Silent catch blocks in daemon.ts audited — now either have justification comments or emit structured logging
+
 ## [0.3.0] — 2026-04-15
 
 ### Added
