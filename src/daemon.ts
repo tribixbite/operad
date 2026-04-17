@@ -18,6 +18,7 @@ import { defaultSwitchboard } from "./types.js";
 import { loadConfig } from "./config.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
+import { SessionController, type TmuxRunner } from "./session-controller.js";
 import { StateManager } from "./state.js";
 import { IpcServer } from "./ipc.js";
 import { BudgetTracker } from "./budget.js";
@@ -202,6 +203,7 @@ function chunkText(text: string, maxChars = 2000): string[] {
 export class Daemon {
   private config: TmxConfig;
   private log: Logger;
+  private sessionController!: SessionController;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -255,6 +257,19 @@ export class Daemon {
   constructor(configPath?: string) {
     this.config = loadConfig(configPath);
     this.log = new Logger(this.config.orchestrator.log_dir);
+    const tmuxRunner: TmuxRunner = (args) => {
+      const result = spawnSync("tmux", args, { encoding: "utf8" });
+      return {
+        exitCode: result.status ?? 1,
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? "",
+      };
+    };
+    this.sessionController = new SessionController({
+      tmuxRunner,
+      healthChecker: async () => ({ healthy: true }),
+      log: this.log,
+    });
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
     // Restore switchboard from persisted state, fallback to defaults
     this.switchboard = { ...defaultSwitchboard(), ...this.state.getState().switchboard };
