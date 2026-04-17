@@ -1,8 +1,3 @@
-05-first-run-experience.md
-06-daemon-split-1-agents.md
-07-daemon-split-2-tools.md
-08-daemon-split-3-scheduling.md
-09-daemon-split-4-http-ipc.md
-10-daemon-split-5-core.md
-11-e2e-test-ci.md
-12-api-freeze.md
+13-daemon-extraction-comprehensive.md
+14-audit-fixes-and-migration.md
+15-cross-platform-windows.md
