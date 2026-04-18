@@ -17,14 +17,14 @@ export type SessionStatus =
 
 /** Valid state transitions */
 export const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
-  pending:  ["waiting", "stopped"],
+  pending:  ["waiting", "starting", "stopped"],  // "starting" for SessionController direct boot
   waiting:  ["starting", "stopped"],
-  starting: ["running", "failed", "stopping"],
-  running:  ["degraded", "stopping", "stopped"],
-  degraded: ["starting", "stopping", "failed"],
-  failed:   ["stopping", "stopped", "pending"],
+  starting: ["running", "degraded", "failed", "stopping"],  // "degraded" for unhealthy start
+  running:  ["degraded", "stopping", "stopped", "failed"],  // "failed" for explicit failure
+  degraded: ["starting", "running", "stopping", "failed"],  // "running" for post-restart reset
+  failed:   ["stopping", "stopped", "pending", "starting"], // "starting" for manual recovery
   stopping: ["stopped"],
-  stopped:  ["pending"],
+  stopped:  ["pending", "starting"],  // "starting" for restart path (stop → start)
 };
 
 // -- Config types (parsed from TOML) ------------------------------------------

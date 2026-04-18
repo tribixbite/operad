@@ -1,4 +1,5 @@
 import type { SessionConfig, SessionStatus } from "./types.js";
+import { VALID_TRANSITIONS } from "./types.js";
 import type { Logger } from "./log.js";
 
 /** Minimal tmux operation result */
@@ -57,7 +58,9 @@ export class SessionController {
     return this.states.get(name);
   }
 
-  /** Transition a session to a new status, recording timestamp */
+  /** Transition a session to a new status, recording timestamp.
+   * Warns (but does not throw) on invalid transitions per VALID_TRANSITIONS.
+   */
   private transition(name: string, to: SessionStatus, extra: Partial<SessionRuntimeState> = {}): SessionRuntimeState {
     const existing = this.states.get(name) ?? {
       name,
@@ -65,6 +68,10 @@ export class SessionController {
       restartCount: 0,
       lastTransition: new Date(),
     };
+    const allowed = VALID_TRANSITIONS[existing.status] ?? [];
+    if (!allowed.includes(to) && existing.status !== to) {
+      this.opts.log.warn(`Invalid transition for '${name}': ${existing.status} → ${to} (forcing)`);
+    }
     const next: SessionRuntimeState = { ...existing, status: to, lastTransition: new Date(), ...extra };
     this.states.set(name, next);
     return next;
