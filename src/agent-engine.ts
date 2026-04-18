@@ -6,7 +6,8 @@ import {
   parseOodaResponse,
   type OodaAction,
 } from "./cognitive.js";
-import { toSdkAgentMap } from "./agents.js";
+import { loadAgents, toSdkAgentMap } from "./agents.js";
+import type { ScheduleRecord } from "./schedule.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type WebSocket from "ws";
 
@@ -30,6 +31,75 @@ export class AgentEngine {
     if (this.scheduledOodaTimer) {
       clearTimeout(this.scheduledOodaTimer);
       this.scheduledOodaTimer = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent config lifecycle
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reload agent configs from TOML and project .claude/agents/ directories.
+   * Mutates ctx.agentConfigs in-place (splice + push) so all existing
+   * references (closures, ctx fields) stay valid.
+   * Also updates SDK bridge with the filtered enabled-agent map.
+   */
+  reloadAgents(): void {
+    const { config, log } = this.ctx;
+    const projectPaths = config.sessions
+      .filter((s) => s.path)
+      .map((s) => s.path!);
+    const freshConfigs = loadAgents(config.agents ?? [], projectPaths);
+
+    // Mutate in-place to keep all existing references valid
+    this.ctx.agentConfigs.splice(0, this.ctx.agentConfigs.length, ...freshConfigs);
+
+    // Ensure all known agents appear in switchboard (default: true = follow agent.enabled)
+    const switchboard = this.ctx.getSwitchboard();
+    for (const agent of this.ctx.agentConfigs) {
+      if (!(agent.name in switchboard.agents)) {
+        switchboard.agents[agent.name] = true;
+      }
+    }
+
+    // Apply switchboard overrides: master switch + per-agent toggles
+    const enabledAgents = this.ctx.agentConfigs.filter((a) => this.ctx.isAgentEnabled(a.name));
+    if (this.ctx.sdkBridge) {
+      this.ctx.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
+    }
+
+    // Seed default specializations for builtin agents (idempotent — upsert won't overwrite)
+    this.seedSpecializations();
+
+    log.info(`Reloaded agents: ${enabledAgents.length} enabled`);
+  }
+
+  /**
+   * Seed default specializations for builtin agents (upsert is idempotent).
+   * Called automatically by reloadAgents().
+   */
+  seedSpecializations(): void {
+    const { memoryDb } = this.ctx;
+    if (!memoryDb) return;
+
+    const defaults: Record<string, string[]> = {
+      "optimizer": ["performance", "resource-management", "token-efficiency"],
+      "preference-learner": ["user-preferences", "coding-style", "communication"],
+      "ideator": ["architecture", "creative-solutions", "exploration"],
+      "master-controller": ["orchestration", "planning", "delegation"],
+    };
+
+    for (const [agent, domains] of Object.entries(defaults)) {
+      // Only seed if agent is actually loaded
+      if (!this.ctx.agentConfigs.some((a) => a.name === agent)) continue;
+      for (const domain of domains) {
+        try {
+          // upsert with low confidence — will be reinforced by actual evidence
+          memoryDb.upsertSpecialization(agent, domain, 0.5, "builtin default");
+        } catch {
+          // Table may not exist during first migration — silently skip
+        }
+      }
     }
   }
 
@@ -794,5 +864,74 @@ export class AgentEngine {
     });
 
     return { transcript, contributions };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scheduled agent runs
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Execute a scheduled agent run. Called by ScheduleEngine when a schedule fires.
+   * Returns success/failure and cost for schedule bookkeeping.
+   */
+  async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
+    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
+    if (!sdkBridge || !memoryDb) return { success: false };
+    if (sdkBridge.isAttached || sdkBridge.isBusy) {
+      log.debug(`Scheduled run "${schedule.schedule_name}" deferred — SDK busy`);
+      return { success: false };
+    }
+
+    // Quota check: don't run if exceeded
+    const quota = computeQuotaStatus(memoryDb, config.orchestrator);
+    if (quota.weekly_level === "exceeded") {
+      log.warn(`Scheduled run "${schedule.schedule_name}" blocked — quota exceeded`);
+      return { success: false };
+    }
+
+    const agent = agentConfigs.find((a) => a.name === schedule.agent_name && a.enabled);
+    if (!agent) {
+      log.warn(`Scheduled run "${schedule.schedule_name}" — agent "${schedule.agent_name}" not found/enabled`);
+      return { success: false };
+    }
+
+    const sdkDef = toSdkAgentMap([agent])[schedule.agent_name];
+    const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
+    const budget = schedule.max_budget_usd ?? agent.max_budget_usd;
+    const runId = memoryDb.startAgentRun(schedule.agent_name, `schedule:${schedule.schedule_name}`, "standalone");
+
+    try {
+      const result = await sdkBridge.runStandaloneAgent(
+        schedule.agent_name, sdkDef, cwd, schedule.prompt, budget,
+      );
+
+      memoryDb.completeAgentRun(runId, "completed", {
+        sessionId: result.sessionId,
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        turns: result.turns,
+      });
+
+      // Parse and execute any actions from the response
+      if (result.responseText) {
+        const actions = parseOodaResponse(result.responseText);
+        if (actions.length > 0) {
+          await this.executeOodaActions(actions);
+        }
+        this.extractAgentActions(schedule.agent_name, result.responseText);
+      }
+
+      // Trust reward for successful scheduled run
+      memoryDb.recordTrustDelta(schedule.agent_name, 10, `scheduled run "${schedule.schedule_name}" completed`);
+
+      log.info(`Scheduled run "${schedule.schedule_name}" completed: cost=$${result.costUsd.toFixed(4)}`);
+      return { success: true, costUsd: result.costUsd };
+    } catch (err) {
+      memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
+      memoryDb.recordTrustDelta(schedule.agent_name, -15, `scheduled run "${schedule.schedule_name}" failed: ${err}`);
+      log.warn(`Scheduled run "${schedule.schedule_name}" failed: ${err}`);
+      return { success: false };
+    }
   }
 }

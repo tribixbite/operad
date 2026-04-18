@@ -12,7 +12,6 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync, closeSync, appendFileSync, writeFileSync, readFileSync, chmodSync, readdirSync, statSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import type { TmxConfig, IpcCommand, IpcResponse, SessionConfig, SessionStatus, Switchboard } from "./types.js";
 import { defaultSwitchboard } from "./types.js";
 import { loadConfig } from "./config.js";
@@ -28,17 +27,15 @@ import { runHealthSweep, checkSingleSessionHealth } from "./health.js";
 import { MemoryMonitor } from "./memory.js";
 import { ActivityDetector } from "./activity.js";
 import { BatteryMonitor } from "./battery.js";
-import { Registry, parseRecentProjects, findNamedSessions, deriveName, isValidName, nextSuffix } from "./registry.js";
-import type { RecentProject } from "./registry.js";
+import { Registry } from "./registry.js";
 import { DashboardServer } from "./http.js";
 import { TelemetrySinkServer } from "./telemetry-sink.js";
 import { SdkBridge } from "./sdk-bridge.js";
-import { MemoryDb, computeQuotaStatus } from "./memory-db.js";
+import { MemoryDb } from "./memory-db.js";
 import { saveMemoriesFromResponse } from "./memory-injector.js";
-import { loadAgents, toSdkAgentMap, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
-import { buildOodaContext, buildOodaPrompt, parseOodaResponse } from "./cognitive.js";
+import { validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
 import { ToolExecutor, type ToolContext, type ToolCategory } from "./tools.js";
-import { ScheduleEngine, type ScheduleRecord } from "./schedule.js";
+import { ScheduleEngine } from "./schedule.js";
 import {
   exportAgentState, importAgentState, serializeBundle, deserializeBundle,
   saveSnapshot, pruneSnapshots, listSnapshots,
@@ -98,7 +95,7 @@ import { RestHandler } from "./rest-handler.js";
 import { AndroidEngine } from "./android-engine.js";
 import { MonitoringEngine } from "./monitoring-engine.js";
 import { SessionCommands } from "./session-commands.js";
-import { resolveSessionName, resolveSessionPath as resolveSessionPathFn } from "./session-resolver.js";
+import { resolveSessionName, resolveSessionPath as resolveSessionPathFn, resolveBootSessions } from "./session-resolver.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -1193,121 +1190,8 @@ export class Daemon {
    * Called during boot() after mergeRegistrySessions() but before startAllSessions().
    */
   private resolveBootSessions(): void {
-    const home = homedir();
-    const historyPath = join(home, ".claude", "history.jsonl");
-    const recentProjects = parseRecentProjects(historyPath, 1000);
-    const namedSessions = findNamedSessions(historyPath, 7);
-    const { auto_start, visible } = this.config.boot;
-
-    // Build path→config lookup (one entry per path for primary matching)
-    const configByPath = new Map<string, SessionConfig>();
-    for (const s of this.config.sessions) {
-      if (s.path) configByPath.set(resolve(s.path), s);
-    }
-
-    // Track ranked claude sessions for partitioning
-    const recentClaude: { config: SessionConfig; rank: number }[] = [];
-    let rank = 0;
-
-    // --- Phase 1: Primary instances (one per project, no session_id, uses cc) ---
-    for (const proj of recentProjects) {
-      if (rank >= visible) break;
-
-      const resolvedPath = resolve(proj.path);
-      const existing = configByPath.get(resolvedPath);
-
-      if (existing) {
-        if (existing.type === "claude" && existing.enabled) {
-          // Primary instance uses cc (--continue), no session_id
-          existing.session_id = undefined;
-          recentClaude.push({ config: existing, rank: rank++ });
-        }
-      } else {
-        // Untracked project — auto-register
-        const name = deriveName(proj.path);
-        if (!this.config.sessions.find((s) => s.name === name)) {
-          this.registry.add({ name, path: resolvedPath, priority: 50, auto_go: false });
-          const newConfig: SessionConfig = {
-            name, type: "claude", path: resolvedPath, command: undefined,
-            auto_go: false, priority: 50, depends_on: [], headless: false,
-            env: {}, health: undefined, max_restarts: 3, restart_backoff_s: 5,
-            enabled: true, bare: false,
-          };
-          this.config.sessions.push(newConfig);
-          configByPath.set(resolvedPath, newConfig);
-          recentClaude.push({ config: newConfig, rank: rank++ });
-        }
-      }
-    }
-
-    // --- Phase 2: Named sessions (user-renamed via /rename, resumed by session_id) ---
-    const registeredIds = new Set<string>();
-    // Check existing config/registry for already-registered named sessions
-    for (const s of this.config.sessions) {
-      if (s.session_id) registeredIds.add(s.session_id);
-    }
-
-    for (const named of namedSessions) {
-      if (rank >= visible) break;
-      if (registeredIds.has(named.session_id)) continue;
-
-      const resolvedPath = resolve(named.path);
-      // Sanitize title to valid session name
-      const titleName = named.title.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-");
-      if (!titleName || !isValidName(titleName)) continue;
-
-      // Check name conflicts — suffix if needed
-      const existingNames = this.config.sessions.map((s) => s.name);
-      const sessionName = existingNames.includes(titleName)
-        ? nextSuffix(titleName, existingNames.filter((n) => n === titleName || n.match(new RegExp(`^${titleName}-\\d+$`))))
-        : titleName;
-
-      this.registry.add({
-        name: sessionName, path: resolvedPath, priority: 50,
-        auto_go: false, session_id: named.session_id,
-      });
-
-      const newConfig: SessionConfig = {
-        name: sessionName, type: "claude", path: resolvedPath, command: undefined,
-        auto_go: false, priority: 50, depends_on: [], headless: false,
-        env: {}, health: undefined, max_restarts: 3, restart_backoff_s: 5,
-        enabled: true, bare: false, session_id: named.session_id,
-      };
-      this.config.sessions.push(newConfig);
-      registeredIds.add(named.session_id);
-      recentClaude.push({ config: newConfig, rank: rank++ });
-    }
-
-    // Partition claude sessions: auto-start vs visible-only vs hidden
-    const autoStartNames = new Set<string>();
-    const visibleNames = new Set<string>();
-
-    for (const { config, rank: r } of recentClaude) {
-      if (r < auto_start) {
-        autoStartNames.add(config.name);
-      } else if (r < visible) {
-        visibleNames.add(config.name);
-      }
-    }
-
-    // Disable claude sessions not in auto-start set
-    for (const s of this.config.sessions) {
-      if (s.type !== "claude") continue;
-      if (autoStartNames.has(s.name)) continue;
-      if (visibleNames.has(s.name)) {
-        s.enabled = false;
-        continue;
-      }
-      if (!autoStartNames.has(s.name)) {
-        s.enabled = false;
-      }
-    }
-
-    // Re-init state entries for any newly added sessions
-    this.state.initFromConfig(this.config.sessions);
-
-    this.log.info(`Boot recency: auto-start=[${[...autoStartNames].join(",")}] ` +
-      `visible=[${[...visibleNames].join(",")}]`);
+    // Delegated to session-resolver.ts (pure function, all deps passed in)
+    resolveBootSessions(this.config, this.registry, this.state, this.log);
   }
 
   // -- Dashboard HTTP server ---------------------------------------------------
@@ -1360,8 +1244,8 @@ export class Daemon {
       this.log.info(`Tool executor initialized with ${this.toolExecutor.getAllTools().length} tools`);
 
       // Initialize schedule engine — persistent cron/interval scheduling
-      this.scheduleEngine = new ScheduleEngine(this.memoryDb, this.log, async (schedule) => {
-        return this.executeScheduledRun(schedule);
+      this.scheduleEngine = new ScheduleEngine(this.memoryDb, this.log, (schedule) => {
+        return this.agentEngine.executeScheduledRun(schedule);
       });
       this.scheduleEngine.start();
     }
@@ -1513,126 +1397,19 @@ export class Daemon {
 
   // -- Agent & cognitive methods ------------------------------------------------
 
-  /** Reload agent configs from all sources and update SDK bridge */
+  /** Reload agent configs from all sources and update SDK bridge.
+   * Delegates to AgentEngine.reloadAgents() which mutates ctx.agentConfigs in-place. */
   private reloadAgents(): void {
-    const projectPaths = this.config.sessions
-      .filter((s) => s.path)
-      .map((s) => s.path!);
-    this.agentConfigs = loadAgents(this.config.agents ?? [], projectPaths);
-
-    // Ensure all known agents appear in switchboard (default: true = follow agent.enabled)
-    for (const agent of this.agentConfigs) {
-      if (!(agent.name in this.switchboard.agents)) {
-        this.switchboard.agents[agent.name] = true;
-      }
-    }
-
-    // Apply switchboard overrides: master switch + per-agent toggles
-    const enabledAgents = this.agentConfigs.filter((a) => this.wsHandler.isAgentEnabled(a.name));
-    if (this.sdkBridge) {
-      this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
-    }
-
-    // Seed default specializations for builtin agents (idempotent — upsert won't overwrite)
-    this.seedSpecializations();
-
-    this.log.info(`Reloaded agents: ${enabledAgents.length} enabled`);
-  }
-
-  /** Seed default specializations for builtin agents (upsert is idempotent) */
-  private seedSpecializations(): void {
-    if (!this.memoryDb) return;
-
-    const defaults: Record<string, string[]> = {
-      "optimizer": ["performance", "resource-management", "token-efficiency"],
-      "preference-learner": ["user-preferences", "coding-style", "communication"],
-      "ideator": ["architecture", "creative-solutions", "exploration"],
-      "master-controller": ["orchestration", "planning", "delegation"],
-    };
-
-    for (const [agent, domains] of Object.entries(defaults)) {
-      // Only seed if agent is actually loaded
-      if (!this.agentConfigs.some((a) => a.name === agent)) continue;
-      for (const domain of domains) {
-        try {
-          // upsert with low confidence — will be reinforced by actual evidence
-          this.memoryDb.upsertSpecialization(agent, domain, 0.5, "builtin default");
-        } catch {
-          // Table may not exist during first migration — silently skip
-        }
-      }
-    }
+    this.agentEngine.reloadAgents();
+    // Keep daemon's agentConfigs field in sync — agentEngine mutates ctx.agentConfigs
+    // which is the same array reference as this.agentConfigs (set via ctx.agentConfigs).
   }
 
   // buildAgentContext, extractAgentActions, handleStandaloneAgentRun,
   // handleAgentChat — moved to AgentEngine (src/agent-engine.ts)
-
-  // executeOodaActions — moved to AgentEngine (src/agent-engine.ts)
-  // executeRoundtable — moved to AgentEngine (src/agent-engine.ts)
-
-  /**
-   * Execute a scheduled agent run. Called by ScheduleEngine when a schedule fires.
-   * Returns success/failure and cost for schedule bookkeeping.
-   */
-  private async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
-    if (!this.sdkBridge || !this.memoryDb) return { success: false };
-    if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) {
-      this.log.debug(`Scheduled run "${schedule.schedule_name}" deferred — SDK busy`);
-      return { success: false };
-    }
-
-    // Quota check: don't run if exceeded
-    const quota = computeQuotaStatus(this.memoryDb, this.config.orchestrator);
-    if (quota.weekly_level === "exceeded") {
-      this.log.warn(`Scheduled run "${schedule.schedule_name}" blocked — quota exceeded`);
-      return { success: false };
-    }
-
-    const agent = this.agentConfigs.find((a) => a.name === schedule.agent_name && a.enabled);
-    if (!agent) {
-      this.log.warn(`Scheduled run "${schedule.schedule_name}" — agent "${schedule.agent_name}" not found/enabled`);
-      return { success: false };
-    }
-
-    const sdkDef = toSdkAgentMap([agent])[schedule.agent_name];
-    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
-    const budget = schedule.max_budget_usd ?? agent.max_budget_usd;
-    const runId = this.memoryDb.startAgentRun(schedule.agent_name, `schedule:${schedule.schedule_name}`, "standalone");
-
-    try {
-      const result = await this.sdkBridge.runStandaloneAgent(
-        schedule.agent_name, sdkDef, cwd, schedule.prompt, budget,
-      );
-
-      this.memoryDb.completeAgentRun(runId, "completed", {
-        sessionId: result.sessionId,
-        costUsd: result.costUsd,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        turns: result.turns,
-      });
-
-      // Parse and execute any actions from the response
-      if (result.responseText) {
-        const actions = parseOodaResponse(result.responseText);
-        if (actions.length > 0) {
-          await this.agentEngine.executeOodaActions(actions);
-        }
-        this.agentEngine.extractAgentActions(schedule.agent_name, result.responseText);
-      }
-
-      // Trust reward for successful scheduled run
-      this.memoryDb.recordTrustDelta(schedule.agent_name, 10, `scheduled run "${schedule.schedule_name}" completed`);
-
-      this.log.info(`Scheduled run "${schedule.schedule_name}" completed: cost=$${result.costUsd.toFixed(4)}`);
-      return { success: true, costUsd: result.costUsd };
-    } catch (err) {
-      this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
-      this.memoryDb.recordTrustDelta(schedule.agent_name, -15, `scheduled run "${schedule.schedule_name}" failed: ${err}`);
-      this.log.warn(`Scheduled run "${schedule.schedule_name}" failed: ${err}`);
-      return { success: false };
-    }
-  }
+  // reloadAgents, seedSpecializations — moved to AgentEngine (src/agent-engine.ts)
+  // executeOodaActions, executeRoundtable — moved to AgentEngine (src/agent-engine.ts)
+  // executeScheduledRun — moved to AgentEngine (src/agent-engine.ts)
 
   /** Start telemetry sink server if enabled in config */
   private async startTelemetrySink(): Promise<void> {
