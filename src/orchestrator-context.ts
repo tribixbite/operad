@@ -6,11 +6,12 @@ import type { SdkBridge } from "./sdk-bridge.js";
 import type { Logger } from "./log.js";
 import type { ToolExecutor } from "./tools.js";
 import type { ToolEngine } from "./tool-engine.js";
-import type { ScheduleInput } from "./schedule.js";
+import type { ScheduleInput, ScheduleEngine } from "./schedule.js";
 import type { BudgetTracker } from "./budget.js";
 import type { WakeLockManager } from "./wake.js";
 import type { MemoryMonitor } from "./memory.js";
 import type { Registry } from "./registry.js";
+import type { TelemetrySinkServer } from "./telemetry-sink.js";
 
 /**
  * Shared dependency container passed to extracted subsystem engines.
@@ -116,4 +117,35 @@ export interface OrchestratorContext {
   cmdRegister: (scanPath?: string) => import("./types.js").IpcResponse;
   cmdClone: (url: string, name?: string) => import("./types.js").IpcResponse;
   cmdCreate: (name: string) => import("./types.js").IpcResponse;
+
+  // -- Additional callbacks for REST route handlers (ServerEngine.handleDashboardApi) -
+
+  /** TelemetrySinkServer instance, or null if not initialized */
+  getTelemetrySink: () => TelemetrySinkServer | null;
+  /** ScheduleEngine instance, or null if not initialized */
+  getScheduleEngine: () => ScheduleEngine | null;
+  /**
+   * Broadcast a typed event to all connected WebSocket clients.
+   * Spreads object fields (like broadcastSwitchboard in Daemon).
+   */
+  broadcastWs: (type: string, data: unknown) => void;
+  /** Ensure the IPC socket exists (re-creates if missing) */
+  ensureSocket: () => Promise<void>;
+  /** Reload agent configs from all sources and update agentConfigs array */
+  reloadAgents: () => void;
+  /**
+   * Resolve a fuzzy session name (prefix/substring) to the canonical name.
+   * Returns null if no unique match is found.
+   */
+  resolveName: (input: string) => string | null;
+  /** List Android apps with their RSS (via ADB) */
+  getAndroidApps: () => { pkg: string; label: string; rss_mb: number; system: boolean; autostop: boolean }[];
+  /** Force-stop an Android app by package name via ADB */
+  forceStopApp: (pkg: string) => { status: number; data: unknown };
+  /** Get the current auto-stop package list */
+  getAutoStopList: () => { packages: string[] };
+  /** Toggle auto-stop for a package, persisting to disk */
+  toggleAutoStop: (pkg: string) => { status: number; data: unknown };
+  /** Invalidate the cached ADB serial (call after connect/disconnect) */
+  invalidateAdbSerial: () => void;
 }
