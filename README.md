@@ -101,14 +101,16 @@ The web dashboard at `http://localhost:18970` provides:
 
 ## Platforms
 
-| Feature | Android/Termux | Linux | macOS |
-|---------|---------------|-------|-------|
-| Notifications | termux-notification | notify-send | osascript |
-| Battery | termux-battery-status | /sys/power_supply | pmset |
-| Wake lock | termux-wake-lock | systemd-inhibit | caffeinate |
-| Process info | /proc | /proc | ps/lsof |
-| Terminal tabs | am intents | n/a | Terminal.app |
-| ADB protections | phantom fix + Doze | n/a | n/a |
+| Feature | Android/Termux | Linux | macOS | Windows (experimental) |
+|---------|---------------|-------|-------|------------------------|
+| Notifications | termux-notification | notify-send | osascript | PowerShell toast |
+| Battery | termux-battery-status | /sys/power_supply | pmset | WMI (laptop only) |
+| Wake lock | termux-wake-lock | systemd-inhibit | caffeinate | not implemented |
+| Process info | /proc | /proc | ps/lsof | tasklist (limited) |
+| Terminal tabs | am intents | n/a | Terminal.app | n/a |
+| ADB protections | phantom fix + Doze | n/a | n/a | n/a |
+
+Windows requires tmux via MSYS2 (`pacman -S tmux`) or WSL. See [docs/windows.md](docs/windows.md) for setup.
 
 ## Crash Resilience
 
