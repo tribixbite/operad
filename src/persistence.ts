@@ -1,6 +1,12 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { saveSnapshot, pruneSnapshots } from "./agent-state.js";
+import {
+  shouldConsolidate,
+  runConsolidation,
+  getLastConsolidationTime,
+  type IdleConditions,
+} from "./consolidation.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /**
@@ -9,10 +15,9 @@ import type { OrchestratorContext } from "./orchestrator-context.js";
  * Handles periodic concerns that sit above StateManager (which owns the
  * state.json read/write primitives) but below the full Daemon:
  *   - Daily agent snapshots (self-deduplicating, called from cognitive timer)
+ *   - Memory consolidation during idle periods (maybeConsolidate)
  *
  * Methods not yet extracted (entangled with Daemon private state):
- *   - maybeConsolidate — needs lastUserActivityEpoch; extract after a
- *     getIdleSeconds getter is added to OrchestratorContext (TODO)
  *   - executeScheduledRun — calls extractAgentActions + executeOodaActions,
  *     themselves not yet extracted; stays in Daemon for now (TODO)
  *
@@ -51,5 +56,38 @@ export class PersistenceEngine {
       }
     }
     log.info(`Daily agent snapshots saved (${agentConfigs.filter((a) => a.enabled).length} agents)`);
+  }
+
+  /**
+   * Check whether memory consolidation conditions are met and run it if so.
+   *
+   * Consolidation is skipped when:
+   *   - memoryDb is not initialised
+   *   - the system is not sufficiently idle (per shouldConsolidate threshold)
+   *   - consolidation ran too recently (per getLastConsolidationTime)
+   *
+   * Should be called on every cognitive timer tick (~60 s cadence).
+   */
+  maybeConsolidate(): void {
+    const { memoryDb, state, sdkBridge, agentConfigs, log, broadcast, getLastActivityEpoch } = this.ctx;
+    if (!memoryDb) return;
+
+    const systemState = state.getState();
+    const now = Math.floor(Date.now() / 1000);
+    const idleSeconds = now - getLastActivityEpoch();
+
+    const conditions: IdleConditions = {
+      idleSeconds,
+      batteryPct: systemState.battery?.percentage ?? 100,
+      charging: systemState.battery?.charging ?? true,
+      sdkBusy: sdkBridge?.isAttached ?? false,
+    };
+
+    const lastRun = getLastConsolidationTime(memoryDb);
+    if (!shouldConsolidate(conditions, lastRun)) return;
+
+    const agentNames = agentConfigs.filter((a) => a.enabled).map((a) => a.name);
+    const result = runConsolidation(memoryDb, agentNames, log);
+    broadcast("consolidation", result as unknown as Record<string, unknown>);
   }
 }

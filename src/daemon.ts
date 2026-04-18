@@ -46,9 +46,8 @@ import {
   type AgentStateBundle, type ImportOptions,
 } from "./agent-state.js";
 import {
-  shouldConsolidate, runConsolidation, buildReflectionPrompt,
+  runConsolidation,
   getLastConsolidationTime, getConsolidationHistory,
-  type IdleConditions,
 } from "./consolidation.js";
 import {
   getProjectTokenUsage,
@@ -325,6 +324,8 @@ export class Daemon {
       getToolExecutor: () => this.toolExecutor,
       // Delegate — executeOodaActions stays in Daemon until its deep deps are extracted
       executeOodaActions: (actions) => this.executeOodaActions(actions),
+      // Getter so PersistenceEngine can compute idle time without holding a direct ref
+      getLastActivityEpoch: () => this.lastUserActivityEpoch,
     };
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
@@ -2556,7 +2557,7 @@ export class Daemon {
         // Daily agent snapshot (check every tick, only run once per day)
         this.persistenceEngine.maybeDailySnapshot();
         // Memory consolidation during idle periods
-        this.maybeConsolidate();
+        this.persistenceEngine.maybeConsolidate();
       }, 60_000);
 
       // Verify SDK is available (non-blocking, log result)
@@ -3424,29 +3425,6 @@ export class Daemon {
       this.log.warn(`Scheduled run "${schedule.schedule_name}" failed: ${err}`);
       return { success: false };
     }
-  }
-
-  /** Check if conditions are met for memory consolidation and run it */
-  private maybeConsolidate(): void {
-    if (!this.memoryDb) return;
-
-    const state = this.state.getState();
-    const now = Math.floor(Date.now() / 1000);
-    const idleSeconds = now - this.lastUserActivityEpoch;
-
-    const conditions: IdleConditions = {
-      idleSeconds,
-      batteryPct: state.battery?.percentage ?? 100,
-      charging: state.battery?.charging ?? true,
-      sdkBusy: this.sdkBridge?.isAttached ?? false,
-    };
-
-    const lastRun = getLastConsolidationTime(this.memoryDb);
-    if (!shouldConsolidate(conditions, lastRun)) return;
-
-    const agentNames = this.agentConfigs.filter((a) => a.enabled).map((a) => a.name);
-    const result = runConsolidation(this.memoryDb, agentNames, this.log);
-    this.broadcastSwitchboard("consolidation", result);
   }
 
   /** Start telemetry sink server if enabled in config */

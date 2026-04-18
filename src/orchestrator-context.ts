@@ -37,4 +37,10 @@ export interface OrchestratorContext {
    * executeOodaActions and its deep dependencies are fully extracted.
    */
   executeOodaActions: (actions: OodaAction[]) => Promise<void>;
+  /**
+   * Returns the epoch timestamp (seconds) of the last observed user activity.
+   * Used by PersistenceEngine.maybeConsolidate() to compute idle time without
+   * holding a direct reference to Daemon's private lastUserActivityEpoch field.
+   */
+  getLastActivityEpoch: () => number;
 }
