@@ -97,6 +97,24 @@ export interface OrchestratorContext {
   /** Initiate daemon shutdown; exits the process when complete */
   shutdown: (kill?: boolean) => Promise<void>;
 
+  /**
+   * Start a single session by name.
+   * Returns true if the session started successfully.
+   * Exposed here so SessionCommands can drive session lifecycle without
+   * coupling to Daemon internals.
+   */
+  startSession: (name: string) => Promise<boolean>;
+  /**
+   * Stop a single session by name.
+   * Returns true if the session stopped (or was already stopped).
+   */
+  stopSessionByName: (name: string) => Promise<boolean>;
+  /**
+   * Start all enabled sessions in dependency order.
+   * Used by cmdStart (no-arg) and cmdRestart (no-arg).
+   */
+  startAllSessions: () => Promise<void>;
+
   // cmd* delegates — one per IPC command case
   cmdStatus: (name?: string) => import("./types.js").IpcResponse;
   cmdStart: (name?: string) => Promise<import("./types.js").IpcResponse>;

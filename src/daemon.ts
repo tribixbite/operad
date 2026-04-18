@@ -74,13 +74,10 @@ import {
 } from "./git-info.js";
 import {
   createSession,
-  sessionExists,
   listTmuxSessions,
   sendGoToSession,
   waitForClaudeReady,
   stopSession,
-  sendKeys,
-  createTermuxTab,
   isTmuxServerAlive,
   discoverBareClaudeSessions,
   spawnBareProcess,
@@ -98,7 +95,8 @@ import { PersistenceEngine } from "./persistence.js";
 import { ServerEngine } from "./server-engine.js";
 import { AndroidEngine } from "./android-engine.js";
 import { MonitoringEngine } from "./monitoring-engine.js";
-import { resolveSessionName, resolveSessionPath as resolveSessionPathFn, resolveOpenTarget as resolveOpenTargetFn } from "./session-resolver.js";
+import { SessionCommands } from "./session-commands.js";
+import { resolveSessionName, resolveSessionPath as resolveSessionPathFn } from "./session-resolver.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -216,6 +214,7 @@ export class Daemon {
   private serverEngine!: ServerEngine;
   private androidEngine!: AndroidEngine;
   private monitoringEngine!: MonitoringEngine;
+  private sessionCommands!: SessionCommands;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -348,28 +347,34 @@ export class Daemon {
       // Lifecycle callbacks for stream/shutdown cases handled inline in ServerEngine
       boot: () => this.boot(),
       shutdown: (kill) => this.shutdown(kill),
-      // cmd* delegates — each wraps the corresponding Daemon private method so the
-      // REST API in daemon.ts and the IPC dispatch in ServerEngine share one impl.
-      cmdStatus: (name) => this.cmdStatus(name),
-      cmdStart: (name) => this.cmdStart(name),
-      cmdStop: (name) => this.cmdStop(name),
-      cmdRestart: (name) => this.cmdRestart(name),
-      cmdHealth: () => this.cmdHealth(),
-      cmdMemory: () => this.cmdMemory(),
-      cmdGo: (name) => this.cmdGo(name),
-      cmdSend: (name, text) => this.cmdSend(name, text),
-      cmdTabs: (names) => this.cmdTabs(names),
-      cmdOpen: (path, name, autoGo, priority) => this.cmdOpen(path, name, autoGo, priority),
-      cmdClose: (name) => this.cmdClose(name),
-      cmdRecent: (count) => this.cmdRecent(count),
-      cmdSuspend: (name) => this.cmdSuspend(name),
-      cmdResume: (name) => this.cmdResume(name),
-      cmdSuspendOthers: (name) => this.cmdSuspendOthers(name),
-      cmdSuspendAll: () => this.cmdSuspendAll(),
-      cmdResumeAll: () => this.cmdResumeAll(),
-      cmdRegister: (scanPath) => this.cmdRegister(scanPath),
-      cmdClone: (url, name) => this.cmdClone(url, name),
-      cmdCreate: (name) => this.cmdCreate(name),
+      // Session lifecycle callbacks — exposed so SessionCommands can drive
+      // start/stop without coupling to Daemon internals.
+      startSession: (name) => this.startSession(name),
+      stopSessionByName: (name) => this.stopSessionByName(name),
+      startAllSessions: () => this.startAllSessions().then(() => undefined),
+      // cmd* delegates — late-binding through SessionCommands (constructed just below).
+      // Each lambda captures `this` so sessionCommands is resolved at call time,
+      // not at ctx construction time.
+      cmdStatus: (name) => this.sessionCommands.cmdStatus(name),
+      cmdStart: (name) => this.sessionCommands.cmdStart(name),
+      cmdStop: (name) => this.sessionCommands.cmdStop(name),
+      cmdRestart: (name) => this.sessionCommands.cmdRestart(name),
+      cmdHealth: () => this.sessionCommands.cmdHealth(),
+      cmdMemory: () => this.sessionCommands.cmdMemory(),
+      cmdGo: (name) => this.sessionCommands.cmdGo(name),
+      cmdSend: (name, text) => this.sessionCommands.cmdSend(name, text),
+      cmdTabs: (names) => this.sessionCommands.cmdTabs(names),
+      cmdOpen: (path, name, autoGo, priority) => this.sessionCommands.cmdOpen(path, name, autoGo, priority),
+      cmdClose: (name) => this.sessionCommands.cmdClose(name),
+      cmdRecent: (count) => this.sessionCommands.cmdRecent(count),
+      cmdSuspend: (name) => this.sessionCommands.cmdSuspend(name),
+      cmdResume: (name) => this.sessionCommands.cmdResume(name),
+      cmdSuspendOthers: (name) => this.sessionCommands.cmdSuspendOthers(name),
+      cmdSuspendAll: () => this.sessionCommands.cmdSuspendAll(),
+      cmdResumeAll: () => this.sessionCommands.cmdResumeAll(),
+      cmdRegister: (scanPath) => this.sessionCommands.cmdRegister(scanPath),
+      cmdClone: (url, name) => this.sessionCommands.cmdClone(url, name),
+      cmdCreate: (name) => this.sessionCommands.cmdCreate(name),
       // -- REST route handler callbacks (for ServerEngine.handleDashboardApi) ---
       getTelemetrySink: () => this.telemetrySink,
       getDashboard: () => this.dashboard,
@@ -399,6 +404,9 @@ export class Daemon {
     // and Android status notification. Constructed after AndroidEngine so it can
     // call androidEngine.autoStopFlaggedApps() on memory pressure.
     this.monitoringEngine = new MonitoringEngine(ctx, this.memory, this.activity, this.battery, this.androidEngine);
+    // SessionCommands holds all cmd* IPC/REST command handlers extracted from Daemon.
+    // Constructed after MonitoringEngine since it needs it for SSE push on suspend/resume.
+    this.sessionCommands = new SessionCommands(ctx, this.monitoringEngine);
   }
 
   /**
@@ -535,7 +543,7 @@ export class Daemon {
     this.autoTabsTimer = setTimeout(() => {
       this.autoTabsTimer = null;
       try {
-        const tabResult = this.cmdTabs();
+        const tabResult = this.sessionCommands.cmdTabs();
         if (tabResult.ok) {
           const data = tabResult.data as { restored: number; skipped: number };
           this.log.info(`Auto-tabs: restored=${data.restored} skipped=${data.skipped}`);
@@ -1350,404 +1358,6 @@ export class Daemon {
       `visible=[${[...visibleNames].join(",")}]`);
   }
 
-  /**
-   * Fuzzy-match a name/fragment to a project path for `operad open`.
-   * Checks config sessions, registry, and recent history (in that order).
-   * Supports exact, prefix, and substring matching.
-   */
-  private resolveOpenTarget(input: string): string | null {
-    return resolveOpenTargetFn(this.config, this.registry, input);
-  }
-
-  /** Open command — register and start a new dynamic Claude session (supports multi-instance) */
-  private async cmdOpen(path: string, name?: string, autoGo = false, priority = 50): Promise<IpcResponse> {
-    let resolvedPath: string;
-
-    if (existsSync(path)) {
-      resolvedPath = resolve(path);
-    } else {
-      // Not a valid path — fuzzy match against session names and recent projects
-      const matched = this.resolveOpenTarget(path);
-      if (!matched) {
-        return { ok: false, error: `No project matching '${path}' found in config or recent history` };
-      }
-      resolvedPath = matched;
-    }
-    const baseName = name ?? deriveName(path);
-    if (!isValidName(baseName)) {
-      return { ok: false, error: `Invalid session name '${baseName}' — must match [a-z0-9-]+` };
-    }
-
-    // Check if any session already exists for this path — if so, create a suffixed instance
-    const existingByPath = this.config.sessions.filter(
-      (s) => s.path && resolve(s.path) === resolvedPath,
-    );
-
-    let sessionName: string;
-    if (existingByPath.length === 0) {
-      // First instance — check for name conflict only
-      const nameConflict = this.config.sessions.find((s) => s.name === baseName);
-      if (nameConflict) {
-        return { ok: false, error: `Name '${baseName}' conflicts with an existing session at a different path` };
-      }
-      sessionName = baseName;
-    } else {
-      // Multi-instance — find next available suffix
-      const pattern = new RegExp(`^${baseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-\\d+)?$`);
-      const existingNames = this.config.sessions
-        .filter((s) => pattern.test(s.name))
-        .map((s) => s.name);
-      sessionName = nextSuffix(baseName, existingNames);
-    }
-
-    // Add to registry
-    const entry = this.registry.add({ name: sessionName, path: resolvedPath, priority, auto_go: autoGo });
-    if (!entry) {
-      return { ok: false, error: `Failed to register session '${sessionName}'` };
-    }
-
-    // Create SessionConfig and merge into live config
-    const sessionConfig: SessionConfig = {
-      name: sessionName,
-      type: "claude",
-      path: entry.path,
-      command: undefined,
-      auto_go: autoGo,
-      priority,
-      depends_on: [],
-      headless: false,
-      env: {},
-      health: undefined,
-      max_restarts: 3,
-      restart_backoff_s: 5,
-      enabled: true,
-      bare: false,
-    };
-    this.config.sessions.push(sessionConfig);
-    this.state.initFromConfig(this.config.sessions);
-
-    // Start the session
-    const started = await this.startSession(sessionName);
-    this.log.info(`Opened session '${sessionName}' at ${entry.path}`, { session: sessionName });
-
-    return {
-      ok: true,
-      data: `Opened '${sessionName}' (${entry.path})${started ? " — started" : " — registered but not started"}`,
-    };
-  }
-
-  /** Close command — stop and unregister a dynamic session */
-  private async cmdClose(name: string): Promise<IpcResponse> {
-    const resolved = this.resolveName(name);
-    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-
-    // Stop the session if it's running
-    await this.stopSessionByName(resolved);
-
-    // Remove from registry if dynamically opened
-    const regEntry = this.registry.find(resolved);
-    if (regEntry) {
-      this.registry.remove(resolved);
-    }
-
-    // Remove from live session list (config sessions reappear on next boot)
-    this.config.sessions = this.config.sessions.filter((s) => s.name !== resolved);
-
-    // Remove session state so it vanishes from dashboard immediately
-    this.state.removeSession(resolved);
-
-    this.log.info(`Closed session '${resolved}'`, { session: resolved });
-    return { ok: true, data: `Closed '${resolved}'` };
-  }
-
-  /** Recent command — parse history.jsonl for recently active projects */
-  private cmdRecent(count = 20): IpcResponse {
-    const home = homedir();
-    const historyPath = join(home, ".claude", "history.jsonl");
-    const rawProjects = parseRecentProjects(historyPath, 1000);
-
-    // Enrich with running/registered/config status
-    const configNames = new Set(this.config.sessions.map((s) => s.name));
-    const runningNames = new Set<string>();
-    for (const s of Object.values(this.state.getState().sessions)) {
-      if (s.status === "running" || s.status === "degraded" || s.status === "starting") {
-        runningNames.add(s.name);
-      }
-    }
-
-    const results: RecentProject[] = rawProjects.slice(0, count).map((p) => {
-      // Try to match by derived name or by path
-      const matchedConfig = this.config.sessions.find((s) => s.path === p.path);
-      const matchedName = matchedConfig?.name ?? p.name;
-
-      let status: RecentProject["status"] = "untracked";
-      if (runningNames.has(matchedName)) {
-        status = "running";
-      } else if (this.registry.find(matchedName) || this.registry.findByPath(p.path)) {
-        status = "registered";
-      } else if (configNames.has(matchedName) || matchedConfig) {
-        status = "config";
-      }
-
-      return {
-        name: matchedName,
-        path: p.path,
-        last_active: p.last_active,
-        session_id: p.session_id,
-        status,
-      };
-    });
-
-    // Merge registry-only entries that don't appear in history.jsonl
-    const existingPaths = new Set(results.map((r) => r.path));
-    for (const entry of this.registry.entries()) {
-      if (existingPaths.has(entry.path)) continue;
-      const status: RecentProject["status"] = runningNames.has(entry.name) ? "running" : "registered";
-      results.push({
-        name: entry.name,
-        path: entry.path,
-        last_active: entry.last_active,
-        session_id: entry.session_id ?? "",
-        status,
-      });
-    }
-
-    // Re-sort combined list by last_active descending
-    results.sort((a, b) => new Date(b.last_active).getTime() - new Date(a.last_active).getTime());
-
-    return { ok: true, data: results.slice(0, count) };
-  }
-
-  /** Register projects by scanning a directory (default ~/git) */
-  private cmdRegister(scanPath?: string): IpcResponse {
-    const home = homedir();
-    const dirPath = resolve(scanPath ?? join(home, "git"));
-
-    if (!existsSync(dirPath)) {
-      return { ok: false, error: `Directory not found: ${dirPath}` };
-    }
-
-    // Read all entries, filter to directories, sort by mtime descending
-    let entries: Array<{ name: string; path: string; mtime: number }>;
-    try {
-      const names = readdirSync(dirPath);
-      entries = names
-        .filter((n) => !n.startsWith(".")) // skip hidden dirs
-        .map((n) => {
-          const full = join(dirPath, n);
-          try {
-            const st = statSync(full);
-            if (!st.isDirectory()) return null;
-            return { name: n, path: full, mtime: st.mtimeMs };
-          } catch { /* stat failed — skip entry */ return null; }
-        })
-        .filter((e): e is NonNullable<typeof e> => e !== null);
-      entries.sort((a, b) => b.mtime - a.mtime);
-    } catch (err) {
-      return { ok: false, error: `Failed to scan ${dirPath}: ${err}` };
-    }
-
-    // Collect existing names for suffix dedup
-    const existingNames = [
-      ...this.config.sessions.map((s) => s.name),
-      ...this.registry.entries().map((e) => e.name),
-    ];
-
-    const registered: string[] = [];
-    let skipped = 0;
-    for (const entry of entries) {
-      // Skip if already in config or registry by path
-      if (this.config.sessions.find((s) => s.path === entry.path)) { skipped++; continue; }
-      if (this.registry.findByPath(entry.path)) { skipped++; continue; }
-
-      let name = deriveName(entry.path);
-      if (existingNames.includes(name)) {
-        name = nextSuffix(name, existingNames);
-      }
-
-      const added = this.registry.add({ name, path: entry.path, priority: 50, auto_go: false });
-      if (added) {
-        registered.push(name);
-        existingNames.push(name);
-      } else {
-        skipped++;
-      }
-    }
-
-    this.log.info(`Register: ${registered.length} added, ${skipped} skipped from ${dirPath}`);
-    return { ok: true, data: { registered, skipped, total: entries.length } };
-  }
-
-  /** Clone a git repo and register it */
-  private cmdClone(url: string, nameOverride?: string): IpcResponse {
-    const home = homedir();
-    const gitDir = join(home, "git");
-
-    // Derive target dir name from URL: strip trailing .git, take basename
-    const urlBasename = url.replace(/\.git$/, "").split("/").pop() ?? "unnamed";
-    const dirName = nameOverride ?? urlBasename.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    const targetDir = join(gitDir, dirName);
-
-    if (existsSync(targetDir)) {
-      // Dir exists — just register it if not already registered
-      if (this.registry.findByPath(targetDir)) {
-        return { ok: true, data: { name: dirName, path: targetDir, message: "Already registered" } };
-      }
-      const existingNames = [
-        ...this.config.sessions.map((s) => s.name),
-        ...this.registry.entries().map((e) => e.name),
-      ];
-      let name = deriveName(targetDir);
-      if (existingNames.includes(name)) name = nextSuffix(name, existingNames);
-      this.registry.add({ name, path: targetDir, priority: 50, auto_go: false });
-      return { ok: true, data: { name, path: targetDir, message: "Existing dir registered" } };
-    }
-
-    // Clone the repo
-    if (!existsSync(gitDir)) mkdirSync(gitDir, { recursive: true });
-    const result = spawnSync("git", ["clone", url, targetDir], {
-      timeout: 120_000,
-      stdio: "pipe",
-      env: process.env,
-    });
-
-    if (result.status !== 0) {
-      const stderr = result.stderr?.toString().trim() ?? "Unknown error";
-      return { ok: false, error: `git clone failed: ${stderr}` };
-    }
-
-    // Register the cloned dir
-    const existingNames = [
-      ...this.config.sessions.map((s) => s.name),
-      ...this.registry.entries().map((e) => e.name),
-    ];
-    let name = deriveName(targetDir);
-    if (existingNames.includes(name)) name = nextSuffix(name, existingNames);
-    this.registry.add({ name, path: targetDir, priority: 50, auto_go: false });
-
-    this.log.info(`Cloned ${url} → ${targetDir} as '${name}'`);
-    return { ok: true, data: { name, path: targetDir } };
-  }
-
-  /** Create a new project directory, git init, and register it */
-  private cmdCreate(name: string): IpcResponse {
-    if (!isValidName(name)) {
-      return { ok: false, error: `Invalid name '${name}' — must match [a-z0-9-]+` };
-    }
-
-    const home = homedir();
-    const targetDir = join(home, "git", name);
-
-    if (existsSync(targetDir)) {
-      return { ok: false, error: `Directory already exists: ${targetDir}` };
-    }
-
-    mkdirSync(targetDir, { recursive: true });
-    spawnSync("git", ["init"], { cwd: targetDir, timeout: 10_000, stdio: "pipe" });
-
-    // Register the new dir
-    const existingNames = [
-      ...this.config.sessions.map((s) => s.name),
-      ...this.registry.entries().map((e) => e.name),
-    ];
-    let regName = name;
-    if (existingNames.includes(regName)) regName = nextSuffix(regName, existingNames);
-    this.registry.add({ name: regName, path: targetDir, priority: 50, auto_go: false });
-
-    this.log.info(`Created project '${regName}' at ${targetDir}`);
-    return { ok: true, data: { name: regName, path: targetDir } };
-  }
-
-  // -- Session suspension (SIGSTOP/SIGCONT) ------------------------------------
-
-  /** Suspend a single session by name — freezes all processes via SIGSTOP */
-  private cmdSuspend(name: string): IpcResponse {
-    const resolved = this.resolveName(name);
-    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-    const s = this.state.getSession(resolved);
-    if (!s) return { ok: false, error: `No state for session: ${resolved}` };
-    if (s.suspended) return { ok: true, data: `'${resolved}' already suspended` };
-    if (s.status !== "running" && s.status !== "degraded") {
-      return { ok: false, error: `Cannot suspend '${resolved}' — status is ${s.status}` };
-    }
-    const ok = suspendSession(resolved, this.log);
-    if (ok) {
-      this.state.setSuspended(resolved, true);
-      this.monitoringEngine.updateStatusNotification();
-      this.monitoringEngine.pushSseState();
-    }
-    return { ok, data: ok ? `Suspended '${resolved}'` : `Failed to suspend '${resolved}'` };
-  }
-
-  /** Resume a single suspended session — unfreezes processes via SIGCONT */
-  private cmdResume(name: string): IpcResponse {
-    const resolved = this.resolveName(name);
-    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-    const s = this.state.getSession(resolved);
-    if (!s) return { ok: false, error: `No state for session: ${resolved}` };
-    if (!s.suspended) return { ok: true, data: `'${resolved}' not suspended` };
-    const ok = resumeSession(resolved, this.log);
-    if (ok) {
-      this.state.setSuspended(resolved, false);
-      this.monitoringEngine.updateStatusNotification();
-      this.monitoringEngine.pushSseState();
-    }
-    return { ok, data: ok ? `Resumed '${resolved}'` : `Failed to resume '${resolved}'` };
-  }
-
-  /** Suspend all sessions except the named one — "make room" for a heavy build */
-  private cmdSuspendOthers(name: string): IpcResponse {
-    const resolved = this.resolveName(name);
-    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-    const sessions = this.state.getState().sessions;
-    let suspended = 0;
-    for (const [sName, s] of Object.entries(sessions)) {
-      if (sName === resolved) continue;
-      if (s.suspended) continue;
-      if (s.status !== "running" && s.status !== "degraded") continue;
-      if (suspendSession(sName, this.log)) {
-        this.state.setSuspended(sName, true);
-        suspended++;
-      }
-    }
-    this.monitoringEngine.updateStatusNotification();
-    this.monitoringEngine.pushSseState();
-    return { ok: true, data: `Suspended ${suspended} sessions (except '${resolved}')` };
-  }
-
-  /** Suspend all running sessions */
-  private cmdSuspendAll(): IpcResponse {
-    const sessions = this.state.getState().sessions;
-    let suspended = 0;
-    for (const [sName, s] of Object.entries(sessions)) {
-      if (s.suspended) continue;
-      if (s.status !== "running" && s.status !== "degraded") continue;
-      if (suspendSession(sName, this.log)) {
-        this.state.setSuspended(sName, true);
-        suspended++;
-      }
-    }
-    this.monitoringEngine.updateStatusNotification();
-    this.monitoringEngine.pushSseState();
-    return { ok: true, data: `Suspended ${suspended} sessions` };
-  }
-
-  /** Resume all suspended sessions */
-  private cmdResumeAll(): IpcResponse {
-    const sessions = this.state.getState().sessions;
-    let resumed = 0;
-    for (const [sName, s] of Object.entries(sessions)) {
-      if (!s.suspended) continue;
-      if (resumeSession(sName, this.log)) {
-        this.state.setSuspended(sName, false);
-        resumed++;
-      }
-    }
-    this.monitoringEngine.updateStatusNotification();
-    this.monitoringEngine.pushSseState();
-    return { ok: true, data: `Resumed ${resumed} sessions` };
-  }
-
   // -- Dashboard HTTP server ---------------------------------------------------
 
   /** Start HTTP dashboard server if port > 0 */
@@ -2145,195 +1755,6 @@ export class Daemon {
         this.log.error(`Config reload failed: ${err}`);
       }
     });
-  }
-
-  /** Status command — return session states and daemon info */
-  private cmdStatus(name?: string): IpcResponse {
-    const state = this.state.getState();
-
-    if (name) {
-      const resolved = this.resolveName(name);
-      if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-      const s = state.sessions[resolved];
-      if (!s) return { ok: false, error: `No state for session: ${resolved}` };
-      return { ok: true, data: { session: s, config: this.config.sessions.find((c) => c.name === resolved) } };
-    }
-
-    return {
-      ok: true,
-      data: {
-        daemon_start: state.daemon_start,
-        boot_complete: state.boot_complete,
-        adb_fixed: state.adb_fixed,
-        procs: this.budget.check(),
-        wake_lock: this.wake.isHeld(),
-        memory: state.memory ?? null,
-        battery: state.battery ?? null,
-        quota: this.memoryDb ? computeQuotaStatus(this.memoryDb, this.config.orchestrator) : null,
-        trust: this.memoryDb ? this.agentConfigs.map((a) => {
-          const { score, recommended } = this.memoryDb!.getRecommendedAutonomy(a.name);
-          return { agent: a.name, score, recommended, current: a.autonomy_level ?? "observe" };
-        }) : [],
-        specializations: this.memoryDb ? (() => {
-          try {
-            const allSpecs = this.memoryDb!.getSpecializations();
-            // Lightweight summary: top domain per agent
-            const byAgent = new Map<string, { domain: string; confidence: number }>();
-            for (const s of allSpecs) {
-              const existing = byAgent.get(s.agent_name);
-              if (!existing || s.confidence > existing.confidence) {
-                byAgent.set(s.agent_name, { domain: s.domain, confidence: s.confidence });
-              }
-            }
-            return Array.from(byAgent.entries()).map(([agent, top]) => ({
-              agent, top_domain: top.domain, confidence: top.confidence,
-            }));
-          } catch { /* specializations table may not exist during first run */ return []; }
-        })() : [],
-        sessions: Object.values(state.sessions).map((s) => {
-          const cfg = this.config.sessions.find((c) => c.name === s.name);
-          return {
-            ...s,
-            type: cfg?.type ?? "daemon",
-            path: cfg?.path ?? null,
-            has_build_script: cfg?.path ? existsSync(join(cfg.path, "build-on-termux.sh")) : false,
-            uptime: s.uptime_start ? formatUptime(new Date(s.uptime_start)) : null,
-          };
-        }),
-      },
-    };
-  }
-
-  /** Start command — start one or all sessions (re-enables boot-disabled sessions on demand) */
-  private async cmdStart(name?: string): Promise<IpcResponse> {
-    if (name) {
-      const resolved = this.resolveName(name);
-      if (!resolved) {
-        // Not a loaded session — try fuzzy-matching to open it
-        return this.cmdOpen(name);
-      }
-      // Re-enable if disabled by boot recency filtering (on-demand play)
-      const sessionConfig = this.config.sessions.find((s) => s.name === resolved);
-      if (sessionConfig && !sessionConfig.enabled) {
-        sessionConfig.enabled = true;
-        this.log.info(`Re-enabled session '${resolved}' for on-demand start`, { session: resolved });
-      }
-      const success = await this.startSession(resolved);
-      return { ok: success, data: success ? `Started '${resolved}'` : `Failed to start '${resolved}'` };
-    }
-    await this.startAllSessions();
-    return { ok: true, data: "All sessions started" };
-  }
-
-  /** Stop command — stop one or all sessions */
-  private async cmdStop(name?: string): Promise<IpcResponse> {
-    if (name) {
-      const resolved = this.resolveName(name);
-      if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-      const success = await this.stopSessionByName(resolved);
-      return { ok: success, data: success ? `Stopped '${resolved}'` : `Failed to stop '${resolved}'` };
-    }
-    // Stop all in reverse dependency order
-    const shutdownOrder = computeShutdownOrder(this.config.sessions);
-    for (const batch of shutdownOrder) {
-      await Promise.all(batch.sessions.map((n) => this.stopSessionByName(n)));
-    }
-    return { ok: true, data: "All sessions stopped" };
-  }
-
-  /** Restart command */
-  private async cmdRestart(name?: string): Promise<IpcResponse> {
-    if (name) {
-      const resolved = this.resolveName(name);
-      if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-      await this.stopSessionByName(resolved);
-      await sleep(500);
-      const success = await this.startSession(resolved);
-      return { ok: success, data: success ? `Restarted '${resolved}'` : `Failed to restart '${resolved}'` };
-    }
-    await this.cmdStop();
-    await sleep(500);
-    return this.cmdStart();
-  }
-
-  /** Health command — run health sweep now */
-  private cmdHealth(): IpcResponse {
-    const results = runHealthSweep(this.config, this.state, this.log, this.adoptedPids);
-    return { ok: true, data: results };
-  }
-
-  /** Memory command — return system memory + per-session RSS + pressure */
-  private cmdMemory(): IpcResponse {
-    const sysMem = this.memory.getSystemMemory();
-    const sessions: Array<{ name: string; rss_mb: number | null; activity: string | null }> = [];
-
-    for (const session of this.config.sessions) {
-      const s = this.state.getSession(session.name);
-      sessions.push({
-        name: session.name,
-        rss_mb: s?.rss_mb ?? null,
-        activity: s?.activity ?? null,
-      });
-    }
-
-    return {
-      ok: true,
-      data: {
-        system: sysMem,
-        sessions,
-      },
-    };
-  }
-
-  /** Go command — send "go" to a Claude session */
-  private async cmdGo(name: string): Promise<IpcResponse> {
-    const resolved = this.resolveName(name);
-    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-    const result = await sendGoToSession(resolved, this.log);
-    const ok = result === "ready";
-    return { ok, data: ok ? `Sent 'go' to '${resolved}'` : `Failed to send 'go' to '${resolved}' (${result})` };
-  }
-
-  /** Send command — send arbitrary text to a session */
-  private cmdSend(name: string, text: string): IpcResponse {
-    const resolved = this.resolveName(name);
-    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
-    const sent = sendKeys(resolved, text, true);
-    return { ok: sent, data: sent ? `Sent to '${resolved}'` : `Failed to send to '${resolved}'` };
-  }
-
-  /** Tabs command — create Termux UI tabs for sessions */
-  private cmdTabs(names?: string[]): IpcResponse {
-    const targetSessions = names?.length
-      ? names.map((n) => this.resolveName(n)).filter((n): n is string => n !== null)
-      : this.config.sessions
-          .filter((s) => !s.headless && s.enabled)
-          .map((s) => s.name);
-
-    let restored = 0;
-    let skipped = 0;
-
-    for (let i = 0; i < targetSessions.length; i++) {
-      const name = targetSessions[i];
-      if (!sessionExists(name)) {
-        skipped++;
-        continue;
-      }
-
-      if (createTermuxTab(name, this.log)) {
-        restored++;
-      } else {
-        skipped++;
-      }
-
-      // Stagger tab creation to avoid Termux UI race conditions.
-      // TermuxService processes intents async — give each tab 1.5s to initialize.
-      if (i < targetSessions.length - 1) {
-        spawnSync("sleep", ["1.5"], { timeout: 3000 });
-      }
-    }
-
-    return { ok: true, data: { restored, skipped, total: targetSessions.length } };
   }
 
   // -- Helpers ----------------------------------------------------------------
