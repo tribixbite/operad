@@ -169,4 +169,13 @@ export interface OrchestratorContext {
   toggleAutoStop: (pkg: string) => { status: number; data: unknown };
   /** Invalidate the cached ADB serial (call after connect/disconnect) */
   invalidateAdbSerial: () => void;
+
+  /**
+   * Push the current daemon state to all SSE subscribers.
+   * Exposed as a callback so SessionCommands can trigger a refresh after
+   * lifecycle mutations without coupling directly to MonitoringEngine.
+   */
+  pushSseState: () => void;
+  /** Update the persistent system-bar notification (Termux only — no-op elsewhere). */
+  updateStatusNotification: () => void;
 }

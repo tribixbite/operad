@@ -5,8 +5,7 @@
  * Each cmd* method corresponds to one IPC command case (or REST endpoint) that
  * directly manipulates session lifecycle, registry, or returns session state.
  *
- * Dependencies are injected via OrchestratorContext (shared) and MonitoringEngine
- * (for SSE push + status notification after suspend/resume mutations).
+ * Dependencies are injected via OrchestratorContext.
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
@@ -15,7 +14,6 @@ import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import type { IpcResponse } from "./types.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
-import type { MonitoringEngine } from "./monitoring-engine.js";
 import {
   suspendSession,
   resumeSession,
@@ -59,14 +57,12 @@ function sleep(ms: number): Promise<void> {
 /**
  * All IPC/REST session command handlers, extracted from Daemon.
  *
- * Receives the shared OrchestratorContext (for config, state, registry, log, etc.)
- * and MonitoringEngine (for SSE state push + status notification after mutations).
+ * Receives only the shared OrchestratorContext — SSE refresh and status
+ * notification after mutations go through ctx.pushSseState() and
+ * ctx.updateStatusNotification() callbacks.
  */
 export class SessionCommands {
-  constructor(
-    private readonly ctx: OrchestratorContext,
-    private readonly monitoringEngine: MonitoringEngine,
-  ) {}
+  constructor(private readonly ctx: OrchestratorContext) {}
 
   // -- Status / info -----------------------------------------------------------
 
@@ -692,8 +688,8 @@ export class SessionCommands {
     const ok = suspendSession(resolved, this.ctx.log);
     if (ok) {
       this.ctx.state.setSuspended(resolved, true);
-      this.monitoringEngine.updateStatusNotification();
-      this.monitoringEngine.pushSseState();
+      this.ctx.updateStatusNotification();
+      this.ctx.pushSseState();
     }
     return {
       ok,
@@ -711,8 +707,8 @@ export class SessionCommands {
     const ok = resumeSession(resolved, this.ctx.log);
     if (ok) {
       this.ctx.state.setSuspended(resolved, false);
-      this.monitoringEngine.updateStatusNotification();
-      this.monitoringEngine.pushSseState();
+      this.ctx.updateStatusNotification();
+      this.ctx.pushSseState();
     }
     return {
       ok,
@@ -735,8 +731,8 @@ export class SessionCommands {
         suspended++;
       }
     }
-    this.monitoringEngine.updateStatusNotification();
-    this.monitoringEngine.pushSseState();
+    this.ctx.updateStatusNotification();
+    this.ctx.pushSseState();
     return {
       ok: true,
       data: `Suspended ${suspended} sessions (except '${resolved}')`,
@@ -755,8 +751,8 @@ export class SessionCommands {
         suspended++;
       }
     }
-    this.monitoringEngine.updateStatusNotification();
-    this.monitoringEngine.pushSseState();
+    this.ctx.updateStatusNotification();
+    this.ctx.pushSseState();
     return { ok: true, data: `Suspended ${suspended} sessions` };
   }
 
@@ -771,8 +767,8 @@ export class SessionCommands {
         resumed++;
       }
     }
-    this.monitoringEngine.updateStatusNotification();
-    this.monitoringEngine.pushSseState();
+    this.ctx.updateStatusNotification();
+    this.ctx.pushSseState();
     return { ok: true, data: `Resumed ${resumed} sessions` };
   }
 }

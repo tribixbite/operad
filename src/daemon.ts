@@ -336,6 +336,8 @@ export class Daemon {
       getAutoStopList: () => this.androidEngine.getAutoStopList(),
       toggleAutoStop: (pkg) => this.androidEngine.toggleAutoStop(pkg),
       invalidateAdbSerial: () => this.androidEngine.invalidateAdbSerial(),
+      pushSseState: () => this.monitoringEngine.pushSseState(),
+      updateStatusNotification: () => this.monitoringEngine.updateStatusNotification(),
     };
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
@@ -355,7 +357,7 @@ export class Daemon {
     this.monitoringEngine = new MonitoringEngine(ctx, this.memory, this.activity, this.battery, this.androidEngine);
     // SessionCommands holds all cmd* IPC/REST command handlers extracted from Daemon.
     // Constructed after MonitoringEngine since it needs it for SSE push on suspend/resume.
-    this.sessionCommands = new SessionCommands(ctx, this.monitoringEngine);
+    this.sessionCommands = new SessionCommands(ctx);
   }
 
   /**
