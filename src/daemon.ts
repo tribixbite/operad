@@ -96,6 +96,7 @@ import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
 import { PersistenceEngine } from "./persistence.js";
 import { ServerEngine } from "./server-engine.js";
+import { AndroidEngine } from "./android-engine.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -211,6 +212,7 @@ export class Daemon {
   private toolEngine!: ToolEngine;
   private persistenceEngine!: PersistenceEngine;
   private serverEngine!: ServerEngine;
+  private androidEngine!: AndroidEngine;
   private state: StateManager;
   private ipc: IpcServer;
   private budget: BudgetTracker;
@@ -234,7 +236,6 @@ export class Daemon {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private batteryTimer: ReturnType<typeof setInterval> | null = null;
-  private adbRetryTimer: ReturnType<typeof setInterval> | null = null;
   private registryFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** Pending auto-restart timers — tracked so shutdown() can cancel them */
   private restartTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -245,19 +246,9 @@ export class Daemon {
   private _prevSummaryContent = "";
   /** Last known conversation UUID per session — for delta detection */
   private lastConversationUuids = new Map<string, string>();
-  private adbSerial: string | null = null;
-  private adbSerialExpiry = 0;
-  /** Cached local IP for ADB self-identification */
-  private localIp: string | null = null;
-  private localIpExpiry = 0;
-  private static readonly LOCAL_IP_TTL_MS = 60_000;
   private running = false;
   /** Resolved when shutdown() completes — replaces 1s polling interval */
   private shutdownResolve: (() => void) | null = null;
-  /** Packages flagged for auto-stop on memory pressure */
-  private autoStopPkgs = new Set<string>();
-  private static readonly AUTOSTOP_PATH = join(homedir(), ".local", "share", "tmx", "autostop.json");
-
   constructor(configPath?: string) {
     this.config = loadConfig(configPath);
     this.log = new Logger(this.config.orchestrator.log_dir);
@@ -305,7 +296,7 @@ export class Daemon {
     this.registry = new Registry(registryPath);
 
     // Load auto-stop package list
-    this.loadAutoStopList();
+    this.androidEngine.loadAutoStopList();
 
     // Wire up IPC handler — delegates to serverEngine once it's constructed below.
     // Use a late-binding lambda so this.serverEngine is available after construction.
@@ -389,11 +380,11 @@ export class Daemon {
       ensureSocket: () => this.ensureSocket(),
       reloadAgents: () => this.reloadAgents(),
       resolveName: (input) => this.resolveName(input),
-      getAndroidApps: () => this.getAndroidApps(),
-      forceStopApp: (pkg) => this.forceStopApp(pkg),
-      getAutoStopList: () => this.getAutoStopList(),
-      toggleAutoStop: (pkg) => this.toggleAutoStop(pkg),
-      invalidateAdbSerial: () => { this.adbSerial = null; this.adbSerialExpiry = 0; },
+      getAndroidApps: () => this.androidEngine.getAndroidApps(),
+      forceStopApp: (pkg) => this.androidEngine.forceStopApp(pkg),
+      getAutoStopList: () => this.androidEngine.getAutoStopList(),
+      toggleAutoStop: (pkg) => this.androidEngine.toggleAutoStop(pkg),
+      invalidateAdbSerial: () => this.androidEngine.invalidateAdbSerial(),
     };
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
@@ -404,6 +395,8 @@ export class Daemon {
     // ServerEngine is the extraction target for HTTP/IPC/WS/SSE handler logic.
     // Receives AgentEngine + ToolEngine to dispatch WS client messages.
     this.serverEngine = new ServerEngine(ctx, this.agentEngine, this.toolEngine);
+    // AndroidEngine owns ADB serial/fix/phantom budget + auto-stop list + app mgmt.
+    this.androidEngine = new AndroidEngine(ctx);
   }
 
   /**
@@ -522,7 +515,7 @@ export class Daemon {
         this.log.info(`Waiting ${this.config.adb.boot_delay_s}s for wireless debugging to initialize`);
         await sleep(this.config.adb.boot_delay_s * 1000);
       }
-      await this.fixAdb();
+      await this.androidEngine.fixAdb();
     }
 
     // Step 2: Resolve which Claude sessions to start based on recency
@@ -596,10 +589,7 @@ export class Daemon {
       clearInterval(this.batteryTimer);
       this.batteryTimer = null;
     }
-    if (this.adbRetryTimer) {
-      clearInterval(this.adbRetryTimer);
-      this.adbRetryTimer = null;
-    }
+    this.androidEngine.stopRetryTimer();
     if (this.registryFlushTimer) {
       clearInterval(this.registryFlushTimer);
       this.registryFlushTimer = null;
@@ -1118,334 +1108,6 @@ export class Daemon {
     return null;
   }
 
-  // -- ADB helpers ------------------------------------------------------------
-
-  /** ADB serial cache TTL — re-resolve every 30s to handle reconnects */
-  private static readonly ADB_SERIAL_TTL_MS = 30_000;
-
-  /** Get local IP with caching (60s TTL) */
-  private getLocalIp(): string | null {
-    const now = Date.now();
-    if (this.localIp && now < this.localIpExpiry) return this.localIp;
-    this.localIp = detectPlatform().resolveLocalIp();
-    this.localIpExpiry = now + Daemon.LOCAL_IP_TTL_MS;
-    if (this.localIp) this.log.debug(`Local IP resolved: ${this.localIp}`);
-    return this.localIp;
-  }
-
-  /**
-   * Resolve the active ADB device serial (needed when multiple devices are listed).
-   * Prefers localhost/self-device connections over external phones.
-   * Caches with a short TTL so reconnects with new ports are picked up.
-   * Auto-disconnects stale offline/unauthorized entries to prevent confusion.
-   */
-  private resolveAdbSerial(): string | null {
-    const now = Date.now();
-    if (this.adbSerial && now < this.adbSerialExpiry) return this.adbSerial;
-    try {
-      const result = spawnSync(ADB_BIN, ["devices"], {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      if (result.status !== 0 || !result.stdout) return null;
-
-      const lines = result.stdout.split("\n").filter((l) => l.includes("\t"));
-      const online: string[] = [];
-      const stale: string[] = [];
-
-      for (const line of lines) {
-        const [serial, state] = line.split("\t");
-        if (state?.trim() === "device") {
-          online.push(serial.trim());
-        } else if (state?.trim() === "offline" || state?.trim() === "unauthorized") {
-          stale.push(serial.trim());
-        }
-      }
-
-      // Auto-disconnect stale entries to prevent "more than one device" errors
-      for (const serial of stale) {
-        this.log.debug(`Disconnecting stale ADB device: ${serial}`);
-        spawnSync(ADB_BIN, ["disconnect", serial], { timeout: 3000, stdio: "ignore" });
-      }
-
-      if (online.length === 0) {
-        this.adbSerial = null;
-        return null;
-      }
-
-      // Prefer localhost/self-device connections over external phones
-      if (online.length > 1) {
-        const localIp = this.getLocalIp();
-        const localhost = online.find((s) =>
-          s.startsWith("127.0.0.1:") ||
-          s.startsWith("localhost:") ||
-          (localIp && s.startsWith(`${localIp}:`))
-        );
-        if (localhost) {
-          this.log.debug(`Multiple ADB devices, preferring localhost: ${localhost}`);
-          this.adbSerial = localhost;
-        } else {
-          this.log.warn(`Multiple ADB devices, no localhost match — using ${online[0]}. ` +
-            `Devices: ${online.join(", ")}`);
-          this.adbSerial = online[0];
-        }
-      } else {
-        this.adbSerial = online[0];
-      }
-
-      this.adbSerialExpiry = now + Daemon.ADB_SERIAL_TTL_MS;
-      return this.adbSerial;
-    } catch (err) {
-      this.log.debug("resolveAdbSerial failed", { err: String(err) });
-      return null;
-    }
-  }
-
-  /** Build ADB shell args with serial selection for multi-device environments */
-  private adbShellArgs(...shellArgs: string[]): string[] {
-    const serial = this.resolveAdbSerial();
-    const args: string[] = [];
-    if (serial) args.push("-s", serial);
-    args.push("shell", ...shellArgs);
-    return args;
-  }
-
-  // -- ADB fix ----------------------------------------------------------------
-
-  /** Attempt ADB connection and apply phantom process killer fix */
-  private async fixAdb(): Promise<boolean> {
-    trace("adb:fix:start");
-    this.log.info("Attempting ADB connection for phantom process fix");
-
-    const { connect_script, connect_timeout_s, phantom_fix } = this.config.adb;
-
-    try {
-      const result = spawnSync("timeout", [String(connect_timeout_s), connect_script], {
-        encoding: "utf-8",
-        timeout: (connect_timeout_s + 5) * 1000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      if (result.status !== 0) {
-        this.log.warn("ADB connection failed", { stderr: result.stderr?.trim() });
-        this.state.setAdbFixed(false);
-        notify("operad boot", "ADB fix failed — processes may be killed", "operad-boot");
-
-        // Set up retry timer
-        this.startAdbRetryTimer();
-        return false;
-      }
-
-      this.log.info("ADB connected");
-      // Clear cached serial so it's re-resolved with the new connection
-      this.adbSerial = null;
-      this.adbSerialExpiry = 0;
-
-      if (phantom_fix) {
-        this.applyPhantomFix();
-      }
-
-      this.state.setAdbFixed(true);
-      return true;
-    } catch (err) {
-      this.log.error(`ADB fix error: ${err}`);
-      this.state.setAdbFixed(false);
-      this.startAdbRetryTimer();
-      return false;
-    }
-  }
-
-  /**
-   * Verify the resolved ADB device is this device (not an external phone).
-   * When only one device is connected, it must be this device — skip IP matching.
-   * IP matching is only needed when multiple devices are online to disambiguate.
-   */
-  private isLocalAdbDevice(): boolean {
-    const serial = this.resolveAdbSerial();
-    if (!serial) return false;
-
-    // Localhost connections are always local
-    if (serial.startsWith("127.0.0.1:") || serial.startsWith("localhost:")) return true;
-
-    // Count online devices to decide if IP matching is needed
-    try {
-      const result = spawnSync(ADB_BIN, ["devices"], {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const onlineCount = (result.stdout ?? "")
-        .split("\n")
-        .filter((l) => l.includes("\tdevice")).length;
-
-      // Single device: must be this device — no need for IP matching
-      if (onlineCount === 1) return true;
-
-      // Multiple devices: fall through to IP check
-    } catch { /* fall through to IP check */ }
-
-    // Check if serial IP matches local IP (multi-device disambiguation)
-    const localIp = this.getLocalIp();
-    if (localIp && serial.startsWith(`${localIp}:`)) return true;
-
-    // Serial doesn't match any local address — might be an external device
-    return false;
-  }
-
-  /**
-   * Apply Android 12+ process protection fixes via ADB.
-   * Mirrors ALL the protections from the old tasker/startup.sh:
-   * 1. Phantom process killer disable (device_config + settings)
-   * 2. Doze whitelist (deviceidle) for Termux + Edge
-   * 3. Active standby bucket for Termux + Edge
-   * 4. Background execution allow for Termux + Edge
-   */
-  private applyPhantomFix(): void {
-    // Safety check: only apply settings to this device, not external phones
-    if (!this.isLocalAdbDevice()) {
-      const serial = this.resolveAdbSerial();
-      this.log.warn(`Skipping phantom fix — ADB device '${serial}' may not be this device`);
-      return;
-    }
-
-    // 1. Phantom process killer fix
-    const phantomCmds = [
-      ["/system/bin/device_config", "put", "activity_manager", "max_phantom_processes", "2147483647"],
-      ["settings", "put", "global", "settings_enable_monitor_phantom_procs", "false"],
-    ];
-
-    // 2. Doze whitelist — prevent Android from suspending these apps
-    const dozeWhitelistPkgs = ["com.termux", "com.microsoft.emmx.canary"];
-
-    // 3. Active standby bucket — prevent throttling
-    const standbyPkgs = ["com.termux", "com.microsoft.emmx.canary"];
-
-    // 4. Background execution — allow running in background unconditionally
-    const bgPkgs = ["com.termux", "com.microsoft.emmx.canary"];
-
-    // Apply phantom process fixes
-    for (const cmd of phantomCmds) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs(...cmd), { timeout: 10_000, stdio: "ignore" });
-      } catch (err) {
-        this.log.warn(`Phantom fix command failed: ${cmd.join(" ")}`, { error: String(err) });
-      }
-    }
-
-    // Apply Doze whitelist
-    for (const pkg of dozeWhitelistPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("cmd", "deviceidle", "whitelist", `+${pkg}`), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch (err) {
-        this.log.warn(`Doze whitelist failed for ${pkg}`, { error: String(err) });
-      }
-    }
-
-    // Apply active standby bucket
-    for (const pkg of standbyPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("am", "set-standby-bucket", pkg, "active"), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch (err) {
-        this.log.warn(`Standby bucket failed for ${pkg}`, { error: String(err) });
-      }
-    }
-
-    // Allow background execution
-    for (const pkg of bgPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("cmd", "appops", "set", pkg, "RUN_ANY_IN_BACKGROUND", "allow"), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch (err) {
-        this.log.warn(`Background allow failed for ${pkg}`, { error: String(err) });
-      }
-    }
-
-    // 5. OOM score adjustment — make Termux less likely to be killed by LMK
-    // oom_score_adj ranges from -1000 (never kill) to 1000 (kill first).
-    // -200 is moderate — enough to survive pressure spikes without starving
-    // foreground apps. Logcat shows Termux main process already at adj=0
-    // (foreground), so this mainly protects against transient demotion.
-    try {
-      // Get Termux's main PID from the app process
-      const pidResult = spawnSync(ADB_BIN, this.adbShellArgs(
-        "sh", "-c", "pidof com.termux | head -1",
-      ), { encoding: "utf-8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
-      const termuxPid = pidResult.stdout?.trim();
-      if (termuxPid && /^\d+$/.test(termuxPid)) {
-        spawnSync(ADB_BIN, this.adbShellArgs(
-          "sh", "-c", `echo -200 > /proc/${termuxPid}/oom_score_adj`,
-        ), { timeout: 10_000, stdio: "ignore" });
-        this.log.info(`Set oom_score_adj=-200 for Termux PID ${termuxPid}`);
-      }
-    } catch (err) {
-      this.log.debug(`oom_score_adj failed (non-critical): ${err}`);
-    }
-
-    // 6. Prevent Android from classifying Termux as idle (which triggers restrictions)
-    for (const pkg of ["com.termux", "com.microsoft.emmx.canary"]) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("cmd", "activity", "set-inactive", pkg, "false"), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch {
-        // Non-critical — command may not exist on all Android versions
-      }
-    }
-
-    // 7. Lower LMK trigger level to reduce aggressive kills under memory pressure
-    try {
-      spawnSync(ADB_BIN, this.adbShellArgs("settings", "put", "global", "low_power_trigger_level", "1"), {
-        timeout: 10_000, stdio: "ignore",
-      });
-    } catch {
-      // Non-critical
-    }
-
-    // Re-enable Samsung sensor packages
-    const samsungPkgs = [
-      "com.samsung.android.ssco",
-      "com.samsung.android.mocca",
-      "com.samsung.android.camerasdkservice",
-    ];
-    for (const pkg of samsungPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("pm", "enable", pkg), { timeout: 10_000, stdio: "ignore" });
-      } catch {
-        // Non-critical
-      }
-    }
-
-    trace("adb:fix:complete");
-    this.log.info("Android process protection fixes applied (phantom + doze + standby + background + oom_adj + idle + lmk)");
-  }
-
-  /** Start a periodic ADB retry timer */
-  private startAdbRetryTimer(): void {
-    if (this.adbRetryTimer) return;
-    const intervalMs = this.config.adb.retry_interval_s * 1000;
-    this.adbRetryTimer = setInterval(async () => {
-      if (this.state.getState().adb_fixed) {
-        // Already fixed, stop retrying
-        if (this.adbRetryTimer) {
-          clearInterval(this.adbRetryTimer);
-          this.adbRetryTimer = null;
-        }
-        return;
-      }
-      this.log.info("Retrying ADB connection...");
-      const success = await this.fixAdb();
-      if (success && this.adbRetryTimer) {
-        clearInterval(this.adbRetryTimer);
-        this.adbRetryTimer = null;
-      }
-    }, intervalMs);
-  }
 
   // -- Health & auto-restart --------------------------------------------------
 
@@ -1644,7 +1306,7 @@ export class Daemon {
   private autoSuspendOnPressure(pressure: string): void {
     if (pressure === "critical" || pressure === "emergency") {
       // Force-stop flagged Android apps on memory pressure
-      this.autoStopFlaggedApps();
+      this.androidEngine.autoStopFlaggedApps();
 
       // Sort running, non-suspended sessions by RSS descending (biggest first)
       const candidates: Array<{ name: string; rss: number }> = [];
@@ -2822,249 +2484,6 @@ export class Daemon {
   }
 
 
-  /** Load auto-stop package list from disk */
-  private loadAutoStopList(): void {
-    try {
-      const raw = readFileSync(Daemon.AUTOSTOP_PATH, "utf-8");
-      const list = JSON.parse(raw);
-      if (Array.isArray(list)) {
-        this.autoStopPkgs = new Set(list.filter((s: unknown) => typeof s === "string"));
-      }
-    } catch {
-      // File doesn't exist or is invalid — start empty
-      this.autoStopPkgs = new Set();
-    }
-  }
-
-  /** Persist auto-stop package list to disk */
-  private saveAutoStopList(): void {
-    try {
-      writeFileSync(Daemon.AUTOSTOP_PATH, JSON.stringify([...this.autoStopPkgs], null, 2) + "\n");
-    } catch (err) {
-      this.log.warn("Failed to save autostop list", { error: String(err) });
-    }
-  }
-
-  /** Get auto-stop list for API */
-  private getAutoStopList(): { packages: string[] } {
-    return { packages: [...this.autoStopPkgs] };
-  }
-
-  /** Toggle a package in the auto-stop list */
-  private toggleAutoStop(pkg: string): { status: number; data: unknown } {
-    if (!pkg || !pkg.includes(".")) {
-      return { status: 400, data: { error: "Invalid package name" } };
-    }
-    if (Daemon.SYSTEM_PACKAGES.has(pkg)) {
-      return { status: 403, data: { error: `Cannot auto-stop system package: ${pkg}` } };
-    }
-    const enabled = !this.autoStopPkgs.has(pkg);
-    if (enabled) {
-      this.autoStopPkgs.add(pkg);
-    } else {
-      this.autoStopPkgs.delete(pkg);
-    }
-    this.saveAutoStopList();
-    this.log.info(`Auto-stop ${enabled ? "enabled" : "disabled"} for ${pkg}`);
-    return { status: 200, data: { pkg, autostop: enabled } };
-  }
-
-  /** Force-stop all auto-stop flagged apps (called during memory pressure) */
-  private autoStopFlaggedApps(): void {
-    if (this.autoStopPkgs.size === 0) return;
-    const stopped: string[] = [];
-    for (const pkg of this.autoStopPkgs) {
-      if (Daemon.SYSTEM_PACKAGES.has(pkg)) continue;
-      try {
-        const result = spawnSync(ADB_BIN, this.adbShellArgs("am", "force-stop", pkg), {
-          encoding: "utf-8",
-          timeout: 5000,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        if (result.status === 0) stopped.push(pkg);
-      } catch {
-        // Best-effort — skip failures
-      }
-    }
-    if (stopped.length > 0) {
-      const labels = stopped.map((p) => Daemon.APP_LABELS[p] || p);
-      this.log.info(`Auto-stopped ${labels.join(", ")} on memory pressure`);
-    }
-  }
-
-  // -- Android app management -------------------------------------------------
-
-  /** Well-known system packages that should not be force-stopped */
-  private static readonly SYSTEM_PACKAGES = new Set([
-    "system_server", "com.android.systemui", "com.google.android.gms.persistent",
-    "com.termux", "com.termux.api", "com.sec.android.app.launcher",
-    "com.android.phone", "com.android.providers.media",
-    "com.samsung.android.providers.media", "com.google.android.gms",
-    "com.android.bluetooth", "com.google.android.ext.services",
-    "com.google.android.providers.media.module", "android.process.acore",
-    "com.samsung.android.scs", "com.samsung.android.sead",
-    "com.samsung.android.scpm", "com.sec.android.sdhms",
-  ]);
-
-  /** Friendly display names for known packages */
-  private static readonly APP_LABELS: Record<string, string> = {
-    "com.microsoft.emmx.canary": "Edge Canary",
-    "com.microsoft.emmx": "Edge",
-    "com.android.chrome": "Chrome",
-    "com.discord": "Discord",
-    "com.Slack": "Slack",
-    "com.google.android.gm": "Gmail",
-    "com.google.android.apps.photos": "Photos",
-    "com.google.android.apps.chromecast.app": "Google Home",
-    "com.google.android.apps.maps": "Maps",
-    "com.google.android.apps.docs": "Drive",
-    "com.google.android.apps.youtube": "YouTube",
-    "com.google.android.apps.messaging": "Messages",
-    "com.google.android.calendar": "Calendar",
-    "com.google.android.googlequicksearchbox": "Google",
-    "com.google.android.gms": "Play Services",
-    "com.google.android.gms.persistent": "Play Services",
-    "com.ubercab.eats": "Uber Eats",
-    "com.samsung.android.app.spage": "Samsung Free",
-    "com.samsung.android.smartsuggestions": "Smart Suggest",
-    "com.samsung.android.incallui": "Phone",
-    "com.samsung.android.messaging": "Samsung Messages",
-    "com.samsung.android.spay": "Samsung Pay",
-    "com.sec.android.daemonapp": "Weather",
-    "com.sec.android.app.sbrowser": "Samsung Internet",
-    "net.slickdeals.android": "Slickdeals",
-    "dev.imranr.obtainium": "Obtainium",
-    "com.teslacoilsw.launcher": "Nova Launcher",
-    "com.sec.android.app.launcher": "One UI Home",
-    "com.android.systemui": "System UI",
-    "com.android.settings": "Settings",
-    "com.android.vending": "Play Store",
-    "com.termux": "Termux",
-    "com.termux.api": "Termux:API",
-    "tribixbite.cleverkeys": "CleverKeys",
-    "com.microsoft.appmanager": "Link to Windows",
-    "com.google.android.apps.nbu.files": "Files by Google",
-    "com.reddit.frontpage": "Reddit",
-    "io.homeassistant.companion.android": "Home Assistant",
-    "com.adguard.android.contentblocker": "AdGuard",
-    "com.samsung.android.app.smartcapture": "Smart Select",
-    "com.samsung.android.app.routines": "Routines",
-    "com.samsung.android.rubin.app": "Customization",
-    "com.samsung.android.app.moments": "Memories",
-    "com.samsung.android.ce": "Samsung Cloud",
-    "com.samsung.android.mdx": "Link to Windows",
-    "com.samsung.euicc": "SIM Manager",
-    "com.sec.imsservice": "IMS Service",
-    "com.sec.android.app.clockpackage": "Clock",
-    "com.samsung.cmh": "Connected Home",
-    "com.samsung.android.kmxservice": "Knox",
-    "com.samsung.android.stplatform": "SmartThings",
-    "com.samsung.android.service.stplatform": "SmartThings",
-    "com.google.android.gms.unstable": "Play Services",
-    "com.google.android.as.oss": "Private Compute",
-    "com.google.android.cellbroadcastreceiver": "Emergency Alerts",
-    "com.sec.android.app.chromecustomizations": "Chrome Custom",
-    "org.mopria.printplugin": "Print Service",
-    "com.samsung.android.samsungpositioning": "Location",
-    "com.google.android.providers.media.module": "Media Storage",
-  };
-
-  /**
-   * List Android apps via `adb shell ps`, grouped by base package.
-   * Merges sandboxed/privileged child processes into the parent total.
-   */
-  private getAndroidApps(): { pkg: string; label: string; rss_mb: number; system: boolean; autostop: boolean }[] {
-    try {
-      const result = spawnSync(ADB_BIN, this.adbShellArgs("ps", "-A", "-o", "PID,RSS,NAME"), {
-        encoding: "utf-8",
-        timeout: 8000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      if (result.status !== 0 || !result.stdout) {
-        this.log.warn("adb ps failed", {
-          status: result.status,
-          stderr: result.stderr?.trim().slice(0, 200),
-          hasStdout: !!result.stdout,
-          args: this.adbShellArgs("ps", "-A", "-o", "PID,RSS,NAME").join(" "),
-        });
-        return [];
-      }
-
-      // Aggregate RSS by base package name (strip :sandboxed_process*, :privileged_process*, etc.)
-      const pkgMap = new Map<string, number>();
-      for (const line of result.stdout.trim().split("\n")) {
-        const match = line.trim().match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
-        if (!match) continue;
-        const rssKb = parseInt(match[2], 10);
-        const rawName = match[3].trim();
-        if (rssKb < 1024) continue; // Skip < 1MB (aggregate later)
-
-        // Extract base package: "com.foo.bar:sandboxed_process0:..." → "com.foo.bar"
-        const basePkg = rawName.split(":")[0];
-        // Only include Android package names (at least 2 dots, e.g. com.foo.bar)
-        const dotCount = (basePkg.match(/\./g) || []).length;
-        if (dotCount < 2 && !Daemon.APP_LABELS[basePkg]) continue;
-        // Skip zygote/isolated processes — they're OS-level, not user apps
-        if (basePkg.endsWith("_zygote") || basePkg.startsWith("com.android.isolated")) continue;
-
-        pkgMap.set(basePkg, (pkgMap.get(basePkg) ?? 0) + rssKb);
-      }
-
-      const apps: { pkg: string; label: string; rss_mb: number; system: boolean; autostop: boolean }[] = [];
-      for (const [pkg, rssKb] of pkgMap) {
-        const rssMb = Math.round(rssKb / 1024);
-        if (rssMb < 50) continue; // Skip apps using < 50MB after aggregation
-        const system = Daemon.SYSTEM_PACKAGES.has(pkg);
-        // Derive a readable label: known name > last meaningful segment > raw package
-        const label = Daemon.APP_LABELS[pkg] ?? Daemon.deriveLabel(pkg);
-        apps.push({ pkg, label, rss_mb: rssMb, system, autostop: this.autoStopPkgs.has(pkg) });
-      }
-
-      apps.sort((a, b) => b.rss_mb - a.rss_mb);
-      return apps;
-    } catch (err) {
-      this.log.warn("getAndroidApps exception", { error: String(err) });
-      return [];
-    }
-  }
-
-  /** Derive a human-readable label from a package name */
-  private static deriveLabel(pkg: string): string {
-    const parts = pkg.split(".");
-    // Skip common prefixes: com, org, net, android, google, samsung, sec, app, apps
-    const skip = new Set(["com", "org", "net", "android", "google", "samsung", "sec", "app", "apps", "software"]);
-    const meaningful = parts.filter((p) => !skip.has(p) && p.length > 1);
-    // Capitalize the last meaningful segment
-    const name = meaningful.length > 0 ? meaningful[meaningful.length - 1] : parts[parts.length - 1];
-    return name.charAt(0).toUpperCase() + name.slice(1);
-  }
-
-  /** Force-stop an Android app via ADB */
-  private forceStopApp(pkg: string): { status: number; data: unknown } {
-    if (!pkg || !pkg.includes(".")) {
-      return { status: 400, data: { error: "Invalid package name" } };
-    }
-    if (Daemon.SYSTEM_PACKAGES.has(pkg)) {
-      return { status: 403, data: { error: `Cannot stop system package: ${pkg}` } };
-    }
-
-    try {
-      const result = spawnSync(ADB_BIN, this.adbShellArgs("am", "force-stop", pkg), {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      if (result.status !== 0) {
-        return { status: 500, data: { error: result.stderr?.trim() || "force-stop failed" } };
-      }
-      this.log.info(`Force-stopped ${pkg} via dashboard`);
-      return { status: 200, data: { ok: true, pkg } };
-    } catch (err) {
-      return { status: 500, data: { error: `Failed to stop ${pkg}: ${(err as Error).message}` } };
-    }
-  }
-
-  // -- ADB device management --------------------------------------------------
   // -- Cron -------------------------------------------------------------------
 
   /** Start crond if not already running */
