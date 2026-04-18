@@ -61,4 +61,11 @@ export interface OrchestratorContext {
    * Provided as a callback so AgentEngine avoids coupling to ServerEngine.
    */
   isAgentEnabled: (agentName: string) => boolean;
+  /**
+   * Resolve a session's working directory path from config or dynamic registry.
+   * Returns null if the session has no associated path.
+   * Exposed here so ServerEngine.handleWsMessage() can look up session paths
+   * for SDK attach/prompt operations without coupling to Daemon internals.
+   */
+  resolveSessionPath: (sessionName: string) => string | null;
 }

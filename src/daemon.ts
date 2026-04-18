@@ -31,11 +31,10 @@ import { BatteryMonitor } from "./battery.js";
 import { Registry, parseRecentProjects, findNamedSessions, deriveName, isValidName, nextSuffix } from "./registry.js";
 import type { RecentProject } from "./registry.js";
 import { DashboardServer } from "./http.js";
-import type { WsClientMessage } from "./http.js";
 import { TelemetrySinkServer } from "./telemetry-sink.js";
 import { SdkBridge } from "./sdk-bridge.js";
 import { MemoryDb, computeQuotaStatus } from "./memory-db.js";
-import { buildMemoryPrompt, saveMemoriesFromResponse } from "./memory-injector.js";
+import { saveMemoriesFromResponse } from "./memory-injector.js";
 import { loadAgents, toSdkAgentMap, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig } from "./agents.js";
 import { buildOodaContext, buildOodaPrompt, parseOodaResponse } from "./cognitive.js";
 import { ToolExecutor, type ToolContext, type ToolCategory } from "./tools.js";
@@ -338,6 +337,9 @@ export class Daemon {
         if (sw === false) return false;
         return true;
       },
+      // Exposed so ServerEngine.handleWsMessage can look up session paths for
+      // SDK attach/prompt operations without coupling to Daemon internals.
+      resolveSessionPath: (sessionName: string) => this.resolveSessionPath(sessionName),
     };
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
@@ -346,8 +348,8 @@ export class Daemon {
     // concerns incrementally as daemon.ts dependencies are disentangled.
     this.persistenceEngine = new PersistenceEngine(ctx);
     // ServerEngine is the extraction target for HTTP/IPC/WS/SSE handler logic.
-    // Initial shell — pure utility helpers extracted; full handler migration is incremental.
-    this.serverEngine = new ServerEngine(ctx);
+    // Receives AgentEngine + ToolEngine to dispatch WS client messages.
+    this.serverEngine = new ServerEngine(ctx, this.agentEngine, this.toolEngine);
   }
 
   /**
@@ -2540,9 +2542,9 @@ export class Daemon {
         },
       );
 
-      // Wire WS message handler for SDK/permission messages
+      // Wire WS message handler — dispatched via ServerEngine
       this.dashboard.setWsMessageHandler((ws, msg, rooms) => {
-        this.handleWsMessage(ws, msg).catch((err) => {
+        this.serverEngine.handleWsMessage(ws, msg).catch((err) => {
           ws.send(JSON.stringify({ type: "error", message: String(err) }));
         });
       });
@@ -2576,123 +2578,6 @@ export class Daemon {
       }).catch(() => {
         this.log.debug("SDK not installed — streaming features disabled");
       });
-    }
-  }
-
-  /** Handle incoming WS messages for SDK streaming and permissions */
-  private async handleWsMessage(ws: import("ws").WebSocket, msg: WsClientMessage): Promise<void> {
-    switch (msg.type) {
-      case "attach": {
-        if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
-        if (!this.switchboard.all || !this.switchboard.sdkBridge) throw new Error("SDK bridge disabled by switchboard");
-        const sessionName = msg.sessionName;
-        if (!sessionName) throw new Error("sessionName required");
-        // Resolve session path from config or registry
-        const sessionPath = this.resolveSessionPath(sessionName);
-        if (!sessionPath) throw new Error(`No path for session: ${sessionName}`);
-        const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : undefined;
-        const result = await this.sdkBridge.attach(sessionName, sessionId, sessionPath);
-        ws.send(JSON.stringify({ type: "attach_result", ...result }));
-        break;
-      }
-      case "prompt": {
-        if (!this.sdkBridge?.isAttached) throw new Error("No active SDK session");
-        const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
-        if (!prompt) throw new Error("prompt required");
-        // Inject memories if available and switchboard allows it
-        let fullPrompt = prompt;
-        if (this.switchboard.all && this.switchboard.memoryInjection && this.memoryDb && this.sdkBridge.activeSessionName) {
-          const sessionPath = this.resolveSessionPath(this.sdkBridge.activeSessionName);
-          if (sessionPath) {
-            const { prompt: memPrompt } = await buildMemoryPrompt(
-              this.memoryDb, sessionPath, 10, prompt,
-            );
-            if (memPrompt) fullPrompt = memPrompt + "\n\n" + prompt;
-          }
-        }
-        // Send prompt (non-blocking — messages stream via WS broadcast)
-        this.sdkBridge.send(fullPrompt, {
-          effort: typeof msg.effort === "string" ? msg.effort as any : undefined,
-          thinking: msg.thinking as any,
-        }).catch((err) => {
-          ws.send(JSON.stringify({ type: "error", message: String(err) }));
-        });
-        break;
-      }
-      case "permission_response": {
-        if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
-        const id = typeof msg.id === "string" ? msg.id : "";
-        const behavior = msg.behavior === "allow" ? "allow" : "deny";
-        const resolved = this.sdkBridge.resolvePermission(id, behavior);
-        ws.send(JSON.stringify({ type: "permission_resolved", id, resolved }));
-        break;
-      }
-      case "abort": {
-        if (this.sdkBridge?.isAttached) {
-          await this.sdkBridge.interrupt();
-        }
-        break;
-      }
-      case "detach": {
-        if (this.sdkBridge?.isAttached) {
-          await this.sdkBridge.detach();
-        }
-        break;
-      }
-      case "agent_run": {
-        // Trigger standalone agent run via WS
-        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
-        const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
-        if (!agentName || !prompt) throw new Error("agentName and prompt required");
-        this.agentEngine.handleStandaloneAgentRun(agentName, prompt).catch((err) => {
-          ws.send(JSON.stringify({ type: "error", message: String(err) }));
-        });
-        ws.send(JSON.stringify({ type: "agent_run_started", agentName }));
-        break;
-      }
-      case "switchboard_get": {
-        // Return current switchboard state to requesting client
-        ws.send(JSON.stringify(this.serverEngine.buildSwitchboardPayload()));
-        break;
-      }
-      case "switchboard_update": {
-        // Apply partial switchboard update from WS client
-        const patch = msg as unknown as Partial<Switchboard>;
-        delete (patch as any).type; // strip the WS message type field
-        this.updateSwitchboard(patch);
-        ws.send(JSON.stringify(this.serverEngine.buildSwitchboardPayload()));
-        break;
-      }
-      case "agent_chat": {
-        // Persistent conversation with a specific agent
-        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
-        const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
-        if (!agentName || !prompt) {
-          ws.send(JSON.stringify({ type: "error", message: "agentName and prompt required" }));
-          break;
-        }
-        this.agentEngine.handleAgentChat(agentName, prompt, ws).catch((err) => {
-          try {
-            ws.send(JSON.stringify({ type: "agent_chat_error", agentName, message: String(err) }));
-          } catch { /* ws may have closed during the run */ }
-        });
-        break;
-      }
-      case "agent_chat_history": {
-        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
-        const history = this.memoryDb?.getConversationHistory(agentName, 50) ?? [];
-        ws.send(JSON.stringify({ type: "agent_chat_history", agentName, messages: history }));
-        break;
-      }
-      case "agent_chat_clear": {
-        const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
-        const cleared = this.memoryDb?.clearConversation(agentName) ?? 0;
-        ws.send(JSON.stringify({ type: "agent_chat_cleared", agentName, cleared }));
-        break;
-      }
-      default:
-        // subscribe/unsubscribe/ping handled by http.ts directly
-        break;
     }
   }
 
