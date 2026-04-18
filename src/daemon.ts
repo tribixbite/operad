@@ -97,6 +97,7 @@ import { ToolEngine } from "./tool-engine.js";
 import { PersistenceEngine } from "./persistence.js";
 import { ServerEngine } from "./server-engine.js";
 import { AndroidEngine } from "./android-engine.js";
+import { resolveSessionName, resolveSessionPath as resolveSessionPathFn, resolveOpenTarget as resolveOpenTargetFn } from "./session-resolver.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -1662,44 +1663,7 @@ export class Daemon {
    * Supports exact, prefix, and substring matching.
    */
   private resolveOpenTarget(input: string): string | null {
-    const lower = input.toLowerCase();
-
-    // 1. Exact match against config session names
-    const configExact = this.config.sessions.find((s) => s.name === lower && s.path);
-    if (configExact?.path) return resolve(configExact.path);
-
-    // 2. Exact match against registry entries
-    const regExact = this.registry.find(lower);
-    if (regExact) return regExact.path;
-
-    // 3. Search recent projects from history.jsonl
-    const home = homedir();
-    const historyPath = join(home, ".claude", "history.jsonl");
-    const recent = parseRecentProjects(historyPath, 1000);
-
-    // Exact name match in recent
-    const recentExact = recent.find((p) => p.name === lower);
-    if (recentExact) return recentExact.path;
-
-    // 4. Prefix match across all sources
-    const allSources: Array<{ name: string; path: string }> = [
-      ...this.config.sessions.filter((s) => s.path).map((s) => ({ name: s.name, path: s.path! })),
-      ...this.registry.entries().map((e) => ({ name: e.name, path: e.path })),
-      ...recent,
-    ];
-
-    const prefixMatches = allSources.filter((s) => s.name.startsWith(lower));
-    if (prefixMatches.length === 1) return resolve(prefixMatches[0].path);
-
-    // 5. Substring match
-    const substringMatches = allSources.filter((s) => s.name.includes(lower));
-    if (substringMatches.length === 1) return resolve(substringMatches[0].path);
-
-    // Multiple matches — pick the first (most recent from history, or config order)
-    if (prefixMatches.length > 0) return resolve(prefixMatches[0].path);
-    if (substringMatches.length > 0) return resolve(substringMatches[0].path);
-
-    return null;
+    return resolveOpenTargetFn(this.config, this.registry, input);
   }
 
   /** Open command — register and start a new dynamic Claude session (supports multi-instance) */
@@ -2725,33 +2689,12 @@ export class Daemon {
 
   /** Resolve session path from config or registry */
   private resolveSessionPath(sessionName: string): string | null {
-    const resolved = this.resolveName(sessionName);
-    if (!resolved) return null;
-    const cfg = this.config.sessions.find((s: SessionConfig) => s.name === resolved);
-    if (cfg?.path) return cfg.path;
-    // Check registry for dynamically opened sessions
-    for (const entry of this.registry.entries()) {
-      if (entry.name === resolved && entry.path) return entry.path;
-    }
-    return null;
+    return resolveSessionPathFn(this.config, this.registry, sessionName);
   }
 
   /** Fuzzy-match a session name (prefix match) */
   private resolveName(input: string): string | null {
-    const names = this.config.sessions.map((s) => s.name);
-    // Also check registry entries not yet merged into config
-    for (const entry of this.registry.entries()) {
-      if (!names.includes(entry.name)) names.push(entry.name);
-    }
-    // Exact match
-    if (names.includes(input)) return input;
-    // Prefix match
-    const matches = names.filter((n) => n.startsWith(input));
-    if (matches.length === 1) return matches[0];
-    // Substring match
-    const substringMatches = names.filter((n) => n.includes(input));
-    if (substringMatches.length === 1) return substringMatches[0];
-    return null;
+    return resolveSessionName(this.config, this.registry, input);
   }
 }
 
