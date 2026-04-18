@@ -403,6 +403,18 @@ export class ServerEngine {
       case "create":
         return this.ctx.cmdCreate(cmd.name);
 
+      case "switchboard_reset": {
+        // Reset autonomous features (cognitive/OODA/mindMeld) to opt-in defaults.
+        // Keeps master switch, sdkBridge, memoryInjection, and per-agent overrides.
+        const updated = this.ctx.updateSwitchboard({
+          cognitive: false,
+          oodaAutoTrigger: false,
+          mindMeld: false,
+        });
+        this.ctx.broadcastWs("switchboard_update", updated);
+        return { ok: true, data: "Switchboard autonomous features reset to opt-in defaults." };
+      }
+
       default:
         return { ok: false, error: `Unknown command: ${(cmd as { cmd: string }).cmd}` };
     }

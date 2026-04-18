@@ -19,7 +19,7 @@ import { loadConfig } from "./config.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
 import { SessionController, type TmuxRunner } from "./session-controller.js";
-import { StateManager } from "./state.js";
+import { StateManager, migrateState } from "./state.js";
 import { IpcServer } from "./ipc.js";
 import { BudgetTracker } from "./budget.js";
 import { WakeLockManager } from "./wake.js";
@@ -275,6 +275,15 @@ export class Daemon {
       log: this.log,
     });
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
+    // Run state schema migrations on every boot — no-op if already at current version.
+    // migrateState mutates the raw state object; flush() persists the updated schemaVersion.
+    {
+      const { notice } = migrateState(this.state.getState());
+      if (notice) {
+        this.log.info(`[state migration] ${notice}`);
+        this.state.flush();
+      }
+    }
     // Restore switchboard from persisted state, fallback to defaults
     this.switchboard = { ...defaultSwitchboard(), ...this.state.getState().switchboard };
     this.budget = new BudgetTracker(this.config.orchestrator.process_budget, this.log);

@@ -328,6 +328,8 @@ export function defaultSwitchboard(): Switchboard {
 
 /** Full persisted state */
 export interface TmxState {
+  /** Schema version for forward-compat migrations (added v0.4.0) */
+  schemaVersion?: number;
   /** ISO timestamp of daemon start */
   daemon_start: string;
   /** Whether boot sequence has completed */
@@ -390,7 +392,8 @@ export type IpcCommand =
   | { cmd: "resume-all" }
   | { cmd: "register"; path?: string }
   | { cmd: "clone"; url: string; name?: string }
-  | { cmd: "create"; name: string };
+  | { cmd: "create"; name: string }
+  | { cmd: "switchboard_reset" };
 
 /** Response from daemon to CLI */
 export interface IpcResponse {

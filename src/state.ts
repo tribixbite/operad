@@ -11,6 +11,27 @@ import type { SessionState, SessionStatus, SystemMemorySnapshot, BatterySnapshot
 import { VALID_TRANSITIONS } from "./types.js";
 import type { Logger } from "./log.js";
 
+/**
+ * Migrate persisted state to the current schema version.
+ * Returns the mutated state and an optional user-visible notice string.
+ * Safe to call on every boot — no-op when already at current version.
+ */
+export function migrateState(state: any): { state: any; notice: string | null } {
+  const version: number = state.schemaVersion ?? 1;
+  if (version < 2) {
+    state.schemaVersion = 2;
+    return {
+      state,
+      notice: [
+        "operad v0.4.0: cognitive/OODA/mindMeld defaults changed to opt-in for fresh installs.",
+        "Your existing settings are preserved.",
+        "To apply new opt-in defaults explicitly: operad switchboard reset",
+      ].join("\n"),
+    };
+  }
+  return { state, notice: null };
+}
+
 /** Create a fresh session state entry */
 export function newSessionState(name: string): SessionState {
   return {

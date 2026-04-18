@@ -99,6 +99,9 @@ async function main(): Promise<void> {
     case "doctor":
       return runDoctor();
 
+    case "switchboard":
+      return runSwitchboard();
+
     // Commands that proxy to daemon via IPC
     case "status":
     case "start":
@@ -423,6 +426,39 @@ async function runDoctor(): Promise<void> {
   } else {
     console.log(`${GREEN}All checks passed.${RESET}\n`);
   }
+}
+
+/**
+ * Handle `operad switchboard <sub-command>`.
+ * Currently supports: reset
+ */
+async function runSwitchboard(): Promise<void> {
+  const sub = subArgs[0];
+  const configPath = getConfigFlag();
+  const client = getClient(configPath);
+
+  if (sub === "reset") {
+    const running = await client.isRunning();
+    if (!running) {
+      console.error(`${RED}Daemon not running. Start with: operad stream${RESET}`);
+      process.exit(1);
+    }
+    const resp = await client.send({ cmd: "switchboard_reset" }, 10_000);
+    if (resp.ok) {
+      console.log(`${GREEN}Switchboard autonomous features reset to opt-in defaults.${RESET}`);
+    } else {
+      console.error(`${RED}Failed: ${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  // No sub-command or unknown
+  console.log(`${BOLD}operad switchboard${RESET} — Manage autonomous subsystem settings
+
+${BOLD}SUB-COMMANDS${RESET}
+  ${CYAN}reset${RESET}  Reset cognitive/OODA/mindMeld to opt-in defaults (keeps sdkBridge, memoryInjection)
+`);
 }
 
 /** Print diagnostic info when daemon fails to start */
@@ -1089,6 +1125,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}upgrade${RESET}               Rebuild, shutdown daemon, let watchdog auto-restart
   ${CYAN}doctor${RESET}                Diagnose install issues and report fix steps
   ${CYAN}init${RESET}                  Generate a minimal config at ~/.config/operad/operad.toml
+  ${CYAN}switchboard reset${RESET}     Reset cognitive/OODA/mindMeld to opt-in defaults
 
 ${BOLD}OPTIONS${RESET}
   -c, --config <path>  Config file path (default: ~/.config/operad/operad.toml)
