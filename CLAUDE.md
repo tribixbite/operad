@@ -15,17 +15,19 @@ Cross-platform tmux session orchestrator for managing Claude Code sessions. npm 
 ```
 src/
   tmx.ts                  — CLI entry point (~1050 lines)
-  daemon.ts               — Main daemon lifecycle (~1790 lines — boot, session start/stop, shutdown, dashboard server)
-  agent-engine.ts         — OODA loop, agent dispatch, context builder, chat, executeOodaActions (~800 lines)
+  daemon.ts               — Main daemon lifecycle (~1490 lines — boot, session start/stop, shutdown, dashboard server)
+  agent-engine.ts         — OODA loop, agent dispatch, context builder, chat, executeOodaActions, reloadAgents, seedSpecializations, executeScheduledRun (~940 lines)
   tool-engine.ts          — ToolContext builder for agent tool dispatch (~70 lines)
   persistence.ts          — Memory consolidation + daily snapshots (~95 lines)
-  server-engine.ts        — REST/WS/IPC dispatch — ~103 REST routes, WS handler, IPC handler (~2550 lines)
-  session-controller.ts   — Session lifecycle state machine (unit-testable)
+  ws-handler.ts           — WebSocket message dispatch + switchboard payload builders (~245 lines)
+  ipc-handler.ts          — IPC command routing (~130 lines)
+  rest-handler.ts         — REST API handler — 103 routes + MCP/scripts/ADB helpers (~2230 lines)
+  session-controller.ts   — Session lifecycle state machine (unit-testable; future integration target)
   session-commands.ts     — cmd* handlers (status/start/stop/restart/go/send/tabs/open/close/etc.) (~780 lines)
-  session-resolver.ts     — Pure resolveSessionName/Path/OpenTarget helpers (~95 lines)
+  session-resolver.ts     — Pure resolveSessionName/Path/OpenTarget + resolveBootSessions helpers (~235 lines)
   android-engine.ts       — ADB serial resolution, phantom-process fix, auto-stop list, Android apps (~635 lines)
   monitoring-engine.ts    — Memory polling + shedding, battery polling, SSE push, status notification (~440 lines)
-  orchestrator-context.ts — Shared dependency interface for extracted engines (~170 lines)
+  orchestrator-context.ts — Shared dependency interface for extracted engines (~180 lines)
   config.ts               — TOML config parser with env var expansion
   session.ts              — Session lifecycle, tmux interaction (~780 lines)
   http.ts                 — Dashboard HTTP server + SSE + REST API
