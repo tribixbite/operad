@@ -7,7 +7,7 @@
  */
 
 /** Supported platform identifiers */
-export type PlatformId = "android" | "linux" | "darwin";
+export type PlatformId = "android" | "linux" | "darwin" | "windows";
 
 /** System memory snapshot from the OS */
 export interface SystemMemoryInfo {
@@ -200,7 +200,11 @@ let _platform: Platform | null = null;
 
 /**
  * Detect and return the platform singleton.
- * Detection: TERMUX_VERSION env → android, process.platform === "darwin" → darwin, else → linux.
+ * Detection order:
+ *   1. TERMUX_VERSION env → android
+ *   2. process.platform === "darwin" → darwin
+ *   3. process.platform === "win32" → windows
+ *   4. else → linux
  */
 export function detectPlatform(): Platform {
   if (_platform) return _platform;
@@ -210,6 +214,8 @@ export function detectPlatform(): Platform {
     id = "android";
   } else if (process.platform === "darwin") {
     id = "darwin";
+  } else if (process.platform === "win32") {
+    id = "windows";
   } else {
     id = "linux";
   }
@@ -224,6 +230,11 @@ export function detectPlatform(): Platform {
     case "darwin": {
       const { DarwinPlatform } = require("./darwin.js");
       _platform = new DarwinPlatform();
+      break;
+    }
+    case "windows": {
+      const { WindowsPlatform } = require("./windows.js");
+      _platform = new WindowsPlatform();
       break;
     }
     case "linux": {
