@@ -110,38 +110,6 @@ const CLAUDE_WORKING_PATTERN = /esc to interrupt/;
  * LD_PRELOAD (libtermux-exec) handles this rewriting inside tmux, but
  * scripts launched via TermuxService intents run in fresh shells without it.
  */
-const BASH_SHEBANG = process.env.PREFIX
-  ? `#!${process.env.PREFIX}/bin/bash`
-  : `#!/usr/bin/env bash`;
-
-const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
-/** Lines consisting entirely of box-drawing characters (U+2500–U+257F) */
-const BOX_DRAWING_RE = /^[\u2500-\u257f\s]+$/;
-/** Lines that are just a bare prompt character */
-const BARE_PROMPT_RE = /^\s*[❯>$%#]\s*$/;
-/** CC status bar / chrome lines to filter out */
-const CC_CHROME_RE = /esc to interrupt|bypass permissions|shift\+tab to cycle|press enter to send|\/help for help|to cycle|tab to navigate/i;
-
-/**
- * Clean raw tmux capture-pane output for display.
- * Strips ANSI escapes, box-drawing separator lines, bare prompts,
- * and CC status bar chrome. Returns last N meaningful content lines.
- */
-function cleanPaneOutput(raw: string, maxLines = 3): string {
-  const stripped = raw.replace(ANSI_RE, "");
-  const lines = stripped.split("\n");
-  const meaningful: string[] = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    if (BOX_DRAWING_RE.test(trimmed)) continue;
-    if (BARE_PROMPT_RE.test(trimmed)) continue;
-    if (CC_CHROME_RE.test(trimmed)) continue;
-    meaningful.push(line);
-  }
-  return meaningful.slice(-maxLines).join("\n");
-}
-
 /** Promise-based sleep */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -165,9 +133,6 @@ function trace(msg: string): void {
   }
 }
 
-/** Resolve ADB binary path via platform abstraction */
-const ADB_BIN = detectPlatform().resolveAdbPath() ?? "adb";
-
 /**
  * Send a notification via platform abstraction (non-blocking).
  * Pass an id to update an existing notification in place (prevents spam).
@@ -184,24 +149,6 @@ function notifyWithArgs(args: string[]): void {
 /** Remove a notification by ID via platform (non-blocking) */
 function removeNotification(id: string): void {
   detectPlatform().removeNotification(id);
-}
-
-/** Chunk text into segments of approximately maxChars, splitting on paragraph/newline boundaries */
-function chunkText(text: string, maxChars = 2000): string[] {
-  const chunks: string[] = [];
-  const paragraphs = text.split(/\n\n+/);
-  let current = "";
-
-  for (const para of paragraphs) {
-    if (current.length + para.length + 2 > maxChars && current.length > 0) {
-      chunks.push(current.trim());
-      current = "";
-    }
-    current += (current ? "\n\n" : "") + para;
-  }
-  if (current.trim()) chunks.push(current.trim());
-
-  return chunks;
 }
 
 export class Daemon {
@@ -1768,18 +1715,4 @@ export class Daemon {
   private resolveName(input: string): string | null {
     return resolveSessionName(this.config, this.registry, input);
   }
-}
-
-/** Format uptime as a human-readable string (e.g., "2h 15m") */
-function formatUptime(start: Date): string {
-  const ms = Date.now() - start.getTime();
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (days > 0) return `${days}d ${hours % 24}h`;
-  if (hours > 0) return `${hours}h ${minutes % 60}m`;
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-  return `${seconds}s`;
 }
