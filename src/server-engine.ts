@@ -73,6 +73,10 @@ export class ServerEngine {
   isAgentEnabled(agentName: string): boolean {
     const sb = this.ctx.switchboard;
     if (!sb.all) return false;
+    // Agent's own enabled flag must be set
+    const agentConf = this.ctx.agentConfigs.find((a) => a.name === agentName);
+    if (!agentConf || !agentConf.enabled) return false;
+    // Per-agent switchboard override (default: follow agent.enabled)
     const sw = sb.agents[agentName];
     if (sw === false) return false;
     return true;

@@ -2641,15 +2641,15 @@ export class Daemon {
       }
       case "switchboard_get": {
         // Return current switchboard state to requesting client
-        ws.send(JSON.stringify({ type: "switchboard_update", ...this.switchboard }));
+        ws.send(JSON.stringify(this.serverEngine.buildSwitchboardPayload()));
         break;
       }
       case "switchboard_update": {
         // Apply partial switchboard update from WS client
         const patch = msg as unknown as Partial<Switchboard>;
         delete (patch as any).type; // strip the WS message type field
-        const updated = this.updateSwitchboard(patch);
-        ws.send(JSON.stringify({ type: "switchboard_update", ...updated }));
+        this.updateSwitchboard(patch);
+        ws.send(JSON.stringify(this.serverEngine.buildSwitchboardPayload()));
         break;
       }
       case "agent_chat": {
@@ -2716,17 +2716,6 @@ export class Daemon {
     return this.switchboard;
   }
 
-  /** Check if a specific agent is enabled (agent.enabled AND switchboard allows it) */
-  private isAgentEnabled(agentName: string): boolean {
-    if (!this.switchboard.all) return false;
-    const agentConf = this.agentConfigs.find((a) => a.name === agentName);
-    if (!agentConf || !agentConf.enabled) return false;
-    // Per-agent switchboard override (default: follow agent.enabled)
-    const sw = this.switchboard.agents[agentName];
-    if (sw === false) return false;
-    return true;
-  }
-
   /** Broadcast a switchboard/system event to all connected WS clients */
   private broadcastSwitchboard(type: string, data: unknown): void {
     if (!this.dashboard) return;
@@ -2750,7 +2739,7 @@ export class Daemon {
     }
 
     // Apply switchboard overrides: master switch + per-agent toggles
-    const enabledAgents = this.agentConfigs.filter((a) => this.isAgentEnabled(a.name));
+    const enabledAgents = this.agentConfigs.filter((a) => this.serverEngine.isAgentEnabled(a.name));
     if (this.sdkBridge) {
       this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
     }
@@ -2794,7 +2783,7 @@ export class Daemon {
 
     const agent = this.agentConfigs.find((a) => a.name === agentName);
     if (!agent) throw new Error(`Agent not found: ${agentName}`);
-    if (!this.isAgentEnabled(agentName)) throw new Error(`Agent is disabled: ${agentName}`);
+    if (!this.serverEngine.isAgentEnabled(agentName)) throw new Error(`Agent is disabled: ${agentName}`);
 
     // Resolve cwd: use first session path or home directory
     const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
@@ -3260,7 +3249,7 @@ export class Daemon {
         this.log.warn(`Roundtable: agent "${agentName}" not found, skipping`);
         continue;
       }
-      if (!this.isAgentEnabled(agentName)) {
+      if (!this.serverEngine.isAgentEnabled(agentName)) {
         this.log.warn(`Roundtable: agent "${agentName}" disabled, skipping`);
         continue;
       }
