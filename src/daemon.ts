@@ -92,7 +92,9 @@ import {
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
 import { PersistenceEngine } from "./persistence.js";
-import { ServerEngine } from "./server-engine.js";
+import { WsHandler } from "./ws-handler.js";
+import { IpcHandler } from "./ipc-handler.js";
+import { RestHandler } from "./rest-handler.js";
 import { AndroidEngine } from "./android-engine.js";
 import { MonitoringEngine } from "./monitoring-engine.js";
 import { SessionCommands } from "./session-commands.js";
@@ -158,7 +160,9 @@ export class Daemon {
   private agentEngine!: AgentEngine;
   private toolEngine!: ToolEngine;
   private persistenceEngine!: PersistenceEngine;
-  private serverEngine!: ServerEngine;
+  private wsHandler!: WsHandler;
+  private ipcHandler!: IpcHandler;
+  private restHandler!: RestHandler;
   private androidEngine!: AndroidEngine;
   private monitoringEngine!: MonitoringEngine;
   private sessionCommands!: SessionCommands;
@@ -241,11 +245,11 @@ export class Daemon {
     // Load auto-stop package list
     this.androidEngine.loadAutoStopList();
 
-    // Wire up IPC handler — delegates to serverEngine once it's constructed below.
-    // Use a late-binding lambda so this.serverEngine is available after construction.
+    // Wire up IPC handler — delegates to ipcHandler once it's constructed below.
+    // Use a late-binding lambda so this.ipcHandler is available after construction.
     this.ipc = new IpcServer(
       this.config.orchestrator.socket,
-      (cmd) => this.serverEngine.handleIpcCommand(cmd),
+      (cmd) => this.ipcHandler.handleIpcCommand(cmd),
       this.log,
     );
 
@@ -342,9 +346,10 @@ export class Daemon {
     // PersistenceEngine owns daily snapshots and will absorb more persistence
     // concerns incrementally as daemon.ts dependencies are disentangled.
     this.persistenceEngine = new PersistenceEngine(ctx);
-    // ServerEngine is the extraction target for HTTP/IPC/WS/SSE handler logic.
-    // Receives AgentEngine + ToolEngine to dispatch WS client messages.
-    this.serverEngine = new ServerEngine(ctx, this.agentEngine, this.toolEngine);
+    // Transport handlers split by responsibility (WS / IPC / REST).
+    this.wsHandler = new WsHandler(ctx, this.agentEngine);
+    this.ipcHandler = new IpcHandler(ctx);
+    this.restHandler = new RestHandler(ctx, this.agentEngine, this.toolEngine);
     // AndroidEngine owns ADB serial/fix/phantom budget + auto-stop list + app mgmt.
     this.androidEngine = new AndroidEngine(ctx);
     // MonitoringEngine owns memory/battery polling, SSE push, conversation deltas,
@@ -1082,7 +1087,7 @@ export class Daemon {
       // Re-create the IPC server with the same handler
       this.ipc = new IpcServer(
         socketPath,
-        (cmd) => this.serverEngine.handleIpcCommand(cmd),
+        (cmd) => this.ipcHandler.handleIpcCommand(cmd),
         this.log,
       );
       try {
@@ -1325,7 +1330,7 @@ export class Daemon {
     this.dashboard = new DashboardServer(
       port,
       staticDir,
-      (method, path, body) => this.serverEngine.handleDashboardApi(method, path, body),
+      (method, path, body) => this.restHandler.handleDashboardApi(method, path, body),
       this.log,
     );
 
@@ -1430,9 +1435,9 @@ export class Daemon {
         },
       );
 
-      // Wire WS message handler — dispatched via ServerEngine
+      // Wire WS message handler — dispatched via WsHandler
       this.dashboard.setWsMessageHandler((ws, msg, rooms) => {
-        this.serverEngine.handleWsMessage(ws, msg).catch((err) => {
+        this.wsHandler.handleWsMessage(ws, msg).catch((err) => {
           ws.send(JSON.stringify({ type: "error", message: String(err) }));
         });
       });
@@ -1523,7 +1528,7 @@ export class Daemon {
     }
 
     // Apply switchboard overrides: master switch + per-agent toggles
-    const enabledAgents = this.agentConfigs.filter((a) => this.serverEngine.isAgentEnabled(a.name));
+    const enabledAgents = this.agentConfigs.filter((a) => this.wsHandler.isAgentEnabled(a.name));
     if (this.sdkBridge) {
       this.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
     }
