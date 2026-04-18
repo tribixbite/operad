@@ -298,10 +298,11 @@ export class Daemon {
     // Load auto-stop package list
     this.loadAutoStopList();
 
-    // Wire up IPC handler
+    // Wire up IPC handler — delegates to serverEngine once it's constructed below.
+    // Use a late-binding lambda so this.serverEngine is available after construction.
     this.ipc = new IpcServer(
       this.config.orchestrator.socket,
-      (cmd) => this.handleIpcCommand(cmd),
+      (cmd) => this.serverEngine.handleIpcCommand(cmd),
       this.log,
     );
 
@@ -340,6 +341,38 @@ export class Daemon {
       // Exposed so ServerEngine.handleWsMessage can look up session paths for
       // SDK attach/prompt operations without coupling to Daemon internals.
       resolveSessionPath: (sessionName: string) => this.resolveSessionPath(sessionName),
+      // -- IPC command callbacks (for ServerEngine.handleIpcCommand) -----------
+      // Shared references for non-method state accessed by IPC commands
+      registry: this.registry,
+      budget: this.budget,
+      wake: this.wake,
+      systemMemory: this.memory,
+      adoptedPids: this.adoptedPids,
+      // Lifecycle callbacks for stream/shutdown cases handled inline in ServerEngine
+      boot: () => this.boot(),
+      shutdown: (kill) => this.shutdown(kill),
+      // cmd* delegates — each wraps the corresponding Daemon private method so the
+      // REST API in daemon.ts and the IPC dispatch in ServerEngine share one impl.
+      cmdStatus: (name) => this.cmdStatus(name),
+      cmdStart: (name) => this.cmdStart(name),
+      cmdStop: (name) => this.cmdStop(name),
+      cmdRestart: (name) => this.cmdRestart(name),
+      cmdHealth: () => this.cmdHealth(),
+      cmdMemory: () => this.cmdMemory(),
+      cmdGo: (name) => this.cmdGo(name),
+      cmdSend: (name, text) => this.cmdSend(name, text),
+      cmdTabs: (names) => this.cmdTabs(names),
+      cmdOpen: (path, name, autoGo, priority) => this.cmdOpen(path, name, autoGo, priority),
+      cmdClose: (name) => this.cmdClose(name),
+      cmdRecent: (count) => this.cmdRecent(count),
+      cmdSuspend: (name) => this.cmdSuspend(name),
+      cmdResume: (name) => this.cmdResume(name),
+      cmdSuspendOthers: (name) => this.cmdSuspendOthers(name),
+      cmdSuspendAll: () => this.cmdSuspendAll(),
+      cmdResumeAll: () => this.cmdResumeAll(),
+      cmdRegister: (scanPath) => this.cmdRegister(scanPath),
+      cmdClone: (url, name) => this.cmdClone(url, name),
+      cmdCreate: (name) => this.cmdCreate(name),
     };
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
@@ -1416,7 +1449,7 @@ export class Daemon {
       // Re-create the IPC server with the same handler
       this.ipc = new IpcServer(
         socketPath,
-        (cmd) => this.handleIpcCommand(cmd),
+        (cmd) => this.serverEngine.handleIpcCommand(cmd),
         this.log,
       );
       try {
@@ -5492,91 +5525,6 @@ export class Daemon {
         this.log.error(`Config reload failed: ${err}`);
       }
     });
-  }
-
-  // -- IPC command handler ----------------------------------------------------
-
-  /** Handle an IPC command from the CLI */
-  private async handleIpcCommand(cmd: IpcCommand): Promise<IpcResponse> {
-    trace(`ipc:${cmd.cmd}${(cmd as { name?: string }).name ? `:${(cmd as { name?: string }).name}` : ""}`);
-    switch (cmd.cmd) {
-      case "status":
-        return this.cmdStatus(cmd.name);
-
-      case "start":
-        return this.cmdStart(cmd.name);
-
-      case "stop":
-        return this.cmdStop(cmd.name);
-
-      case "restart":
-        return this.cmdRestart(cmd.name);
-
-      case "health":
-        return this.cmdHealth();
-
-      case "stream":
-      case "boot": // backwards compat alias
-        // Run boot async and respond immediately
-        this.boot().catch((err) => this.log.error(`Boot failed: ${err}`));
-        return { ok: true, data: "Stream sequence started" };
-
-      case "shutdown":
-        // Run shutdown async and respond before exiting
-        setTimeout(() => this.shutdown(cmd.kill).then(() => process.exit(0)), 100);
-        return { ok: true, data: "Shutdown initiated" };
-
-      case "go":
-        return this.cmdGo(cmd.name);
-
-      case "send":
-        return this.cmdSend(cmd.name, cmd.text);
-
-      case "tabs":
-        return this.cmdTabs(cmd.names);
-
-      case "config":
-        return { ok: true, data: this.config };
-
-      case "memory":
-        return this.cmdMemory();
-
-      case "open":
-        return this.cmdOpen(cmd.path, cmd.name, cmd.auto_go, cmd.priority);
-
-      case "close":
-        return this.cmdClose(cmd.name);
-
-      case "recent":
-        return this.cmdRecent(cmd.count);
-
-      case "suspend":
-        return this.cmdSuspend(cmd.name);
-
-      case "resume":
-        return this.cmdResume(cmd.name);
-
-      case "suspend-others":
-        return this.cmdSuspendOthers(cmd.name);
-
-      case "suspend-all":
-        return this.cmdSuspendAll();
-
-      case "resume-all":
-        return this.cmdResumeAll();
-
-      case "register":
-        return this.cmdRegister(cmd.path);
-
-      case "clone":
-        return this.cmdClone(cmd.url, cmd.name);
-
-      case "create":
-        return this.cmdCreate(cmd.name);
-
-      default:
-        return { ok: false, error: `Unknown command: ${(cmd as { cmd: string }).cmd}` };
-    }
   }
 
   /** Status command — return session states and daemon info */

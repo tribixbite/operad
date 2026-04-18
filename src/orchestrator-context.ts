@@ -7,6 +7,10 @@ import type { Logger } from "./log.js";
 import type { ToolExecutor } from "./tools.js";
 import type { ToolEngine } from "./tool-engine.js";
 import type { ScheduleInput } from "./schedule.js";
+import type { BudgetTracker } from "./budget.js";
+import type { WakeLockManager } from "./wake.js";
+import type { MemoryMonitor } from "./memory.js";
+import type { Registry } from "./registry.js";
 
 /**
  * Shared dependency container passed to extracted subsystem engines.
@@ -68,4 +72,48 @@ export interface OrchestratorContext {
    * for SDK attach/prompt operations without coupling to Daemon internals.
    */
   resolveSessionPath: (sessionName: string) => string | null;
+
+  // -- IPC command callbacks (for ServerEngine.handleIpcCommand) ---------------
+  //
+  // Each callback wraps a Daemon cmd* method so ServerEngine can dispatch IPC
+  // commands without coupling to Daemon internals. The cmd* methods remain in
+  // Daemon because the REST API handler also calls them directly.
+
+  /** Dynamic session registry — shared reference, mutations are visible system-wide */
+  registry: Registry;
+  /** Android phantom process budget tracker */
+  budget: BudgetTracker;
+  /** Wake lock manager */
+  wake: WakeLockManager;
+  /** System memory monitor */
+  systemMemory: MemoryMonitor;
+  /** Map of session name → adopted PID for sessions found on daemon start */
+  adoptedPids: Map<string, number>;
+
+  /** Trigger the full boot sequence (async — fire and forget in IPC handler) */
+  boot: () => Promise<void>;
+  /** Initiate daemon shutdown; exits the process when complete */
+  shutdown: (kill?: boolean) => Promise<void>;
+
+  // cmd* delegates — one per IPC command case
+  cmdStatus: (name?: string) => import("./types.js").IpcResponse;
+  cmdStart: (name?: string) => Promise<import("./types.js").IpcResponse>;
+  cmdStop: (name?: string) => Promise<import("./types.js").IpcResponse>;
+  cmdRestart: (name?: string) => Promise<import("./types.js").IpcResponse>;
+  cmdHealth: () => import("./types.js").IpcResponse;
+  cmdMemory: () => import("./types.js").IpcResponse;
+  cmdGo: (name: string) => Promise<import("./types.js").IpcResponse>;
+  cmdSend: (name: string, text: string) => import("./types.js").IpcResponse;
+  cmdTabs: (names?: string[]) => import("./types.js").IpcResponse;
+  cmdOpen: (path: string, name?: string, autoGo?: boolean, priority?: number) => Promise<import("./types.js").IpcResponse>;
+  cmdClose: (name: string) => Promise<import("./types.js").IpcResponse>;
+  cmdRecent: (count?: number) => import("./types.js").IpcResponse;
+  cmdSuspend: (name: string) => import("./types.js").IpcResponse;
+  cmdResume: (name: string) => import("./types.js").IpcResponse;
+  cmdSuspendOthers: (name: string) => import("./types.js").IpcResponse;
+  cmdSuspendAll: () => import("./types.js").IpcResponse;
+  cmdResumeAll: () => import("./types.js").IpcResponse;
+  cmdRegister: (scanPath?: string) => import("./types.js").IpcResponse;
+  cmdClone: (url: string, name?: string) => import("./types.js").IpcResponse;
+  cmdCreate: (name: string) => import("./types.js").IpcResponse;
 }
