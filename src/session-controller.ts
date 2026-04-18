@@ -118,6 +118,12 @@ export class SessionController {
     if (this.opts.restartDelayMs > 0) {
       await new Promise(r => setTimeout(r, this.opts.restartDelayMs));
     }
-    return this.start(name, config);
+    const afterStart = await this.start(name, config);
+    // Reset restartCount to 0 after a successful restart so that future failures
+    // don't erroneously count past recoveries against the max restarts limit.
+    if (afterStart.status === "running") {
+      return this.transition(name, "running", { restartCount: 0 });
+    }
+    return afterStart;
   }
 }

@@ -60,7 +60,15 @@ describe("SessionController", () => {
       await ctrl.start("app", makeConfig("app"));
       const state = await ctrl.handleHealthFailure("app", makeConfig("app"));
       expect(state.status).toBe("running");
-      expect(ctrl.getState("app")?.restartCount).toBe(1);
+      // restartCount resets to 0 after a successful restart
+      expect(ctrl.getState("app")?.restartCount).toBe(0);
+    });
+
+    test("restartCount resets to 0 after successful restart", async () => {
+      const ctrl = new SessionController({ tmuxRunner: okRunner, healthChecker: healthyChecker, log, restartDelayMs: 0 });
+      await ctrl.start("app", makeConfig("app"));
+      await ctrl.handleHealthFailure("app", makeConfig("app"));
+      expect(ctrl.getState("app")?.restartCount).toBe(0);
     });
 
     test("exceeds max_restarts → failed", async () => {
