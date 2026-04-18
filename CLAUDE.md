@@ -15,13 +15,17 @@ Cross-platform tmux session orchestrator for managing Claude Code sessions. npm 
 ```
 src/
   tmx.ts                  — CLI entry point (~1050 lines)
-  daemon.ts               — Main daemon lifecycle (~3340 lines — session boot, health, watchdog, memory/battery handlers)
+  daemon.ts               — Main daemon lifecycle (~1790 lines — boot, session start/stop, shutdown, dashboard server)
   agent-engine.ts         — OODA loop, agent dispatch, context builder, chat, executeOodaActions (~800 lines)
   tool-engine.ts          — ToolContext builder for agent tool dispatch (~70 lines)
   persistence.ts          — Memory consolidation + daily snapshots (~95 lines)
-  server-engine.ts        — REST/WS/IPC dispatch — ~103 REST routes, WS handler, IPC handler (~2540 lines)
-  session-controller.ts   — Session lifecycle state machine (extracted, unit-testable)
-  orchestrator-context.ts — Shared dependency interface for extracted engines (~150 lines)
+  server-engine.ts        — REST/WS/IPC dispatch — ~103 REST routes, WS handler, IPC handler (~2550 lines)
+  session-controller.ts   — Session lifecycle state machine (unit-testable)
+  session-commands.ts     — cmd* handlers (status/start/stop/restart/go/send/tabs/open/close/etc.) (~780 lines)
+  session-resolver.ts     — Pure resolveSessionName/Path/OpenTarget helpers (~95 lines)
+  android-engine.ts       — ADB serial resolution, phantom-process fix, auto-stop list, Android apps (~635 lines)
+  monitoring-engine.ts    — Memory polling + shedding, battery polling, SSE push, status notification (~440 lines)
+  orchestrator-context.ts — Shared dependency interface for extracted engines (~170 lines)
   config.ts               — TOML config parser with env var expansion
   session.ts              — Session lifecycle, tmux interaction (~780 lines)
   http.ts                 — Dashboard HTTP server + SSE + REST API
