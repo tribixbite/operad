@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
 - Full REST/SSE/IPC API documentation (`docs/api.md`)
 - Full config reference (`docs/config.md`)
 - `OrchestratorContext` + engine scaffolding (AgentEngine, ToolEngine, PersistenceEngine, ServerEngine)
+- Windows platform support (experimental) — `WindowsPlatform` using `%LOCALAPPDATA%\operad` for state/logs/socket; process info via `tasklist`; battery via WMI; wake lock and phantom budget stubbed; requires MSYS2 tmux or WSL
+- Cross-platform audit — no POSIX leaks found outside `src/platform/`; `termux-battery-status` call in `doctor.ts` is correctly guarded behind `platformId === "android"`
 
 ### Changed
 - **BREAKING DEFAULT**: Agentic features (cognitive, oodaAutoTrigger, mindMeld) now default off on fresh installs
