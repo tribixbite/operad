@@ -149,6 +149,24 @@ function pidAliveCheck(sessionName: string, pid: number, startMs: number): Healt
 }
 
 /**
+ * Run a single health check for a session by config — used by SessionController.
+ * Derives the appropriate HealthCheckConfig from the session config (falling back
+ * to tmux_alive if no health config is specified), then delegates to checkSessionHealth.
+ */
+export async function checkSingleSessionHealth(
+  sessionName: string,
+  config: SessionConfig,
+): Promise<{ healthy: boolean; reason?: string }> {
+  // Derive health check config: session-level override, or tmux_alive fallback
+  const healthConfig: HealthCheckConfig = config.health ?? {
+    check: "tmux_alive",
+    unhealthy_threshold: 2,
+  };
+  const result = checkSessionHealth(sessionName, healthConfig, { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as any);
+  return { healthy: result.healthy, reason: result.message };
+}
+
+/**
  * Run a full health sweep across all running/degraded sessions.
  * Updates state and returns results.
  * @param adoptedPids Map of session name → bare PID for non-tmux sessions

@@ -24,7 +24,7 @@ import { IpcServer } from "./ipc.js";
 import { BudgetTracker } from "./budget.js";
 import { WakeLockManager } from "./wake.js";
 import { computeStartupOrder, computeShutdownOrder } from "./deps.js";
-import { runHealthSweep } from "./health.js";
+import { runHealthSweep, checkSingleSessionHealth } from "./health.js";
 import { MemoryMonitor } from "./memory.js";
 import { ActivityDetector } from "./activity.js";
 import { BatteryMonitor } from "./battery.js";
@@ -271,7 +271,7 @@ export class Daemon {
     };
     this.sessionController = new SessionController({
       tmuxRunner,
-      healthChecker: async () => ({ healthy: true }),
+      healthChecker: async (name, config) => checkSingleSessionHealth(name, config),
       log: this.log,
     });
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
