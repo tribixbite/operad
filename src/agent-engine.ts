@@ -4,6 +4,7 @@ import {
   buildOodaContext,
   buildOodaPrompt,
   parseOodaResponse,
+  type OodaAction,
 } from "./cognitive.js";
 import { toSdkAgentMap } from "./agents.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
@@ -17,7 +18,20 @@ import type WebSocket from "ws";
  * the injection point. Methods are added as daemon.ts logic is moved over.
  */
 export class AgentEngine {
+  /** Timer handle for the next scheduled OODA run (set by schedule action blocks). */
+  private scheduledOodaTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(private ctx: OrchestratorContext) {}
+
+  /**
+   * Clear any pending scheduled OODA timer. Called during daemon shutdown.
+   */
+  clearScheduledOodaTimer(): void {
+    if (this.scheduledOodaTimer) {
+      clearTimeout(this.scheduledOodaTimer);
+      this.scheduledOodaTimer = null;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // OODA cycle methods
@@ -144,7 +158,7 @@ export class AgentEngine {
         const actions = parseOodaResponse(result.responseText);
         if (actions.length > 0) {
           log.info(`OODA: parsed ${actions.length} actions from response`);
-          await this.ctx.executeOodaActions(actions);
+          await this.executeOodaActions(actions);
         }
       }
 
@@ -157,6 +171,209 @@ export class AgentEngine {
     } catch (err) {
       log.error(`OODA cycle failed: ${err}`);
       this.ctx.broadcast("ooda_status", { running: false, error: String(err) });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // OODA action dispatcher
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Execute parsed OODA actions from master controller response.
+   * Called after parseOodaResponse() returns structured actions.
+   * Moved here from Daemon so the OODA loop is fully self-contained in AgentEngine.
+   */
+  async executeOodaActions(actions: OodaAction[]): Promise<void> {
+    const { memoryDb, agentConfigs, config, log } = this.ctx;
+    if (!memoryDb) return;
+
+    // Per-run tool call budget tracking
+    const masterAgent = agentConfigs.find((a) => a.name === "master-controller");
+    const maxToolCalls = masterAgent?.max_tool_calls_per_run ?? 20;
+    let toolCallCount = 0;
+
+    // Quota-level tool restriction: when critical/exceeded, block non-observe tools
+    const quotaLevel = computeQuotaStatus(memoryDb, config.orchestrator).weekly_level;
+    const quotaRestrictTools = quotaLevel === "exceeded" || quotaLevel === "critical";
+
+    for (const action of actions) {
+      try {
+        switch (action.type) {
+          case "goal":
+            memoryDb.createGoal(action.title, {
+              description: action.description,
+              parentId: action.parentId,
+              priority: action.priority,
+              agentName: "master-controller",
+            });
+            log.info(`OODA: created goal "${action.title}"`);
+            break;
+
+          case "decision":
+            memoryDb.recordDecision("master-controller", action.action, action.rationale, {
+              goalId: action.goalId,
+              alternatives: action.alternatives ? [action.alternatives] : undefined,
+              expectedOutcome: action.expectedOutcome,
+            });
+            log.info(`OODA: recorded decision "${action.action}"`);
+            break;
+
+          case "message": {
+            const msgId = memoryDb.sendAgentMessage("master-controller", action.to, action.content, {
+              messageType: action.messageType,
+            });
+            // Broadcast to dashboard for real-time message viewer
+            this.ctx.broadcast("agent_message", {
+              id: msgId, from_agent: "master-controller", to_agent: action.to,
+              message_type: action.messageType, content: action.content,
+              created_at: Math.floor(Date.now() / 1000),
+            });
+            log.info(`OODA: sent message to ${action.to}`);
+            break;
+          }
+
+          case "strategy":
+            memoryDb.evolveStrategy("master-controller", action.text, action.rationale);
+            log.info(`OODA: evolved strategy`);
+            break;
+
+          case "learning":
+            memoryDb.addLearning("master-controller", action.category, action.content, {
+              confidence: action.confidence,
+            });
+            log.info(`OODA: learned [${action.category}] ${action.content.slice(0, 60)}`);
+            break;
+
+          case "personality":
+            memoryDb.setPersonalityTrait("master-controller", action.trait, action.value, action.evidence);
+            log.info(`OODA: personality ${action.trait}=${action.value}`);
+            break;
+
+          case "schedule": {
+            // Schedule next OODA run — timer owned by AgentEngine
+            if (this.scheduledOodaTimer) clearTimeout(this.scheduledOodaTimer);
+            const delayMs = action.delayMinutes * 60 * 1000;
+            this.scheduledOodaTimer = setTimeout(() => {
+              this.runOodaCycle().catch((err) => {
+                log.warn(`Scheduled OODA cycle failed: ${err}`);
+              });
+            }, delayMs);
+            log.info(`OODA: scheduled next run in ${action.delayMinutes}min (${action.reason})`);
+            break;
+          }
+
+          case "tool_call": {
+            const toolExecutor = this.ctx.getToolExecutor();
+            if (!toolExecutor || !memoryDb) break;
+            // Enforce per-run tool call budget
+            if (toolCallCount >= maxToolCalls) {
+              log.warn(`OODA: tool call budget exhausted (${maxToolCalls}), skipping ${action.name}`);
+              break;
+            }
+            // Quota restriction: only observe tools when critical/exceeded
+            if (quotaRestrictTools) {
+              const toolDef = toolExecutor.getTool(action.name);
+              if (toolDef && toolDef.category !== "observe") {
+                log.warn(`OODA: tool ${action.name} (${toolDef.category}) blocked — quota ${quotaLevel}`);
+                break;
+              }
+            }
+            const toolEngine = this.ctx.getToolEngine();
+            const toolCtx = toolEngine
+              ? toolEngine.buildToolContext("master-controller")
+              : null;
+            if (!toolCtx) break;
+            const result = await toolExecutor.execute(action.name, action.params, toolCtx);
+            toolCallCount++;
+            log.info(`OODA: tool ${action.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
+            // Trust calibration: success → +2, failure → -5
+            memoryDb.recordTrustDelta(
+              "master-controller",
+              result.success ? 2 : -5,
+              `tool ${action.name}: ${result.success ? "success" : "failed"}`,
+            );
+            // Track lease usage if applicable
+            memoryDb.incrementLeaseUsage("master-controller", action.name);
+            // Broadcast tool result to dashboard
+            this.ctx.broadcast("tool_result", {
+              agent: "master-controller", tool: action.name,
+              success: result.success, summary: result.summary,
+              duration_ms: result.duration_ms,
+            });
+            break;
+          }
+
+          case "tool_sequence": {
+            const toolExecutor = this.ctx.getToolExecutor();
+            if (!toolExecutor || !memoryDb) break;
+            const toolEngine = this.ctx.getToolEngine();
+            const toolCtx = toolEngine
+              ? toolEngine.buildToolContext("master-controller")
+              : null;
+            if (!toolCtx) break;
+            log.info(`OODA: executing tool sequence (${action.steps.length} steps): ${action.reason}`);
+            for (const step of action.steps) {
+              // Enforce per-run tool call budget across sequences
+              if (toolCallCount >= maxToolCalls) {
+                log.warn(`OODA: tool call budget exhausted (${maxToolCalls}), aborting sequence at ${step.name}`);
+                break;
+              }
+              // Quota restriction: only observe tools when critical/exceeded
+              if (quotaRestrictTools) {
+                const stepDef = toolExecutor.getTool(step.name);
+                if (stepDef && stepDef.category !== "observe") {
+                  log.warn(`OODA: seq step ${step.name} (${stepDef.category}) blocked — quota ${quotaLevel}`);
+                  continue; // skip this step but continue sequence
+                }
+              }
+              const result = await toolExecutor.execute(step.name, step.params, toolCtx);
+              toolCallCount++;
+              log.info(`OODA: seq step ${step.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}`);
+              // Trust calibration for sequence steps
+              memoryDb.recordTrustDelta(
+                "master-controller",
+                result.success ? 2 : -5,
+                `seq ${step.name}: ${result.success ? "success" : "failed"}`,
+              );
+              memoryDb.incrementLeaseUsage("master-controller", step.name);
+              if (!result.success) {
+                log.warn(`OODA: tool sequence aborted at ${step.name}: ${result.summary}`);
+                break;
+              }
+            }
+            break;
+          }
+
+          case "persistent_schedule": {
+            const id = this.ctx.upsertSchedule({
+              agentName: "master-controller",
+              scheduleName: action.name,
+              cronExpr: action.cronExpr,
+              intervalMinutes: action.intervalMinutes,
+              prompt: action.prompt,
+              maxBudgetUsd: action.maxBudgetUsd,
+              createdBy: "agent",
+            });
+            if (id >= 0) {
+              log.info(`OODA: created persistent schedule "${action.name}"`);
+            } else {
+              log.warn(`OODA: persistent_schedule "${action.name}" dropped — ScheduleEngine not ready`);
+            }
+            break;
+          }
+
+          case "roundtable": {
+            log.info(`OODA: convening roundtable on "${action.topic}" with [${action.agents.join(", ")}]`);
+            // Run async — don't block remaining OODA actions
+            this.executeRoundtable(action.topic, action.agents, action.context).catch((err) => {
+              log.warn(`Roundtable failed: ${err}`);
+            });
+            break;
+          }
+        }
+      } catch (err) {
+        log.warn(`OODA action failed (${action.type}): ${err}`);
+      }
     }
   }
 

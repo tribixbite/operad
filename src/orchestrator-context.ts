@@ -5,7 +5,8 @@ import type { AgentConfig } from "./agents.js";
 import type { SdkBridge } from "./sdk-bridge.js";
 import type { Logger } from "./log.js";
 import type { ToolExecutor } from "./tools.js";
-import type { OodaAction } from "./cognitive.js";
+import type { ToolEngine } from "./tool-engine.js";
+import type { ScheduleInput } from "./schedule.js";
 
 /**
  * Shared dependency container passed to extracted subsystem engines.
@@ -33,10 +34,15 @@ export interface OrchestratorContext {
    */
   getToolExecutor: () => ToolExecutor | null;
   /**
-   * Delegate for executing parsed OODA actions — remains in Daemon until
-   * executeOodaActions and its deep dependencies are fully extracted.
+   * Getter for the tool engine — resolved lazily because ToolEngine is
+   * constructed after the context object is built.
    */
-  executeOodaActions: (actions: OodaAction[]) => Promise<void>;
+  getToolEngine: () => ToolEngine | null;
+  /**
+   * Upsert a persistent agent schedule via ScheduleEngine.
+   * Returns the schedule row ID, or -1 if ScheduleEngine is not yet initialized.
+   */
+  upsertSchedule: (input: ScheduleInput) => number;
   /**
    * Returns the epoch timestamp (seconds) of the last observed user activity.
    * Used by PersistenceEngine.maybeConsolidate() to compute idle time without
