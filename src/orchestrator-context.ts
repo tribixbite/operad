@@ -12,6 +12,7 @@ import type { WakeLockManager } from "./wake.js";
 import type { MemoryMonitor } from "./memory.js";
 import type { Registry } from "./registry.js";
 import type { TelemetrySinkServer } from "./telemetry-sink.js";
+import type { DashboardServer } from "./http.js";
 
 /**
  * Shared dependency container passed to extracted subsystem engines.
@@ -122,6 +123,8 @@ export interface OrchestratorContext {
 
   /** TelemetrySinkServer instance, or null if not initialized */
   getTelemetrySink: () => TelemetrySinkServer | null;
+  /** DashboardServer instance, or null if not initialized */
+  getDashboard: () => DashboardServer | null;
   /** ScheduleEngine instance, or null if not initialized */
   getScheduleEngine: () => ScheduleEngine | null;
   /**
