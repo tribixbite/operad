@@ -43,4 +43,16 @@ export interface OrchestratorContext {
    * holding a direct reference to Daemon's private lastUserActivityEpoch field.
    */
   getLastActivityEpoch: () => number;
+  /**
+   * Records that a user interaction occurred right now.
+   * Called by AgentEngine.handleAgentChat() so idle detection stays accurate
+   * without exposing Daemon's private lastUserActivityEpoch field.
+   */
+  updateLastActivityEpoch: () => void;
+  /**
+   * Returns whether the named agent is enabled (agent.enabled flag AND
+   * switchboard master/per-agent overrides).
+   * Provided as a callback so AgentEngine avoids coupling to ServerEngine.
+   */
+  isAgentEnabled: (agentName: string) => boolean;
 }

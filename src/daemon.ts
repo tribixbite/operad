@@ -326,6 +326,18 @@ export class Daemon {
       executeOodaActions: (actions) => this.executeOodaActions(actions),
       // Getter so PersistenceEngine can compute idle time without holding a direct ref
       getLastActivityEpoch: () => this.lastUserActivityEpoch,
+      // Setter used by AgentEngine.handleAgentChat to track user activity epoch
+      updateLastActivityEpoch: () => { this.lastUserActivityEpoch = Math.floor(Date.now() / 1000); },
+      // Predicate used by AgentEngine; mirrors Daemon/ServerEngine isAgentEnabled logic
+      isAgentEnabled: (agentName: string) => {
+        const sb = this.switchboard;
+        if (!sb.all) return false;
+        const ac = this.agentConfigs.find((a) => a.name === agentName);
+        if (!ac || !ac.enabled) return false;
+        const sw = sb.agents[agentName];
+        if (sw === false) return false;
+        return true;
+      },
     };
     this.agentEngine = new AgentEngine(ctx);
     // ToolEngine reuses the same OrchestratorContext — no extra wiring needed.
@@ -2634,7 +2646,7 @@ export class Daemon {
         const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
         const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
         if (!agentName || !prompt) throw new Error("agentName and prompt required");
-        this.handleStandaloneAgentRun(agentName, prompt).catch((err) => {
+        this.agentEngine.handleStandaloneAgentRun(agentName, prompt).catch((err) => {
           ws.send(JSON.stringify({ type: "error", message: String(err) }));
         });
         ws.send(JSON.stringify({ type: "agent_run_started", agentName }));
@@ -2661,7 +2673,7 @@ export class Daemon {
           ws.send(JSON.stringify({ type: "error", message: "agentName and prompt required" }));
           break;
         }
-        this.handleAgentChat(agentName, prompt, ws).catch((err) => {
+        this.agentEngine.handleAgentChat(agentName, prompt, ws).catch((err) => {
           try {
             ws.send(JSON.stringify({ type: "agent_chat_error", agentName, message: String(err) }));
           } catch { /* ws may have closed during the run */ }
@@ -2776,270 +2788,8 @@ export class Daemon {
     }
   }
 
-  /** Handle a standalone agent run (from WS or REST API) */
-  private async handleStandaloneAgentRun(agentName: string, prompt: string): Promise<Record<string, unknown>> {
-    if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
-    if (!this.switchboard.all || !this.switchboard.sdkBridge) throw new Error("SDK bridge disabled by switchboard");
-    if (this.sdkBridge.isAttached) throw new Error("Cannot run agent — SDK session already active");
-
-    const agent = this.agentConfigs.find((a) => a.name === agentName);
-    if (!agent) throw new Error(`Agent not found: ${agentName}`);
-    if (!this.serverEngine.isAgentEnabled(agentName)) throw new Error(`Agent is disabled: ${agentName}`);
-
-    // Resolve cwd: use first session path or home directory
-    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
-    const sdkDef = toSdkAgentMap([agent])[agentName];
-
-    // Inject agent context: datetime, past decisions, learnings, personality
-    const contextPrefix = this.buildAgentContext(agentName);
-    const enrichedPrompt = contextPrefix ? `${contextPrefix}\n\n---\n\n${prompt}` : prompt;
-
-    // Track the run in DB
-    const runId = this.memoryDb?.startAgentRun(agentName, "standalone", "standalone") ?? 0;
-
-    this.log.info(`Starting standalone agent run: ${agentName} (runId=${runId})`);
-    this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "running" });
-
-    try {
-      const result = await this.sdkBridge.runStandaloneAgent(
-        agentName, sdkDef, cwd, enrichedPrompt, agent.max_budget_usd,
-      );
-
-      if (this.memoryDb && runId > 0) {
-        this.memoryDb.completeAgentRun(runId, "completed", {
-          sessionId: result.sessionId,
-          costUsd: result.costUsd,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          turns: result.turns,
-        });
-      }
-
-      // Extract learnings and personality updates from response
-      this.extractAgentActions(agentName, result.responseText);
-
-      this.log.info(`Agent run completed: ${agentName} cost=$${result.costUsd.toFixed(4)}`);
-      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
-      return { ok: true, runId, ...result };
-    } catch (err) {
-      if (this.memoryDb && runId > 0) {
-        this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
-      }
-      this.log.error(`Agent run failed: ${agentName}: ${err}`);
-      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "failed", error: String(err) });
-      throw err;
-    }
-  }
-
-  /**
-   * Build rich context for any agent run: datetime, past decisions, learnings, personality.
-   * Prepended to agent prompts for contextual awareness and self-reflection.
-   */
-  private buildAgentContext(agentName: string): string {
-    if (!this.memoryDb) return "";
-
-    const parts: string[] = [];
-
-    // Current datetime
-    const now = new Date();
-    parts.push(`## Current Time\n${now.toISOString()} (${now.toLocaleString()})`);
-
-    // Personality snapshot — who you are
-    const personality = this.memoryDb.getPersonalitySnapshot(agentName);
-    if (personality.length > 0) {
-      parts.push("## Your Personality Profile");
-      for (const t of personality) {
-        parts.push(`- ${t.trait_name}: ${t.trait_value.toFixed(2)}${t.evidence ? ` — ${t.evidence}` : ""}`);
-      }
-    }
-
-    // Accumulated learnings — what you know
-    const learnings = this.memoryDb.getAgentLearnings(agentName, 10);
-    if (learnings.length > 0) {
-      parts.push("## Your Accumulated Knowledge");
-      for (const l of learnings) {
-        const conf = (l.confidence as number).toFixed(2);
-        const reinforced = (l.reinforcement_count as number) > 1 ? ` (reinforced ${l.reinforcement_count}x)` : "";
-        parts.push(`- [${l.category}] ${l.content} (confidence: ${conf}${reinforced})`);
-      }
-    }
-
-    // Active strategy
-    const strategy = this.memoryDb.getActiveStrategy(agentName);
-    if (strategy) {
-      parts.push(`## Your Current Strategy (v${strategy.version})\n${strategy.strategy_text}`);
-    }
-
-    // Recent scored decisions — self-reflection on past performance
-    const decisions = this.memoryDb.getRecentDecisions(5, agentName);
-    const scored = decisions.filter((d) => d.score != null);
-    if (scored.length > 0) {
-      parts.push("## Your Recent Decision Outcomes");
-      for (const d of scored) {
-        const outcome = d.actual_outcome ? ` | ${d.actual_outcome}` : "";
-        parts.push(`- ${d.action}: score=${d.score}${outcome}`);
-      }
-    }
-
-    // Decision quality trend
-    const trend = this.memoryDb.getDecisionQualityTrend(agentName);
-    if (trend.trend !== "insufficient_data") {
-      const arrow = trend.trend === "improving" ? " ↑" : trend.trend === "declining" ? " ↓" : "";
-      parts.push(`\n**Decision trend**: ${trend.trend}${arrow} (avg ${trend.avg_score?.toFixed(2)})`);
-    }
-
-    // Cross-agent insights — wisdom from other agents
-    const shared = this.memoryDb.getSharedInsights(agentName, 0.7, 5);
-    if (shared.length > 0) {
-      parts.push("## Insights from Other Agents");
-      for (const s of shared) {
-        parts.push(`- [${s.agent_name}] ${s.content} (confidence: ${(s.confidence as number).toFixed(2)})`);
-      }
-    }
-
-    // Domain specializations — what you're good at
-    try {
-      const specs = this.memoryDb.getSpecializations(agentName);
-      if (specs.length > 0) {
-        parts.push("## Your Specializations");
-        for (const s of specs) {
-          const reinforced = s.reinforcement_count > 0 ? ` (reinforced ${s.reinforcement_count}x)` : "";
-          parts.push(`- ${s.domain}: ${s.confidence.toFixed(2)}${reinforced}`);
-        }
-      }
-    } catch { /* table may not exist yet */ }
-
-    return parts.join("\n");
-  }
-
-  /**
-   * Handle a persistent chat conversation with a specific agent.
-   * Replays conversation history for multi-turn context.
-   */
-  private async handleAgentChat(agentName: string, userPrompt: string, ws: import("ws").WebSocket): Promise<void> {
-    if (!this.sdkBridge) throw new Error("SDK bridge not initialized");
-    if (!this.memoryDb) throw new Error("Memory DB not initialized");
-    if (this.sdkBridge.isAttached || this.sdkBridge.isBusy) throw new Error("SDK bridge busy — try again shortly");
-    // Track user activity for idle detection (consolidation)
-    this.lastUserActivityEpoch = Math.floor(Date.now() / 1000);
-
-    const agent = this.agentConfigs.find((a) => a.name === agentName);
-    if (!agent) throw new Error(`Agent not found: ${agentName}`);
-
-    // Save user message to conversation history
-    this.memoryDb.appendConversation(agentName, "user", userPrompt);
-
-    // Build the full prompt with context
-    const agentContext = this.buildAgentContext(agentName);
-    const history = this.memoryDb.getConversationHistory(agentName, 20);
-
-    // Replay conversation history for multi-turn context
-    const historyText = history.slice(0, -1).map((m) => { // exclude the message we just appended
-      const role = (m.role as string).toUpperCase();
-      return `[${role}]: ${m.content}`;
-    }).join("\n\n");
-
-    const promptParts: string[] = [agent.prompt];
-    if (agentContext) promptParts.push(agentContext);
-    if (historyText) promptParts.push(`## Conversation History\n${historyText}`);
-
-    // Self-improvement instructions already included in agent prompt (agents.ts)
-    promptParts.push(`## Current Message\n${userPrompt}`);
-
-    const fullPrompt = promptParts.join("\n\n---\n\n");
-
-    // Resolve cwd and run
-    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
-    const sdkDef = toSdkAgentMap([agent])[agentName];
-    const runId = this.memoryDb.startAgentRun(agentName, "chat", "manual");
-
-    ws.send(JSON.stringify({ type: "agent_chat_start", agentName }));
-    this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "running" });
-
-    try {
-      // Streaming callback — forward intermediate text chunks to WS client
-      const onStream = (data: { text: string; thinking: string }) => {
-        try {
-          ws.send(JSON.stringify({ type: "agent_chat_stream", agentName, text: data.text, thinking: data.thinking }));
-        } catch { /* ws may have closed */ }
-      };
-
-      const result = await this.sdkBridge.runStandaloneAgent(
-        agentName, sdkDef, cwd, fullPrompt, agent.max_budget_usd, onStream,
-      );
-
-      // Save assistant response (including thinking text)
-      this.memoryDb.appendConversation(agentName, "assistant", result.responseText, {
-        sessionId: result.sessionId,
-        thinking: result.thinkingText || undefined,
-        costUsd: result.costUsd,
-        tokensIn: result.inputTokens,
-        tokensOut: result.outputTokens,
-      });
-
-      // Extract learnings and personality updates from response
-      this.extractAgentActions(agentName, result.responseText);
-
-      // Complete run tracking
-      this.memoryDb.completeAgentRun(runId, "completed", {
-        sessionId: result.sessionId,
-        costUsd: result.costUsd,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-        turns: result.turns,
-      });
-
-      try {
-        ws.send(JSON.stringify({
-          type: "agent_chat_result",
-          agentName,
-          content: result.responseText,
-          thinking: result.thinkingText || null,
-          cost: result.costUsd,
-          tokens: { input: result.inputTokens, output: result.outputTokens },
-        }));
-      } catch { /* ws may have closed during the run */ }
-      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "completed", cost: result.costUsd });
-
-    } catch (err) {
-      this.log.error("Agent run failed", { agent: agentName, runId, err: String(err) });
-      this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
-      this.broadcastSwitchboard("agent_run_update", { agentName, runId, status: "failed", error: String(err) });
-      throw err;
-    }
-  }
-
-  /**
-   * Extract learning and personality action blocks from agent response text.
-   * Used after agent chat responses and standalone runs.
-   */
-  private extractAgentActions(agentName: string, responseText: string): void {
-    if (!this.memoryDb || !responseText) return;
-    const actions = parseOodaResponse(responseText);
-    for (const action of actions) {
-      if (action.type === "learning") {
-        this.memoryDb.addLearning(agentName, action.category, action.content, {
-          confidence: action.confidence,
-        });
-        this.log.info(`Agent ${agentName} learned: [${action.category}] ${action.content.slice(0, 60)}`);
-
-        // Auto-reinforce specialization matching the learning category
-        try {
-          const specs = this.memoryDb.getSpecializations(agentName);
-          const match = specs.find((s) => s.domain === action.category);
-          if (match) {
-            this.memoryDb.upsertSpecialization(
-              agentName, action.category, action.confidence ?? 0.6,
-              `reinforced by learning: ${action.content.slice(0, 40)}`,
-            );
-          }
-        } catch { /* specialization table may not exist yet */ }
-      } else if (action.type === "personality") {
-        this.memoryDb.setPersonalityTrait(agentName, action.trait, action.value, action.evidence);
-        this.log.info(`Agent ${agentName} personality: ${action.trait}=${action.value}`);
-      }
-    }
-  }
+  // buildAgentContext, extractAgentActions, handleStandaloneAgentRun,
+  // handleAgentChat — moved to AgentEngine (src/agent-engine.ts)
 
   /**
    * Execute parsed OODA actions from master controller response.
@@ -3215,7 +2965,7 @@ export class Daemon {
           case "roundtable": {
             this.log.info(`OODA: convening roundtable on "${action.topic}" with [${action.agents.join(", ")}]`);
             // Run async — don't block remaining OODA actions
-            this.executeRoundtable(action.topic, action.agents, action.context).catch((err) => {
+            this.agentEngine.executeRoundtable(action.topic, action.agents, action.context).catch((err) => {
               this.log.warn(`Roundtable failed: ${err}`);
             });
             break;
@@ -3227,141 +2977,7 @@ export class Daemon {
     }
   }
 
-  /**
-   * Execute a roundtable discussion — sequential multi-agent consultation on a topic.
-   * Each agent sees the accumulated transcript from prior agents and contributes
-   * from their specialization. Result is sent to master-controller as an inbox message.
-   */
-  private async executeRoundtable(
-    topic: string, agentNames: string[], context?: string,
-  ): Promise<{ transcript: string; contributions: Array<{ agent: string; response: string }> }> {
-    if (!this.sdkBridge || !this.memoryDb) throw new Error("SDK bridge or DB not ready");
-    if (this.sdkBridge.isAttached) throw new Error("SDK session already active");
-
-    const contributions: Array<{ agent: string; response: string }> = [];
-    let transcript = "";
-    const cwd = this.config.sessions.find((s) => s.path)?.path ?? homedir();
-
-    this.broadcastSwitchboard("roundtable_status", { running: true, topic, agents: agentNames });
-
-    for (const agentName of agentNames) {
-      const agent = this.agentConfigs.find((a) => a.name === agentName);
-      if (!agent) {
-        this.log.warn(`Roundtable: agent "${agentName}" not found, skipping`);
-        continue;
-      }
-      if (!this.serverEngine.isAgentEnabled(agentName)) {
-        this.log.warn(`Roundtable: agent "${agentName}" disabled, skipping`);
-        continue;
-      }
-      // Wait for SDK to be free between agents
-      if (this.sdkBridge.isBusy) {
-        this.log.debug(`Roundtable: waiting for SDK bridge to free up for ${agentName}`);
-        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-        if (this.sdkBridge.isBusy) {
-          this.log.warn(`Roundtable: SDK still busy, skipping ${agentName}`);
-          continue;
-        }
-      }
-
-      // Build specialization context for this agent
-      let specContext = "";
-      try {
-        const specs = this.memoryDb.getSpecializations(agentName);
-        if (specs.length > 0) {
-          specContext = specs.map((s) => `${s.domain} (${s.confidence.toFixed(2)})`).join(", ");
-        }
-      } catch { /* table may not exist */ }
-
-      // Assemble roundtable prompt for this participant
-      const agentContext = this.buildAgentContext(agentName);
-      const otherAgents = agentNames.filter((a) => a !== agentName);
-      const promptParts: string[] = [];
-
-      if (agentContext) promptParts.push(agentContext);
-
-      promptParts.push("## Roundtable Discussion\n");
-      promptParts.push(`**Topic**: ${topic}`);
-      if (specContext) {
-        promptParts.push(`**Your Role**: You are contributing as a specialist in ${specContext}.`);
-      }
-      promptParts.push(`**Other Participants**: ${otherAgents.join(", ") || "none"}`);
-      if (context) promptParts.push(`\n${context}`);
-
-      if (transcript) {
-        promptParts.push("\n### Prior Contributions\n");
-        promptParts.push(transcript);
-      }
-
-      promptParts.push("\n### Your Turn");
-      promptParts.push("Provide your analysis of this topic from your area of expertise.");
-      promptParts.push("Be specific, cite evidence from your knowledge base where relevant.");
-      promptParts.push("Keep your response focused — 2-4 key points max.\n");
-      promptParts.push("You may use `learning` and `personality` blocks to capture new insights.");
-
-      const fullPrompt = promptParts.join("\n");
-      const sdkDef = toSdkAgentMap([agent])[agentName];
-      const runId = this.memoryDb.startAgentRun(agentName, `roundtable:${topic.slice(0, 50)}`, "standalone");
-
-      try {
-        const result = await this.sdkBridge.runStandaloneAgent(
-          agentName, sdkDef, cwd, fullPrompt, agent.max_budget_usd,
-        );
-
-        this.memoryDb.completeAgentRun(runId, "completed", {
-          sessionId: result.sessionId,
-          costUsd: result.costUsd,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          turns: result.turns,
-        });
-
-        // Extract learnings from roundtable response
-        this.extractAgentActions(agentName, result.responseText);
-
-        // Append to transcript
-        const contribution = result.responseText.trim();
-        contributions.push({ agent: agentName, response: contribution });
-        transcript += `**${agentName}**:\n${contribution}\n\n`;
-
-        this.log.info(`Roundtable: ${agentName} contributed (${result.costUsd.toFixed(4)} USD)`);
-      } catch (err) {
-        this.memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
-        this.log.warn(`Roundtable: ${agentName} failed: ${err}`);
-        contributions.push({ agent: agentName, response: `[Error: ${String(err)}]` });
-      }
-    }
-
-    // Deliver consolidated transcript to master-controller as inbox message
-    if (contributions.length > 0) {
-      const summaryContent = `## Roundtable Summary: ${topic}\n\n${transcript}`;
-      this.memoryDb.sendAgentMessage("roundtable", "master-controller", summaryContent, {
-        messageType: "roundtable_summary",
-      });
-
-      // Record as a decision
-      this.memoryDb.recordDecision(
-        "master-controller",
-        `Convened roundtable on: ${topic}`,
-        `${contributions.length} agents contributed: ${contributions.map((c) => c.agent).join(", ")}`,
-      );
-
-      this.broadcastSwitchboard("agent_message", {
-        from_agent: "roundtable",
-        to_agent: "master-controller",
-        message_type: "roundtable_summary",
-        content: summaryContent.slice(0, 500),
-        created_at: Math.floor(Date.now() / 1000),
-      });
-    }
-
-    this.broadcastSwitchboard("roundtable_status", {
-      running: false, topic, agents: agentNames,
-      contributions: contributions.length,
-    });
-
-    return { transcript, contributions };
-  }
+  // executeRoundtable — moved to AgentEngine (src/agent-engine.ts)
 
   /**
    * Execute a scheduled agent run. Called by ScheduleEngine when a schedule fires.
@@ -3411,7 +3027,7 @@ export class Daemon {
         if (actions.length > 0) {
           await this.executeOodaActions(actions);
         }
-        this.extractAgentActions(schedule.agent_name, result.responseText);
+        this.agentEngine.extractAgentActions(schedule.agent_name, result.responseText);
       }
 
       // Trust reward for successful scheduled run
@@ -4920,7 +4536,7 @@ export class Daemon {
               const parsed = body ? JSON.parse(body) as { prompt?: string } : {};
               const prompt = parsed.prompt ?? "Analyze the current system state and take appropriate action.";
               // Non-blocking — result streamed via WS
-              this.handleStandaloneAgentRun(subCmd, prompt).catch((err) => {
+              this.agentEngine.handleStandaloneAgentRun(subCmd, prompt).catch((err) => {
                 this.log.error(`Standalone agent run failed: ${err}`);
               });
               return { status: 202, data: { ok: true, message: `Agent ${subCmd} run started` } };
@@ -5501,7 +5117,7 @@ export class Daemon {
               if (!topic) return { status: 400, data: { error: "topic required" } };
               if (!agents.length) return { status: 400, data: { error: "agents array required" } };
 
-              const result = await this.executeRoundtable(topic, agents, ctx);
+              const result = await this.agentEngine.executeRoundtable(topic, agents, ctx);
               return { status: 200, data: result };
             } catch (err) {
               return { status: 500, data: { error: String(err) } };
