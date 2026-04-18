@@ -1,6 +1,7 @@
 import { spawnSync } from "child_process";
 import { existsSync, accessSync, constants, readFileSync, readdirSync, realpathSync } from "fs";
 import { join, dirname } from "path";
+import { homedir } from "os";
 import * as net from "net";
 import { detectPlatform, type PlatformId } from "./platform/platform.js";
 
@@ -83,10 +84,16 @@ function checkRuntime(): CheckResult {
 }
 
 function checkConfig(configPath?: string): CheckResult {
-  const defaultPath = join(
-    process.env.HOME ?? "/",
-    ".config/operad/operad.toml"
-  );
+  // On Windows, prefer %APPDATA%\operad\operad.toml; on POSIX use $HOME/.config/operad/operad.toml
+  const defaultPath =
+    process.platform === "win32"
+      ? join(
+          process.env.APPDATA ??
+            join(process.env.USERPROFILE ?? homedir(), "AppData", "Roaming"),
+          "operad",
+          "operad.toml",
+        )
+      : join(process.env.HOME ?? homedir(), ".config", "operad", "operad.toml");
   const path = configPath ?? defaultPath;
   if (!existsSync(path)) {
     return {
@@ -117,9 +124,16 @@ function checkConfig(configPath?: string): CheckResult {
   }
 }
 
-function checkStateDir(_platformId: PlatformId): CheckResult {
-  // State dir is always $HOME/.local/share/tmx on all platforms (matching android.ts and memory-db.ts)
-  const stateDir = join(process.env.HOME ?? "/", ".local/share/tmx");
+function checkStateDir(platformId: PlatformId): CheckResult {
+  // On Windows, state lives under %LOCALAPPDATA%\operad; on POSIX platforms under $HOME/.local/share/tmx
+  const stateDir =
+    platformId === "windows"
+      ? join(
+          process.env.LOCALAPPDATA ??
+            join(process.env.USERPROFILE ?? homedir(), "AppData", "Local"),
+          "operad",
+        )
+      : join(process.env.HOME ?? "/", ".local/share/tmx");
   try {
     if (!existsSync(stateDir)) {
       return { name: "state-dir", status: "warn", message: `State dir not found: ${stateDir} (will be created on first boot)` };
@@ -131,7 +145,10 @@ function checkStateDir(_platformId: PlatformId): CheckResult {
       name: "state-dir",
       status: "fail",
       message: `State dir not writable: ${stateDir}`,
-      fix: `Run: mkdir -p ${stateDir} && chmod 755 ${stateDir}`,
+      fix:
+        platformId === "windows"
+          ? `Run in PowerShell: mkdir "${stateDir}"`
+          : `Run: mkdir -p ${stateDir} && chmod 755 ${stateDir}`,
     };
   }
 }
@@ -218,12 +235,55 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
     }
   }
 
+  if (platformId === "windows") {
+    // Check that tmux is on PATH (required for session management).
+    // Users install tmux via MSYS2 (`pacman -S tmux`) or WSL.
+    const tmuxCheck = spawnSync("where", ["tmux"], { encoding: "utf8", timeout: 3000 });
+    if (tmuxCheck.error || tmuxCheck.status !== 0) {
+      results.push({
+        name: "tmux-windows",
+        status: "warn",
+        message: "tmux not found on PATH — session management requires tmux",
+        fix:
+          "Install tmux via MSYS2: open an MSYS2 shell and run `pacman -S tmux`, then add " +
+          "C:\\msys64\\usr\\bin to your Windows PATH. Alternatively, run operad inside WSL.",
+      });
+    } else {
+      results.push({
+        name: "tmux-windows",
+        status: "ok",
+        message: `tmux found: ${tmuxCheck.stdout.trim()}`,
+      });
+    }
+
+    // Check PowerShell availability (used for notifications and battery queries)
+    const psCheck = spawnSync("where", ["powershell"], { encoding: "utf8", timeout: 3000 });
+    if (psCheck.error || psCheck.status !== 0) {
+      results.push({
+        name: "powershell",
+        status: "warn",
+        message: "powershell not found — notifications and battery monitoring disabled",
+        fix: "PowerShell is bundled with Windows 7+. Check that it is on your PATH.",
+      });
+    } else {
+      results.push({ name: "powershell", status: "ok", message: "powershell available" });
+    }
+  }
+
   return results;
 }
 
-async function checkDatabase(_platformId: PlatformId): Promise<CheckResult> {
-  // Database is always at $HOME/.local/share/operad/memory.db (matching memory-db.ts)
-  const dbPath = join(process.env.HOME ?? "/", ".local/share/operad/memory.db");
+async function checkDatabase(platformId: PlatformId): Promise<CheckResult> {
+  // Database path depends on platform: Windows uses %LOCALAPPDATA%\operad\; others use $HOME/.local/share/operad/
+  const dbPath =
+    platformId === "windows"
+      ? join(
+          process.env.LOCALAPPDATA ??
+            join(process.env.USERPROFILE ?? homedir(), "AppData", "Local"),
+          "operad",
+          "memory.db",
+        )
+      : join(process.env.HOME ?? "/", ".local/share/operad/memory.db");
   if (!existsSync(dbPath)) {
     return { name: "database", status: "ok", message: "No database yet (created on first agent run)" };
   }
