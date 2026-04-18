@@ -312,7 +312,7 @@ export class Daemon {
       config: this.config,
       state: this.state,
       memoryDb: this.memoryDb ?? null,
-      switchboard: this.switchboard,
+      getSwitchboard: () => this.switchboard,
       sdkBridge: this.sdkBridge ?? null,
       log: this.log,
       agentConfigs: this.agentConfigs ?? [],

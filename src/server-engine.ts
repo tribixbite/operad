@@ -113,7 +113,7 @@ export class ServerEngine {
    * Pure function of ctx.switchboard — no side effects.
    */
   buildSwitchboardPayload(): Record<string, unknown> {
-    const sb: Switchboard = this.ctx.switchboard;
+    const sb: Switchboard = this.ctx.getSwitchboard();
     return { type: "switchboard_update", ...sb };
   }
 
@@ -143,7 +143,7 @@ export class ServerEngine {
    * do not need to reach back into Daemon.
    */
   isAgentEnabled(agentName: string): boolean {
-    const sb = this.ctx.switchboard;
+    const sb = this.ctx.getSwitchboard();
     if (!sb.all) return false;
     // Agent's own enabled flag must be set
     const agentConf = this.ctx.agentConfigs.find((a) => a.name === agentName);
@@ -177,7 +177,7 @@ export class ServerEngine {
     switch (msg.type) {
       case "attach": {
         if (!this.ctx.sdkBridge) throw new Error("SDK bridge not initialized");
-        if (!this.ctx.switchboard.all || !this.ctx.switchboard.sdkBridge)
+        if (!this.ctx.getSwitchboard().all || !this.ctx.getSwitchboard().sdkBridge)
           throw new Error("SDK bridge disabled by switchboard");
         const sessionName = msg.sessionName;
         if (!sessionName) throw new Error("sessionName required");
@@ -197,8 +197,8 @@ export class ServerEngine {
         // Inject memories if available and switchboard allows it
         let fullPrompt = prompt;
         if (
-          this.ctx.switchboard.all &&
-          this.ctx.switchboard.memoryInjection &&
+          this.ctx.getSwitchboard().all &&
+          this.ctx.getSwitchboard().memoryInjection &&
           this.ctx.memoryDb &&
           this.ctx.sdkBridge.activeSessionName
         ) {
@@ -1112,7 +1112,7 @@ export class ServerEngine {
 
         case "switchboard": {
           if (method === "GET") {
-            return { status: 200, data: this.ctx.switchboard };
+            return { status: 200, data: this.ctx.getSwitchboard() };
           }
           if (method === "PUT") {
             try {

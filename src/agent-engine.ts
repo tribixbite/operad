@@ -42,13 +42,14 @@ export class AgentEngine {
    * Called every 60s by cognitiveTimer in Daemon.
    */
   async maybeTriggerOoda(): Promise<void> {
-    const { sdkBridge, memoryDb, switchboard, agentConfigs, config, log } = this.ctx;
+    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
 
     // Don't run if SDK is busy or no memory DB
     if (!sdkBridge || !memoryDb) return;
     if (sdkBridge.isAttached || sdkBridge.isBusy) return;
 
     // Check switchboard — both cognitive and oodaAutoTrigger must be on
+    const switchboard = this.ctx.getSwitchboard();
     if (!switchboard.cognitive || !switchboard.oodaAutoTrigger) return;
 
     // Check trigger conditions
@@ -85,7 +86,7 @@ export class AgentEngine {
    * execute actions from its response.
    */
   async runOodaCycle(): Promise<void> {
-    const { sdkBridge, memoryDb, switchboard, state, config, agentConfigs, log } = this.ctx;
+    const { sdkBridge, memoryDb, state, config, agentConfigs, log } = this.ctx;
 
     if (!sdkBridge || !memoryDb) return;
     if (sdkBridge.isAttached) {
@@ -94,6 +95,7 @@ export class AgentEngine {
     }
 
     // Check switchboard
+    const switchboard = this.ctx.getSwitchboard();
     if (!switchboard.oodaAutoTrigger) {
       log.debug("OODA cycle skipped — disabled by switchboard");
       return;
@@ -507,7 +509,7 @@ export class AgentEngine {
   async handleStandaloneAgentRun(agentName: string, prompt: string): Promise<Record<string, unknown>> {
     const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
     if (!sdkBridge) throw new Error("SDK bridge not initialized");
-    if (!this.ctx.switchboard.all || !this.ctx.switchboard.sdkBridge) throw new Error("SDK bridge disabled by switchboard");
+    if (!this.ctx.getSwitchboard().all || !this.ctx.getSwitchboard().sdkBridge) throw new Error("SDK bridge disabled by switchboard");
     if (sdkBridge.isAttached) throw new Error("Cannot run agent — SDK session already active");
 
     const agent = agentConfigs.find((a) => a.name === agentName);

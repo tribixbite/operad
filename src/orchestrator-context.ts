@@ -25,7 +25,7 @@ export interface OrchestratorContext {
   config: TmxConfig;
   state: StateManager;
   memoryDb: MemoryDb | null;
-  switchboard: Switchboard;
+  getSwitchboard: () => Switchboard;
   sdkBridge: SdkBridge | null;
   log: Logger;
   agentConfigs: AgentConfig[];
