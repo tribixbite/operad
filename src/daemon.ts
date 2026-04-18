@@ -17,13 +17,12 @@ import { defaultSwitchboard } from "./types.js";
 import { loadConfig } from "./config.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
-import { SessionController, type TmuxRunner } from "./session-controller.js";
 import { StateManager, migrateState } from "./state.js";
 import { IpcServer } from "./ipc.js";
 import { BudgetTracker } from "./budget.js";
 import { WakeLockManager } from "./wake.js";
 import { computeStartupOrder, computeShutdownOrder } from "./deps.js";
-import { runHealthSweep, checkSingleSessionHealth } from "./health.js";
+import { runHealthSweep } from "./health.js";
 import { MemoryMonitor } from "./memory.js";
 import { ActivityDetector } from "./activity.js";
 import { BatteryMonitor } from "./battery.js";
@@ -153,7 +152,6 @@ function removeNotification(id: string): void {
 export class Daemon {
   private config: TmxConfig;
   private log: Logger;
-  private sessionController!: SessionController;
   private agentEngine!: AgentEngine;
   private toolEngine!: ToolEngine;
   private persistenceEngine!: PersistenceEngine;
@@ -196,19 +194,6 @@ export class Daemon {
   constructor(configPath?: string) {
     this.config = loadConfig(configPath);
     this.log = new Logger(this.config.orchestrator.log_dir);
-    const tmuxRunner: TmuxRunner = (args) => {
-      const result = spawnSync("tmux", args, { encoding: "utf8" });
-      return {
-        exitCode: result.status ?? 1,
-        stdout: result.stdout ?? "",
-        stderr: result.stderr ?? "",
-      };
-    };
-    this.sessionController = new SessionController({
-      tmuxRunner,
-      healthChecker: async (name, config) => checkSingleSessionHealth(name, config),
-      log: this.log,
-    });
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
     // Run state schema migrations on every boot — no-op if already at current version.
     // migrateState mutates the raw state object; flush() persists the updated schemaVersion.
