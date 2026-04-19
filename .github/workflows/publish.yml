@@ -26,10 +26,20 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # Trusted publishing via OIDC — repo + workflow registered on npmjs.com.
-      # No NPM_TOKEN needed; `id-token: write` permission + --provenance is enough.
+      # Trusted publishing requires npm >= 11.5.1 for OIDC flow.
+      # Node 22 ships with npm 10.x; upgrade to latest stable.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      # Two auth paths supported:
+      # (1) Trusted publishing via OIDC — requires publisher registered on
+      #     npmjs.com (Settings → Access → Trusted Publishers) for this repo
+      #     and workflow file. `id-token: write` permission is granted above.
+      # (2) Legacy token — if NPM_TOKEN secret is set, it's used instead.
       - name: Publish
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
