@@ -13,8 +13,17 @@ import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
 import { detectPlatform } from "./platform/platform.js";
 
-/** Pre-resolved tmux binary path via platform abstraction */
-const TMUX_BIN = detectPlatform().resolveBinaryPath("tmux");
+/** Lazy-resolved tmux binary path via platform abstraction.
+ *  Module-load-time resolution would freeze a wrong path on systems where
+ *  tmux is installed under a non-standard location (MSYS2 on Windows,
+ *  late-PATH packages on Termux). Cached after first call. */
+let _tmuxBin: string | null = null;
+function TMUX_BIN(): string {
+  if (_tmuxBin === null) {
+    _tmuxBin = detectPlatform().resolveBinaryPath("tmux");
+  }
+  return _tmuxBin;
+}
 
 /** Timeout for Claude Code readiness polling (ms) */
 const CLAUDE_READY_TIMEOUT = 60_000;
@@ -44,7 +53,7 @@ function getCleanEnv(): NodeJS.ProcessEnv {
  */
 function tmux(...args: string[]): string | null {
   try {
-    const result = spawnSync(TMUX_BIN, args, {
+    const result = spawnSync(TMUX_BIN(),args, {
       encoding: "utf-8",
       timeout: 10_000,
       stdio: ["ignore", "pipe", "pipe"],
@@ -170,7 +179,7 @@ export function findBareServicePid(pattern: RegExp): number | null {
 
 /** Check if the tmux server is alive */
 export function isTmuxServerAlive(): boolean {
-  const result = spawnSync(TMUX_BIN, ["start-server"], {
+  const result = spawnSync(TMUX_BIN(),["start-server"], {
     timeout: 5000,
     stdio: "ignore",
     env: getCleanEnv(),
@@ -190,7 +199,7 @@ export function listTmuxSessions(): string[] {
 
 /** Check if a specific tmux session exists */
 export function sessionExists(name: string): boolean {
-  const result = spawnSync(TMUX_BIN, ["has-session", "-t", name], {
+  const result = spawnSync(TMUX_BIN(),["has-session", "-t", name], {
     timeout: 5000,
     stdio: "ignore",
     env: getCleanEnv(),
@@ -285,7 +294,7 @@ export function createSession(config: SessionConfig, log: Logger): boolean {
     createArgs.push("-c", path);
   }
 
-  const result = spawnSync(TMUX_BIN, createArgs, {
+  const result = spawnSync(TMUX_BIN(),createArgs, {
     timeout: 10_000,
     stdio: "ignore",
     env: getCleanEnv(),

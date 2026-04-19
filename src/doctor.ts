@@ -153,37 +153,48 @@ function checkStateDir(platformId: PlatformId): CheckResult {
   }
 }
 
-function checkDashboard(): CheckResult {
-  // Use realpathSync to resolve symlinks (matching tmx.ts pattern); fall back to null if it throws
-  let localDist: string | null = null;
+/** Detect whether this install came from npm (dashboard pre-bundled) or a git
+ *  checkout (dashboard built locally). The fix instruction differs. */
+function isNpmInstall(): boolean {
   try {
-    localDist = join(dirname(realpathSync(__filename)), "../dashboard/dist");
+    const binPath = realpathSync(__filename);
+    return binPath.includes(`${"node_modules"}/operadic/`);
   } catch {
-    localDist = null;
+    return false;
   }
-  const homeDist = join(process.env.HOME ?? "/", "git/operad/dashboard/dist");
-  const dir = (localDist && existsSync(localDist)) ? localDist : existsSync(homeDist) ? homeDist : null;
+}
+
+function checkDashboard(): CheckResult {
+  // Resolve dashboard/dist relative to the bundle location only — no
+  // hardcoded ~/git/operad fallback (that path is dev-specific and confuses
+  // npm-installed users).
+  let dir: string | null = null;
+  try {
+    const candidate = join(dirname(realpathSync(__filename)), "../dashboard/dist");
+    if (existsSync(candidate)) dir = candidate;
+  } catch { /* unresolvable */ }
+
+  const fromNpm = isNpmInstall();
+  const fix = fromNpm
+    ? "Reinstall: bun add -g operadic@latest  (or npm i -g operadic@latest)"
+    : "Run: cd dashboard && bun install && bun run build";
+
   if (!dir) {
     return {
       name: "dashboard",
       status: "warn",
-      message: "Dashboard dist not found",
-      fix: "Run: cd ~/git/operad/dashboard && bun run build",
+      message: "Dashboard dist not bundled",
+      fix,
     };
   }
   try {
     const files = readdirSync(dir);
     if (files.length === 0) {
-      return {
-        name: "dashboard",
-        status: "warn",
-        message: "Dashboard dist is empty",
-        fix: "Run: cd ~/git/operad/dashboard && bun run build",
-      };
+      return { name: "dashboard", status: "warn", message: "Dashboard dist is empty", fix };
     }
     return { name: "dashboard", status: "ok", message: `${dir} (${files.length} files)` };
   } catch {
-    return { name: "dashboard", status: "warn", message: "Could not read dashboard dist" };
+    return { name: "dashboard", status: "warn", message: "Could not read dashboard dist", fix };
   }
 }
 

@@ -52,7 +52,9 @@ function resolveBunPath(): string {
 // -- CLI router ---------------------------------------------------------------
 
 const args = process.argv.slice(2);
-const command = args[0] ?? "status";
+// No args → help. (Previously defaulted to "status" which printed an
+// unfriendly "Daemon not running" error to first-run users.)
+const command = args[0] ?? "help";
 const subArgs = args.slice(1);
 
 main().catch((err) => {
@@ -266,6 +268,17 @@ async function runUpgrade(): Promise<void> {
   // Step 1a: Build orchestrator bundle
   // Resolve repo root from the running script (dist/tmx.js → repo root)
   const orcDir = join(dirname(realpathSync(__filename)), "..");
+  // Refuse on npm-installed copies — they have no build.cjs.
+  if (!existsSync(join(orcDir, "build.cjs"))) {
+    console.error(
+      `${RED}'operad upgrade' is for git checkouts only.${RESET}\n` +
+      `Detected install at: ${orcDir}\n\n` +
+      `For npm/bun installs, upgrade with:\n` +
+      `  ${CYAN}bun add -g operadic@latest${RESET}\n` +
+      `  ${CYAN}npm install -g operadic@latest${RESET}\n`
+    );
+    process.exit(1);
+  }
   console.log(`${CYAN}Building orchestrator...${RESET}`);
   const buildResult = spawnSync("bun", ["run", "build"], {
     cwd: orcDir,
@@ -367,7 +380,10 @@ async function runInit(): Promise<void> {
   const { existsSync: fsExists, mkdirSync: fsMkdir, writeFileSync: fsWrite } = await import("node:fs");
   const { join: pathJoin } = await import("node:path");
 
-  const configDir = pathJoin(process.env.HOME ?? "/", ".config/operad");
+  // Windows: %APPDATA%\operad\operad.toml; everywhere else: ~/.config/operad/operad.toml
+  const configDir = process.platform === "win32"
+    ? pathJoin(process.env.APPDATA ?? pathJoin(process.env.USERPROFILE ?? "", "AppData", "Roaming"), "operad")
+    : pathJoin(process.env.HOME ?? "/", ".config/operad");
   const configPath = pathJoin(configDir, "operad.toml");
 
   if (fsExists(configPath)) {
@@ -391,7 +407,9 @@ log_level = "info"
 [[session]]
 name = "my-session"
 command = "claude"
-cwd = "${process.env.HOME ?? "~"}/git/my-project"
+cwd = "${process.platform === "win32"
+    ? pathJoin(process.env.USERPROFILE ?? "~", "git", "my-project").replace(/\\/g, "/")
+    : `${process.env.HOME ?? "~"}/git/my-project`}"
 enabled = true
 `;
 

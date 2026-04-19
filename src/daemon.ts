@@ -379,6 +379,21 @@ export class Daemon {
     if (enabledCount === 0) {
       this.log.warn("No enabled sessions in config");
     }
+
+    // Fail fast if tmux is unusable. Sessions silently fail otherwise — the
+    // daemon keeps running, the dashboard appears healthy, but no session
+    // ever boots. Better to crash with a clear install hint.
+    const tmuxCheck = spawnSync("tmux", ["-V"], { timeout: 3000, stdio: "pipe" });
+    if (tmuxCheck.error || tmuxCheck.status !== 0) {
+      const msg = "tmux is required but not available on PATH. Install:\n" +
+        "  Linux:    apt install tmux  /  pacman -S tmux\n" +
+        "  macOS:    brew install tmux\n" +
+        "  Termux:   pkg install tmux\n" +
+        "  Windows:  install MSYS2 (https://msys2.org), then `pacman -S tmux`\n" +
+        "Run 'operad doctor' for full diagnostics.";
+      this.log.error(msg);
+      throw new Error("tmux not available — cannot start daemon");
+    }
   }
 
   /** Start the daemon — main entry point */
