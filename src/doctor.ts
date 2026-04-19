@@ -244,6 +244,12 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
     } else {
       results.push({ name: "termux-api", status: "ok", message: "termux-api available" });
     }
+
+    // CFC bridge (claude-chrome-android) — optional, enables /api/bridge + memory-pressure GC nudge
+    results.push(checkCfcBridge());
+
+    // Patched Edge Canary — used for opening the dashboard from the status notification
+    results.push(checkEdgeCanary());
   }
 
   if (platformId === "windows") {
@@ -315,4 +321,47 @@ async function checkDatabase(platformId: PlatformId): Promise<CheckResult> {
   } catch {
     return { name: "database", status: "ok", message: `${dbPath} exists (integrity check skipped in node env)` };
   }
+}
+
+/** CFC bridge (claude-chrome-android) — Android-only, optional. Enables
+ *  /api/bridge + memory-pressure GC nudge for the Edge Canary CDP host. */
+function checkCfcBridge(): CheckResult {
+  const home = process.env.HOME ?? "/";
+  const candidates = [
+    join(home, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
+    join(home, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
+  ];
+  const found = candidates.find((p) => existsSync(p));
+  if (found) {
+    return { name: "cfc-bridge", status: "ok", message: `claude-chrome-android at ${found}` };
+  }
+  return {
+    name: "cfc-bridge",
+    status: "warn",
+    message: "CFC bridge (claude-chrome-android) not installed — /api/bridge will return 404",
+    fix:
+      "Install: bun add -g claude-chrome-android  (or npm i -g claude-chrome-android)\n" +
+      "Then run: operad bridge start  (or call POST http://localhost:18970/api/bridge)",
+  };
+}
+
+/** Patched Edge Canary on Android — used to open the dashboard from the
+ *  status notification and as the CDP target for the CFC bridge. */
+function checkEdgeCanary(): CheckResult {
+  // pm list packages com.microsoft.emmx.canary returns a line if installed
+  const result = spawnSync("pm", ["list", "packages", "com.microsoft.emmx.canary"], {
+    encoding: "utf8",
+    timeout: 3000,
+  });
+  if (result.error || result.status !== 0 || !result.stdout?.includes("com.microsoft.emmx.canary")) {
+    return {
+      name: "edge-canary",
+      status: "warn",
+      message: "Microsoft Edge Canary not installed — dashboard quick-open & CFC bridge target unavailable",
+      fix:
+        "Install Microsoft Edge Canary from the Play Store. For CFC bridge use, " +
+        "you also need a build with --remote-debugging-port flag enabled.",
+    };
+  }
+  return { name: "edge-canary", status: "ok", message: "com.microsoft.emmx.canary installed" };
 }

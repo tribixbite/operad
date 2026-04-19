@@ -49,6 +49,14 @@
   "optionalDependencies": {
     "@esbuild/android-arm64": "^0.24.0"
   },
+  "peerDependencies": {
+    "claude-chrome-android": "*"
+  },
+  "peerDependenciesMeta": {
+    "claude-chrome-android": {
+      "optional": true
+    }
+  },
   "engines": {
     "node": ">=18",
     "bun": ">=1.0"

@@ -224,9 +224,18 @@ export class RestHandler {
             const bridgeCandidates = [
               join(home, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
               join(home, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
-              join(home, "git/termux-tools/bridge/dist/cli.js"),
             ];
-            const bridgeScript = bridgeCandidates.find(p => existsSync(p)) ?? bridgeCandidates[0];
+            const bridgeScript = bridgeCandidates.find(p => existsSync(p));
+            if (!bridgeScript) {
+              return {
+                status: 404,
+                data: {
+                  error: "claude-chrome-android (CFC bridge) not installed",
+                  fix: "bun add -g claude-chrome-android",
+                  searched: bridgeCandidates,
+                },
+              };
+            }
             const bunPath = existsSync(join(home, ".bun/bin/bun")) ? join(home, ".bun/bin/bun") : "bun";
             const bridgeDir = dirname(bridgeScript);
 
@@ -289,11 +298,17 @@ export class RestHandler {
             const bridgeCandidates2 = [
               join(home2, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
               join(home2, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
-              join(home2, "git/termux-tools/bridge/dist/cli.js"),
             ];
             const bridgeScript2 = bridgeCandidates2.find(p => existsSync(p));
             if (!bridgeScript2) {
-              return { status: 500, data: { error: "Bridge script not found" } };
+              return {
+                status: 404,
+                data: {
+                  error: "claude-chrome-android (CFC bridge) not installed",
+                  fix: "bun add -g claude-chrome-android",
+                  searched: bridgeCandidates2,
+                },
+              };
             }
 
             let runtime = "";
