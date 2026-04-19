@@ -12,7 +12,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { writeFileSync, mkdirSync, rmSync } from "fs";
+import { writeFileSync, mkdirSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync, spawn, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
@@ -23,8 +23,30 @@ const TEST_HOME = join(tmpdir(), `operad-e2e-${Date.now()}`);
 const CONFIG_PATH = join(TEST_HOME, "operad-test.toml");
 const DAEMON_BIN = join(process.cwd(), "dist/tmx.js");
 
-/** Skip the whole suite if the environment can't support it */
-let skipReason: string | null = null;
+/**
+ * Skip the whole suite if the environment can't support it.
+ *
+ * IMPORTANT: must be computed at module load time — `describe.skipIf` evaluates
+ * synchronously at test collection, before `beforeAll` runs. Deferring to
+ * beforeAll causes the suite to always run and fail without diagnostics.
+ */
+function detectSkipReason(): string | null {
+  if (!existsSync(DAEMON_BIN)) {
+    return `dist/tmx.js not found — run 'bun run build' first`;
+  }
+  const tmuxCheck = spawnSync("tmux", ["-V"], { stdio: "ignore" });
+  if (tmuxCheck.error || tmuxCheck.status !== 0) {
+    return `tmux not installed — e2e requires tmux`;
+  }
+  return null;
+}
+
+const skipReason: string | null = detectSkipReason();
+if (skipReason !== null) {
+  // eslint-disable-next-line no-console
+  console.warn(`[e2e] Skipping: ${skipReason}`);
+}
+
 let daemonProcess: ChildProcess | null = null;
 let daemonStderr = "";
 
@@ -66,20 +88,7 @@ async function waitForPort(port: number, timeoutMs = 20000): Promise<boolean> {
 }
 
 beforeAll(async () => {
-  // Check bundle exists (local dev may not have built yet)
-  if (spawnSync("test", ["-f", DAEMON_BIN]).status !== 0) {
-    skipReason = `dist/tmx.js not found — run 'bun run build' first`;
-    console.warn(skipReason);
-    return;
-  }
-
-  // Check tmux is available (daemon needs it to boot sessions)
-  const tmuxCheck = spawnSync("tmux", ["-V"], { stdio: "ignore" });
-  if (tmuxCheck.error || tmuxCheck.status !== 0) {
-    skipReason = `tmux not installed — e2e requires tmux`;
-    console.warn(skipReason);
-    return;
-  }
+  if (skipReason !== null) return;
 
   mkdirSync(TEST_HOME, { recursive: true });
   mkdirSync(join(TEST_HOME, "state"), { recursive: true });

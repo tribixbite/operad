@@ -1142,11 +1142,22 @@ ${BOLD}EXAMPLES${RESET}
 }
 
 function printVersion(): void {
-  try {
-    const pkgPath = new URL("../package.json", import.meta.url).pathname;
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version: string };
-    console.log(`operad v${pkg.version}`);
-  } catch {
-    console.log("operad v0.1.0");
+  // Resolve package.json relative to the installed bundle location.
+  // On Windows, URL.pathname returns "/D:/..." which readFileSync rejects —
+  // use realpathSync + path.join to stay cross-platform and to follow the
+  // /usr/local/bin/tmx symlink when installed globally.
+  const candidates = [
+    join(dirname(realpathSync(__filename)), "..", "package.json"),
+    join(dirname(__filename), "..", "package.json"),
+  ];
+  for (const p of candidates) {
+    try {
+      const pkg = JSON.parse(readFileSync(p, "utf-8")) as { version?: string };
+      if (pkg.version) {
+        console.log(`operad v${pkg.version}`);
+        return;
+      }
+    } catch { /* try next candidate */ }
   }
+  console.log("operad v?.?.? (package.json not found)");
 }
