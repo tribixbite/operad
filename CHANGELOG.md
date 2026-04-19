@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-04-19
+
+### Fixed
+- **npm publish workflow ENEEDAUTH** — `setup-node@v4` was writing an empty `_authToken=` line to `.npmrc` whenever the (unset) `NPM_TOKEN` secret was referenced. This blocked OIDC trusted-publisher auth. Removed the env var; OIDC now works.
+- **Workflow npm version too old for OIDC** — bumped runner to node 24 which ships npm ≥ 11.5.1. Node 22 ships npm 10.x which silently falls back to token auth.
+- **README missing from npm tarball** — `package.json` `files` array now explicitly includes `README.md`, `CHANGELOG.md`, `LICENSE`.
+
 ## [0.4.1] — 2026-04-19
 
 ### Fixed

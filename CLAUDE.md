@@ -114,10 +114,17 @@ tmx boot
 
 ## CI/CD
 
-- **CI**: `.github/workflows/ci.yml` — ubuntu-latest + macos-latest matrix (typecheck + build + smoke test)
-- **Publish**: `.github/workflows/publish.yml` — npm publish with OIDC provenance on GitHub release
+- **CI**: `.github/workflows/ci.yml` — ubuntu/macos/windows matrix (typecheck + build + bun test) plus dedicated `first-run`, `e2e`, and api-drift jobs
+- **Publish**: `.github/workflows/publish.yml` — `npm publish --provenance` on GitHub release (`release: published` trigger)
 - **Site deploy**: `.github/workflows/deploy-site.yml` — GitHub Pages on push to site/**
-- **Trusted publishing**: Configured on npmjs.com (repo: tribixbite/operad, workflow: publish.yml)
+- **Trusted publishing**: Configured on npmjs.com (repo: tribixbite/operad, workflow: `.github/workflows/publish.yml`). User: `willstone`.
+
+### npm publish requirements (HARD-WON):
+- **Workflow MUST use node ≥ 24** — node 22 ships npm 10.x which silently falls back to token auth instead of OIDC. Node 24 ships npm 11.5.1+ which honours trusted publishing.
+- **Workflow MUST NOT set `NODE_AUTH_TOKEN`** — `setup-node@v4` writes `_authToken=${value}` to `.npmrc`. When the secret is unset, it writes `_authToken=` (empty), and npm reports ENEEDAUTH because it thinks auth is configured but invalid. With trusted publishing, OIDC handles auth automatically; the env var must be absent entirely.
+- `permissions: id-token: write` is required at workflow level for OIDC.
+- `package.json` `files` array MUST include `README.md`, `CHANGELOG.md`, `LICENSE` explicitly — npm only auto-includes them outside the allowlist; if `files` is set, only those entries are included (npmjs.com page shows "no README" otherwise).
+- Tag pushes do NOT trigger publish — only `gh release create v0.X.Y` (or GitHub UI release publish) fires `release: published`.
 
 ## Code Conventions
 

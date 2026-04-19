@@ -24,24 +24,21 @@ jobs:
       - name: Build
         run: bun run build
 
+      # Node 24 ships with npm >= 11.5.1, required for OIDC trusted publishing.
+      # Node 22 ships with npm 10.x which silently falls back to token auth.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # Publish auth — requires ONE of these configured by repo owner:
-      #   (A) Trusted publisher configured on npmjs.com
-      #       (Settings → Access → Trusted Publishers, repo: tribixbite/operad,
-      #        workflow: .github/workflows/publish.yml, environment: optional).
-      #       Works automatically via OIDC with `id-token: write` permission above.
-      #       Note: requires npm >= 11.5.1 on the runner; setup-node@v4 bundles
-      #       npm 10.x with node 22, so trusted publishing via CLI may need a
-      #       npm upgrade step here if OIDC isn't honoured.
-      #   (B) Legacy classic token in repo secrets as NPM_TOKEN.
-      #       Classic tokens work with any npm version.
+      # Publish via trusted publisher (OIDC). Configured on npmjs.com:
+      #   Package settings → Access → Trusted Publishers
+      #   Repo: tribixbite/operad, Workflow: .github/workflows/publish.yml
+      # `id-token: write` (granted above) lets npm exchange the GitHub OIDC
+      # token for an npm publish token. NO NPM_TOKEN secret needed.
       #
-      # If both are configured, NODE_AUTH_TOKEN takes precedence.
+      # CRITICAL: do NOT set NODE_AUTH_TOKEN here. setup-node injects an
+      # empty `_authToken=` line into .npmrc when the secret is unset,
+      # which makes npm think auth is configured and skip OIDC → ENEEDAUTH.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

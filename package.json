@@ -1,6 +1,6 @@
 {
   "name": "operadic",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "commonjs",
   "description": "operad — manage all your Claude Code sessions from one dashboard. Web UI for skills, memories, and prompt history across projects. Auto-boots saved projects with health checks and crash recovery.",
   "author": "tribixbite",
@@ -15,7 +15,10 @@
   "files": [
     "dist/",
     "dashboard/dist/",
-    "watchdog.sh"
+    "watchdog.sh",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "keywords": [
     "claude",
