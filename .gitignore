@@ -9,3 +9,10 @@ site/dist/
 site/.astro/
 *.tgz
 .DS_Store
+
+# Stray local-env artifacts
+.claude/plans/
+.playwright-mcp/
+~/
+dashboard/~/
+2026-*-operad-*.txt
