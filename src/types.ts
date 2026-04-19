@@ -17,7 +17,7 @@ export type SessionStatus =
 
 /** Valid state transitions */
 export const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
-  pending:  ["waiting", "starting", "stopped"],  // "starting" for SessionController direct boot
+  pending:  ["waiting", "starting", "stopped"],  // "starting" for direct-boot path that skips waiting
   waiting:  ["starting", "stopped"],
   starting: ["running", "degraded", "failed", "stopping"],  // "degraded" for unhealthy start
   running:  ["degraded", "stopping", "stopped", "failed"],  // "failed" for explicit failure

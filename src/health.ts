@@ -149,9 +149,12 @@ function pidAliveCheck(sessionName: string, pid: number, startMs: number): Healt
 }
 
 /**
- * Run a single health check for a session by config — used by SessionController.
+ * Run a single health check for a session by config.
  * Derives the appropriate HealthCheckConfig from the session config (falling back
  * to tmux_alive if no health config is specified), then delegates to checkSessionHealth.
+ *
+ * Currently unused — kept as a building block for future per-session health probing
+ * outside the full sweep loop.
  */
 export async function checkSingleSessionHealth(
   sessionName: string,
