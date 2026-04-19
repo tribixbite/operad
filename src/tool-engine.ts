@@ -34,7 +34,7 @@ export class ToolEngine {
       // Use the first configured session path as cwd, falling back to $HOME
       cwd: this.ctx.config.sessions.find((s) => s.path)?.path ?? homedir(),
       // memoryDb is guaranteed non-null when agents are running (start() ensures it)
-      db: this.ctx.memoryDb!,
+      db: this.ctx.getMemoryDb()!,
       log: this.ctx.log,
       signal: new AbortController().signal,
       getSessionStates: () => {

@@ -106,9 +106,13 @@ export class WsHandler {
     ws: import("ws").WebSocket,
     msg: WsClientMessage,
   ): Promise<void> {
+    // Resolve lazy deps once per dispatch so TypeScript can narrow them.
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
+
     switch (msg.type) {
       case "attach": {
-        if (!this.ctx.sdkBridge) throw new Error("SDK bridge not initialized");
+        if (!sdkBridge) throw new Error("SDK bridge not initialized");
         if (!this.ctx.getSwitchboard().all || !this.ctx.getSwitchboard().sdkBridge)
           throw new Error("SDK bridge disabled by switchboard");
         const sessionName = msg.sessionName;
@@ -117,13 +121,13 @@ export class WsHandler {
         const sessionPath = this.ctx.resolveSessionPath(sessionName);
         if (!sessionPath) throw new Error(`No path for session: ${sessionName}`);
         const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : undefined;
-        const result = await this.ctx.sdkBridge.attach(sessionName, sessionId, sessionPath);
+        const result = await sdkBridge.attach(sessionName, sessionId, sessionPath);
         ws.send(JSON.stringify({ type: "attach_result", ...result }));
         break;
       }
 
       case "prompt": {
-        if (!this.ctx.sdkBridge?.isAttached) throw new Error("No active SDK session");
+        if (!sdkBridge?.isAttached) throw new Error("No active SDK session");
         const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
         if (!prompt) throw new Error("prompt required");
         // Inject memories if available and switchboard allows it
@@ -131,13 +135,13 @@ export class WsHandler {
         if (
           this.ctx.getSwitchboard().all &&
           this.ctx.getSwitchboard().memoryInjection &&
-          this.ctx.memoryDb &&
-          this.ctx.sdkBridge.activeSessionName
+          memoryDb &&
+          sdkBridge.activeSessionName
         ) {
-          const sessionPath = this.ctx.resolveSessionPath(this.ctx.sdkBridge.activeSessionName);
+          const sessionPath = this.ctx.resolveSessionPath(sdkBridge.activeSessionName);
           if (sessionPath) {
             const { prompt: memPrompt } = await buildMemoryPrompt(
-              this.ctx.memoryDb,
+              memoryDb,
               sessionPath,
               10,
               prompt,
@@ -146,7 +150,7 @@ export class WsHandler {
           }
         }
         // Send prompt (non-blocking — messages stream via WS broadcast)
-        this.ctx.sdkBridge.send(fullPrompt, {
+        sdkBridge.send(fullPrompt, {
           effort: typeof msg.effort === "string" ? (msg.effort as any) : undefined,
           thinking: msg.thinking as any,
         }).catch((err) => {
@@ -156,24 +160,24 @@ export class WsHandler {
       }
 
       case "permission_response": {
-        if (!this.ctx.sdkBridge) throw new Error("SDK bridge not initialized");
+        if (!sdkBridge) throw new Error("SDK bridge not initialized");
         const id = typeof msg.id === "string" ? msg.id : "";
         const behavior = msg.behavior === "allow" ? "allow" : "deny";
-        const resolved = this.ctx.sdkBridge.resolvePermission(id, behavior);
+        const resolved = sdkBridge.resolvePermission(id, behavior);
         ws.send(JSON.stringify({ type: "permission_resolved", id, resolved }));
         break;
       }
 
       case "abort": {
-        if (this.ctx.sdkBridge?.isAttached) {
-          await this.ctx.sdkBridge.interrupt();
+        if (sdkBridge?.isAttached) {
+          await sdkBridge.interrupt();
         }
         break;
       }
 
       case "detach": {
-        if (this.ctx.sdkBridge?.isAttached) {
-          await this.ctx.sdkBridge.detach();
+        if (sdkBridge?.isAttached) {
+          await sdkBridge.detach();
         }
         break;
       }
@@ -225,14 +229,14 @@ export class WsHandler {
 
       case "agent_chat_history": {
         const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
-        const history = this.ctx.memoryDb?.getConversationHistory(agentName, 50) ?? [];
+        const history = memoryDb?.getConversationHistory(agentName, 50) ?? [];
         ws.send(JSON.stringify({ type: "agent_chat_history", agentName, messages: history }));
         break;
       }
 
       case "agent_chat_clear": {
         const agentName = typeof msg.agentName === "string" ? msg.agentName : "";
-        const cleared = this.ctx.memoryDb?.clearConversation(agentName) ?? 0;
+        const cleared = memoryDb?.clearConversation(agentName) ?? 0;
         ws.send(JSON.stringify({ type: "agent_chat_cleared", agentName, cleared }));
         break;
       }

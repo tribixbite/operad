@@ -38,7 +38,8 @@ export class PersistenceEngine {
    * Exported so Daemon can delegate its maybeDailySnapshot() call here.
    */
   maybeDailySnapshot(): void {
-    const { memoryDb, agentConfigs, log } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
+    const { agentConfigs, log } = this.ctx;
     if (!memoryDb) return;
 
     const today = new Date().toISOString().slice(0, 10);
@@ -69,9 +70,10 @@ export class PersistenceEngine {
    * Should be called on every cognitive timer tick (~60 s cadence).
    */
   maybeConsolidate(): void {
-    const { memoryDb, state, sdkBridge, agentConfigs, log, broadcast, getLastActivityEpoch } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
     if (!memoryDb) return;
 
+    const { state, agentConfigs, log, broadcast, getLastActivityEpoch } = this.ctx;
     const systemState = state.getState();
     const now = Math.floor(Date.now() / 1000);
     const idleSeconds = now - getLastActivityEpoch();
@@ -80,7 +82,7 @@ export class PersistenceEngine {
       idleSeconds,
       batteryPct: systemState.battery?.percentage ?? 100,
       charging: systemState.battery?.charging ?? true,
-      sdkBusy: sdkBridge?.isAttached ?? false,
+      sdkBusy: this.ctx.getSdkBridge()?.isAttached ?? false,
     };
 
     const lastRun = getLastConsolidationTime(memoryDb);

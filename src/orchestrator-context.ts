@@ -27,9 +27,19 @@ import type { DashboardServer } from "./http.js";
 export interface CoreDeps {
   config: TmxConfig;
   state: StateManager;
-  memoryDb: MemoryDb | null;
+  /**
+   * Lazy getter — memoryDb is initialised in Daemon.startDashboard() after
+   * the context object is built. Always call getMemoryDb() at use-time rather
+   * than capturing the value at construction time.
+   */
+  getMemoryDb: () => MemoryDb | null;
   getSwitchboard: () => Switchboard;
-  sdkBridge: SdkBridge | null;
+  /**
+   * Lazy getter — sdkBridge is initialised in Daemon.startDashboard() after
+   * the context object is built. Always call getSdkBridge() at use-time rather
+   * than capturing the value at construction time.
+   */
+  getSdkBridge: () => SdkBridge | null;
   log: Logger;
   agentConfigs: AgentConfig[];
   /** Dynamic session registry — shared reference, mutations are visible system-wide */

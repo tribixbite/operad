@@ -179,11 +179,16 @@ export function findBareServicePid(pattern: RegExp): number | null {
 
 /** Check if the tmux server is alive */
 export function isTmuxServerAlive(): boolean {
-  const result = spawnSync(TMUX_BIN(),["start-server"], {
+  const result = spawnSync(TMUX_BIN(), ["start-server"], {
     timeout: 5000,
     stdio: "ignore",
     env: getCleanEnv(),
   });
+  // Surface ENOENT so a missing tmux binary is visible rather than silently
+  // returning false and being mistaken for a simple "server not running" case.
+  if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") {
+    process.stderr.write(`[operad] isTmuxServerAlive: tmux binary not found at ${TMUX_BIN()} (ENOENT)\n`);
+  }
   return result.status === 0;
 }
 

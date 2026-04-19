@@ -137,6 +137,11 @@ export class RestHandler {
     path: string,
     body: string,
   ): Promise<{ status: number; data: unknown }> {
+    // Resolve lazy deps once per request — getters may return null if not yet
+    // initialised; every usage site guards with an explicit null check.
+    const memoryDb = this.ctx.getMemoryDb();
+    const sdkBridge = this.ctx.getSdkBridge();
+
     // Separate query string from path: /api/command/name?key=val
     const [pathPart, queryPart] = path.split("?", 2);
     const queryParams = new URLSearchParams(queryPart ?? "");
@@ -754,13 +759,13 @@ export class RestHandler {
 
           if (subCmd === "attach") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            if (!this.ctx.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+            if (!sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
             if (!arg) return { status: 400, data: { error: "Session name required" } };
             try {
               const parsed = body ? JSON.parse(body) as { sessionId?: string; cwd?: string } : {};
               const sessionPath = parsed.cwd ?? this.ctx.resolveSessionPath(arg);
               if (!sessionPath) return { status: 400, data: { error: `No path for session: ${arg}` } };
-              const result = await this.ctx.sdkBridge.attach(arg, parsed.sessionId, sessionPath);
+              const result = await sdkBridge.attach(arg, parsed.sessionId, sessionPath);
               return { status: 200, data: result };
             } catch (err) {
               return { status: 500, data: { error: `Attach failed: ${err}` } };
@@ -769,17 +774,17 @@ export class RestHandler {
 
           if (subCmd === "detach") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            if (this.ctx.sdkBridge?.isAttached) await this.ctx.sdkBridge.detach();
+            if (sdkBridge?.isAttached) await sdkBridge.detach();
             return { status: 200, data: { ok: true } };
           }
 
           if (subCmd === "prompt") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            if (!this.ctx.sdkBridge?.isAttached) return { status: 400, data: { error: "No active SDK session" } };
+            if (!sdkBridge?.isAttached) return { status: 400, data: { error: "No active SDK session" } };
             try {
               const parsed = JSON.parse(body) as { prompt: string; effort?: string; thinking?: unknown };
               if (!parsed.prompt) return { status: 400, data: { error: "prompt required" } };
-              this.ctx.sdkBridge.send(parsed.prompt, {
+              sdkBridge.send(parsed.prompt, {
                 effort: parsed.effort as any,
                 thinking: parsed.thinking as any,
               }).catch((err) => this.ctx.log.error(`SDK prompt error: ${err}`));
@@ -793,28 +798,28 @@ export class RestHandler {
             return {
               status: 200,
               data: {
-                attached: this.ctx.sdkBridge?.isAttached ?? false,
-                activeSession: this.ctx.sdkBridge?.activeSessionName ?? null,
-                busy: this.ctx.sdkBridge?.isBusy ?? false,
+                attached: sdkBridge?.isAttached ?? false,
+                activeSession: sdkBridge?.activeSessionName ?? null,
+                busy: sdkBridge?.isBusy ?? false,
               },
             };
           }
 
           if (subCmd === "sessions") {
             if (arg && segments[3] === "messages") {
-              if (!this.ctx.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+              if (!sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
               try {
-                const msgs = await this.ctx.sdkBridge.getMessages(arg);
+                const msgs = await sdkBridge.getMessages(arg);
                 return { status: 200, data: msgs };
               } catch (err) {
                 return { status: 500, data: { error: `Failed to get messages: ${err}` } };
               }
             }
-            if (!this.ctx.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+            if (!sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
             try {
               const dir = queryParams.get("dir") ?? undefined;
               const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
-              const sessions = await this.ctx.sdkBridge.listAllSessions(dir, limit);
+              const sessions = await sdkBridge.listAllSessions(dir, limit);
               return { status: 200, data: sessions };
             } catch (err) {
               return { status: 500, data: { error: `Failed to list sessions: ${err}` } };
@@ -823,7 +828,7 @@ export class RestHandler {
 
           if (subCmd === "interrupt") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            if (this.ctx.sdkBridge?.isAttached) await this.ctx.sdkBridge.interrupt();
+            if (sdkBridge?.isAttached) await sdkBridge.interrupt();
             return { status: 200, data: { ok: true } };
           }
 
@@ -851,15 +856,15 @@ export class RestHandler {
           const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
 
           if (subCmd === "runs") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const agentFilter = queryParams.get("agent") ?? undefined;
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
-            return { status: 200, data: this.ctx.memoryDb.getAgentRuns(limit, agentFilter) };
+            return { status: 200, data: memoryDb.getAgentRuns(limit, agentFilter) };
           }
 
           if (subCmd === "costs") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
-            return { status: 200, data: this.ctx.memoryDb.getAgentCostSummary() };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            return { status: 200, data: memoryDb.getAgentCostSummary() };
           }
 
           if (!subCmd && method === "GET") {
@@ -942,7 +947,7 @@ export class RestHandler {
           }
 
           if (subCmd && arg === "run" && method === "POST") {
-            if (this.ctx.sdkBridge?.isAttached) {
+            if (sdkBridge?.isAttached) {
               return { status: 409, data: { error: "SDK session active — cannot run standalone agent" } };
             }
             try {
@@ -958,42 +963,42 @@ export class RestHandler {
           }
 
           if (subCmd && arg === "learnings" && method === "GET") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const category = queryParams.get("category") ?? undefined;
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
-            return { status: 200, data: this.ctx.memoryDb.getAgentLearnings(subCmd, limit, category) };
+            return { status: 200, data: memoryDb.getAgentLearnings(subCmd, limit, category) };
           }
 
           if (subCmd && arg === "personality" && method === "GET") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const traitName = segments[3] ? decodeURIComponent(segments[3]) : undefined;
             if (traitName === "history") {
               const trait = queryParams.get("trait") ?? "";
-              return { status: 200, data: this.ctx.memoryDb.getPersonalityHistory(subCmd, trait) };
+              return { status: 200, data: memoryDb.getPersonalityHistory(subCmd, trait) };
             }
             if (traitName === "drift") {
-              return { status: 200, data: this.ctx.memoryDb.getPersonalityDrift(subCmd) };
+              return { status: 200, data: memoryDb.getPersonalityDrift(subCmd) };
             }
-            return { status: 200, data: this.ctx.memoryDb.getPersonalitySnapshot(subCmd) };
+            return { status: 200, data: memoryDb.getPersonalitySnapshot(subCmd) };
           }
 
           if (subCmd && arg === "strategy-history" && method === "GET") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
-            return { status: 200, data: this.ctx.memoryDb.getStrategyHistory(subCmd, limit) };
+            return { status: 200, data: memoryDb.getStrategyHistory(subCmd, limit) };
           }
 
           if (subCmd && arg === "export" && method === "GET") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const agent = this.ctx.agentConfigs.find((a) => a.name === subCmd);
             if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
             const template = queryParams.get("template") === "1";
-            const bundle = exportAgentState(this.ctx.memoryDb, agent, { template });
+            const bundle = exportAgentState(memoryDb, agent, { template });
             return { status: 200, data: bundle };
           }
 
           if (subCmd && arg === "import" && method === "POST") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const agent = this.ctx.agentConfigs.find((a) => a.name === subCmd);
             if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
             try {
@@ -1001,7 +1006,7 @@ export class RestHandler {
                 bundle: AgentStateBundle;
                 options?: Partial<ImportOptions>;
               };
-              const result = importAgentState(this.ctx.memoryDb, parsed.bundle, parsed.options);
+              const result = importAgentState(memoryDb, parsed.bundle, parsed.options);
               return { status: 200, data: result };
             } catch (err) {
               return { status: 400, data: { error: String(err) } };
@@ -1014,11 +1019,11 @@ export class RestHandler {
           }
 
           if (subCmd && arg === "snapshot" && method === "POST") {
-            if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const agent = this.ctx.agentConfigs.find((a) => a.name === subCmd);
             if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
             const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
-            const snapshotPath = saveSnapshot(this.ctx.memoryDb, agent, snapshotDir);
+            const snapshotPath = saveSnapshot(memoryDb, agent, snapshotDir);
             const pruned = pruneSnapshots(snapshotDir, subCmd);
             return { status: 201, data: { path: snapshotPath, pruned } };
           }
@@ -1028,32 +1033,32 @@ export class RestHandler {
 
         case "agent-chat": {
           const agentName = name ? decodeURIComponent(name) : undefined;
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (agentName && method === "GET") {
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
-            return { status: 200, data: this.ctx.memoryDb.getConversationHistory(agentName, limit) };
+            return { status: 200, data: memoryDb.getConversationHistory(agentName, limit) };
           }
           if (agentName && method === "DELETE") {
-            const cleared = this.ctx.memoryDb.clearConversation(agentName);
+            const cleared = memoryDb.clearConversation(agentName);
             return { status: 200, data: { ok: true, cleared } };
           }
           return { status: 400, data: { error: "Use WS agent_chat for sending messages" } };
         }
 
         case "agent-messages": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (!name && method === "GET") {
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
-            return { status: 200, data: this.ctx.memoryDb.getRecentAgentMessages(limit) };
+            return { status: 200, data: memoryDb.getRecentAgentMessages(limit) };
           }
 
           if (name && segments[1] && method === "GET") {
             const agent1 = decodeURIComponent(name);
             const agent2 = decodeURIComponent(segments[1]);
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
-            return { status: 200, data: this.ctx.memoryDb.getConversation(agent1, agent2, limit) };
+            return { status: 200, data: memoryDb.getConversation(agent1, agent2, limit) };
           }
 
           if (!name && method === "POST") {
@@ -1062,7 +1067,7 @@ export class RestHandler {
               if (!parsed.from || !parsed.to || !parsed.content) {
                 return { status: 400, data: { error: "from, to, and content required" } };
               }
-              const msgId = this.ctx.memoryDb.sendAgentMessage(parsed.from, parsed.to, parsed.content, {
+              const msgId = memoryDb.sendAgentMessage(parsed.from, parsed.to, parsed.content, {
                 messageType: parsed.type,
               });
               this.ctx.broadcastWs("agent_message", {
@@ -1077,7 +1082,7 @@ export class RestHandler {
           }
 
           if (name === "pairs" && method === "GET") {
-            return { status: 200, data: this.ctx.memoryDb.getAgentConversationPairs() };
+            return { status: 200, data: memoryDb.getAgentConversationPairs() };
           }
 
           return { status: 400, data: { error: "Unknown agent-messages endpoint" } };
@@ -1087,16 +1092,16 @@ export class RestHandler {
           const subCmd = name;
           const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
 
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (subCmd === "state" && method === "GET") {
             const state = this.ctx.state.getState();
-            const ctx = buildOodaContext(state, this.ctx.memoryDb, this.ctx.config.orchestrator);
+            const ctx = buildOodaContext(state, memoryDb, this.ctx.config.orchestrator);
             return { status: 200, data: ctx };
           }
 
           if (subCmd === "trigger" && method === "POST") {
-            if (this.ctx.sdkBridge?.isAttached) {
+            if (sdkBridge?.isAttached) {
               return { status: 409, data: { error: "SDK session active" } };
             }
             this.agentEngine.runOodaCycle().catch((err) => {
@@ -1107,13 +1112,13 @@ export class RestHandler {
 
           if (subCmd === "goals") {
             if (method === "GET") {
-              return { status: 200, data: this.ctx.memoryDb.getGoalTree() };
+              return { status: 200, data: memoryDb.getGoalTree() };
             }
             if (method === "POST") {
               try {
                 const parsed = JSON.parse(body) as { title: string; description?: string; priority?: number; parentId?: number };
                 if (!parsed.title) return { status: 400, data: { error: "title required" } };
-                const id = this.ctx.memoryDb.createGoal(parsed.title, {
+                const id = memoryDb.createGoal(parsed.title, {
                   description: parsed.description,
                   parentId: parsed.parentId,
                   priority: parsed.priority,
@@ -1128,7 +1133,7 @@ export class RestHandler {
           if (subCmd === "goals" && arg && method === "PUT") {
             try {
               const parsed = JSON.parse(body) as { status?: string; actualOutcome?: string; successScore?: number };
-              const updated = this.ctx.memoryDb.updateGoal(Number(arg), parsed);
+              const updated = memoryDb.updateGoal(Number(arg), parsed);
               return { status: updated ? 200 : 404, data: { ok: updated } };
             } catch {
               return { status: 400, data: { error: "Invalid JSON body" } };
@@ -1138,22 +1143,22 @@ export class RestHandler {
           if (subCmd === "decisions" && method === "GET") {
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
             const agentFilter = queryParams.get("agent") ?? undefined;
-            return { status: 200, data: this.ctx.memoryDb.getRecentDecisions(limit, agentFilter) };
+            return { status: 200, data: memoryDb.getRecentDecisions(limit, agentFilter) };
           }
 
           if (subCmd === "strategy" && arg && method === "GET") {
-            const strategy = this.ctx.memoryDb.getActiveStrategy(arg);
+            const strategy = memoryDb.getActiveStrategy(arg);
             if (!strategy) return { status: 404, data: { error: "No strategy found" } };
             return { status: 200, data: strategy };
           }
 
           if (subCmd === "messages" && method === "GET") {
             const agentFilter = queryParams.get("agent") ?? "master-controller";
-            return { status: 200, data: this.ctx.memoryDb.getUnreadMessages(agentFilter) };
+            return { status: 200, data: memoryDb.getUnreadMessages(agentFilter) };
           }
 
           if (subCmd === "metrics" && method === "GET") {
-            return { status: 200, data: this.ctx.memoryDb.getDecisionMetrics() };
+            return { status: 200, data: memoryDb.getDecisionMetrics() };
           }
 
           return { status: 400, data: { error: `Unknown cognitive endpoint: ${subCmd ?? "(root)"}` } };
@@ -1163,19 +1168,19 @@ export class RestHandler {
           const subCmd = name;
           const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
 
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (!subCmd && method === "GET") {
             const category = queryParams.get("category") ?? undefined;
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 100;
-            return { status: 200, data: this.ctx.memoryDb.getProfile(category, limit) };
+            return { status: 200, data: memoryDb.getProfile(category, limit) };
           }
 
           if (subCmd === "note" && method === "POST") {
             try {
               const parsed = JSON.parse(body) as { content: string; tags?: string[]; weight?: number };
               if (!parsed.content) return { status: 400, data: { error: "content required" } };
-              const id = this.ctx.memoryDb.addProfileEntry("note", parsed.content, {
+              const id = memoryDb.addProfileEntry("note", parsed.content, {
                 weight: parsed.weight,
                 tags: parsed.tags,
                 source: "manual",
@@ -1190,7 +1195,7 @@ export class RestHandler {
             try {
               const parsed = JSON.parse(body) as { content: string; weight?: number };
               if (!parsed.content) return { status: 400, data: { error: "content required" } };
-              const id = this.ctx.memoryDb.addProfileEntry("trait", parsed.content, {
+              const id = memoryDb.addProfileEntry("trait", parsed.content, {
                 weight: parsed.weight ?? 3.0,
                 source: "manual",
               });
@@ -1207,7 +1212,7 @@ export class RestHandler {
               const chunks = chunkText(parsed.content, 2000);
               let saved = 0;
               for (const chunk of chunks) {
-                const id = this.ctx.memoryDb.addProfileEntry("chat_export", chunk, {
+                const id = memoryDb.addProfileEntry("chat_export", chunk, {
                   weight: 0.5,
                   source: parsed.source ?? "upload",
                 });
@@ -1220,10 +1225,10 @@ export class RestHandler {
           }
 
           if (subCmd === "preview" && method === "GET") {
-            const traits = this.ctx.memoryDb.getProfile("trait", 20);
-            const notes = this.ctx.memoryDb.getProfile("note", 20);
-            const styles = this.ctx.memoryDb.getProfile("style", 10);
-            const chatCount = this.ctx.memoryDb.getProfile("chat_export").length;
+            const traits = memoryDb.getProfile("trait", 20);
+            const notes = memoryDb.getProfile("note", 20);
+            const styles = memoryDb.getProfile("style", 10);
+            const chatCount = memoryDb.getProfile("chat_export").length;
 
             let preview = "## User Profile\n\n";
             if (traits.length > 0) {
@@ -1249,14 +1254,14 @@ export class RestHandler {
             if (method === "PUT") {
               try {
                 const parsed = JSON.parse(body) as { content?: string; weight?: number; tags?: string[] };
-                const updated = this.ctx.memoryDb.updateProfileEntry(profileId, parsed);
+                const updated = memoryDb.updateProfileEntry(profileId, parsed);
                 return { status: updated ? 200 : 404, data: { ok: updated } };
               } catch {
                 return { status: 400, data: { error: "Invalid JSON body" } };
               }
             }
             if (method === "DELETE") {
-              const deleted = this.ctx.memoryDb.deleteProfileEntry(profileId);
+              const deleted = memoryDb.deleteProfileEntry(profileId);
               return { status: deleted ? 200 : 404, data: { ok: deleted } };
             }
           }
@@ -1265,18 +1270,18 @@ export class RestHandler {
         }
 
         case "memories": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
           const projectPath = name ? decodeURIComponent(name) : undefined;
 
           if (method === "GET" && projectPath) {
             if (segments[2] === "search") {
               const q = queryParams.get("q") ?? "";
               const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 10;
-              const results = this.ctx.memoryDb.searchMemories(projectPath, q, limit);
+              const results = memoryDb.searchMemories(projectPath, q, limit);
               return { status: 200, data: results };
             }
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
-            const memories = this.ctx.memoryDb.getTopMemories(projectPath, limit);
+            const memories = memoryDb.getTopMemories(projectPath, limit);
             return { status: 200, data: memories };
           }
 
@@ -1284,7 +1289,7 @@ export class RestHandler {
             try {
               const parsed = JSON.parse(body) as { category: string; content: string; sessionId?: string };
               if (!parsed.content) return { status: 400, data: { error: "content required" } };
-              const id = this.ctx.memoryDb.createMemory(
+              const id = memoryDb.createMemory(
                 projectPath,
                 (parsed.category ?? "discovery") as any,
                 parsed.content,
@@ -1299,7 +1304,7 @@ export class RestHandler {
           if (method === "DELETE" && projectPath) {
             const memId = segments[2] ? Number(segments[2]) : undefined;
             if (!memId) return { status: 400, data: { error: "Memory ID required" } };
-            const deleted = this.ctx.memoryDb.deleteMemory(memId);
+            const deleted = memoryDb.deleteMemory(memId);
             return { status: deleted ? 200 : 404, data: { ok: deleted } };
           }
 
@@ -1307,11 +1312,11 @@ export class RestHandler {
             if (segments[1] === "decay") {
               let decayed = 0;
               const projects = new Set<string>();
-              for (const mem of this.ctx.memoryDb.getTopMemories("", 1000)) {
+              for (const mem of memoryDb.getTopMemories("", 1000)) {
                 projects.add(mem.project_path);
               }
               for (const p of projects) {
-                decayed += this.ctx.memoryDb.decayMemories(p);
+                decayed += memoryDb.decayMemories(p);
               }
               return { status: 200, data: { decayed } };
             }
@@ -1329,9 +1334,9 @@ export class RestHandler {
               const tool = toolExec.getTool(name);
               if (!tool) return { status: 404, data: { error: `Tool "${name}" not found` } };
               const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
-              if (arg === "history" && this.ctx.memoryDb) {
+              if (arg === "history" && memoryDb) {
                 const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
-                const executions = this.ctx.memoryDb.getToolExecutions(undefined, limit)
+                const executions = memoryDb.getToolExecutions(undefined, limit)
                   .filter((e) => e.tool_name === name);
                 return { status: 200, data: executions };
               }
@@ -1359,23 +1364,23 @@ export class RestHandler {
             };
           }
 
-          if (method === "GET" && name === "stats" && this.ctx.memoryDb) {
-            return { status: 200, data: this.ctx.memoryDb.getToolStats() };
+          if (method === "GET" && name === "stats" && memoryDb) {
+            return { status: 200, data: memoryDb.getToolStats() };
           }
 
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
         case "trust": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
           if (method === "GET" && name) {
-            const { score, recommended } = this.ctx.memoryDb.getRecommendedAutonomy(name);
-            const history = this.ctx.memoryDb.getTrustHistory(name, 20);
+            const { score, recommended } = memoryDb.getRecommendedAutonomy(name);
+            const history = memoryDb.getTrustHistory(name, 20);
             return { status: 200, data: { agent: name, score, recommended, history } };
           }
           if (method === "GET") {
             const agents = this.ctx.agentConfigs.map((a) => {
-              const { score, recommended } = this.ctx.memoryDb!.getRecommendedAutonomy(a.name);
+              const { score, recommended } = memoryDb!.getRecommendedAutonomy(a.name);
               return { agent: a.name, score, recommended, current: a.autonomy_level ?? "observe" };
             });
             return { status: 200, data: agents };
@@ -1384,32 +1389,32 @@ export class RestHandler {
         }
 
         case "leases": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
           if (method === "GET" && name) {
-            const leases = this.ctx.memoryDb.getActiveLeases(name);
+            const leases = memoryDb.getActiveLeases(name);
             return { status: 200, data: leases };
           }
           if (method === "DELETE" && name) {
             const goalId = queryParams.has("goal_id") ? Number(queryParams.get("goal_id")) : undefined;
-            const revoked = this.ctx.memoryDb.revokeLeases(name, goalId);
+            const revoked = memoryDb.revokeLeases(name, goalId);
             return { status: 200, data: { revoked } };
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
         case "consolidation": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
 
           if (method === "GET") {
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 10;
-            const history = getConsolidationHistory(this.ctx.memoryDb, limit);
-            const lastRun = getLastConsolidationTime(this.ctx.memoryDb);
+            const history = getConsolidationHistory(memoryDb, limit);
+            const lastRun = getLastConsolidationTime(memoryDb);
             return { status: 200, data: { last_run_at: lastRun, history } };
           }
 
           if (method === "POST") {
             const agentNames = this.ctx.agentConfigs.filter((a) => a.enabled).map((a) => a.name);
-            const result = runConsolidation(this.ctx.memoryDb, agentNames, this.ctx.log);
+            const result = runConsolidation(memoryDb, agentNames, this.ctx.log);
             return { status: 200, data: result };
           }
 
@@ -1417,11 +1422,11 @@ export class RestHandler {
         }
 
         case "specializations": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
 
           if (method === "GET") {
             try {
-              const specs = this.ctx.memoryDb.getSpecializations(name || undefined);
+              const specs = memoryDb.getSpecializations(name || undefined);
               return { status: 200, data: specs };
             } catch (err) {
               this.ctx.log.warn("getSpecializations failed", { err: String(err) });
@@ -1433,12 +1438,12 @@ export class RestHandler {
         }
 
         case "roundtables": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Database not ready" } };
+          if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
 
           if (method === "GET") {
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
             try {
-              const dbHandle = this.ctx.memoryDb.requireDb();
+              const dbHandle = memoryDb.requireDb();
               const messages = dbHandle.prepare(
                 `SELECT * FROM agent_messages WHERE message_type LIKE 'roundtable_%'
                  ORDER BY created_at DESC LIMIT ?`,
@@ -1451,7 +1456,7 @@ export class RestHandler {
           }
 
           if (method === "POST" && body) {
-            if (!this.ctx.sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+            if (!sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
             try {
               const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
               const topic = String(b.topic ?? "");
@@ -1516,50 +1521,50 @@ export class RestHandler {
         }
 
         case "quota": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
           if (method === "GET") {
-            return { status: 200, data: computeQuotaStatus(this.ctx.memoryDb, this.ctx.config.orchestrator) };
+            return { status: 200, data: computeQuotaStatus(memoryDb, this.ctx.config.orchestrator) };
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
         case "tokens-daily": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
           if (method === "GET") {
             const days = queryParams.has("days") ? Number(queryParams.get("days")) : 14;
-            return { status: 200, data: this.ctx.memoryDb.getDailyTokens(days) };
+            return { status: 200, data: memoryDb.getDailyTokens(days) };
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
         case "tokens-window": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
           if (method === "GET") {
             const hours = this.ctx.config.orchestrator.quota_window_hours;
-            return { status: 200, data: this.ctx.memoryDb.getWindowTokens(hours) };
+            return { status: 200, data: memoryDb.getWindowTokens(hours) };
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
         case "costs": {
-          if (!this.ctx.memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+          if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (method === "GET") {
             if (name === "daily") {
               const days = queryParams.has("days") ? Number(queryParams.get("days")) : 30;
-              return { status: 200, data: this.ctx.memoryDb.getDailyCosts(days) };
+              return { status: 200, data: memoryDb.getDailyCosts(days) };
             }
             if (name === "per-session") {
               const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
-              return { status: 200, data: this.ctx.memoryDb.getPerSessionCosts(limit) };
+              return { status: 200, data: memoryDb.getPerSessionCosts(limit) };
             }
             if (name) {
-              const costs = this.ctx.memoryDb.getSessionCosts(name);
+              const costs = memoryDb.getSessionCosts(name);
               return { status: 200, data: costs };
             }
             const fromEpoch = queryParams.has("from") ? Number(queryParams.get("from")) : undefined;
             const toEpoch = queryParams.has("to") ? Number(queryParams.get("to")) : undefined;
-            return { status: 200, data: this.ctx.memoryDb.getAggregateCosts(fromEpoch, toEpoch) };
+            return { status: 200, data: memoryDb.getAggregateCosts(fromEpoch, toEpoch) };
           }
 
           return { status: 405, data: { error: "Method not allowed" } };

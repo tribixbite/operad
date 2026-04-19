@@ -169,7 +169,9 @@ export class WindowsPlatform implements Platform {
    * falling back to a simple powershell MessageBox. Silently no-ops on failure.
    */
   notify(title: string, content: string, _id?: string): void {
-    // Attempt a lightweight PowerShell toast notification (Windows 10+)
+    // Attempt a lightweight PowerShell toast notification (Windows 10+).
+    // Title and content are passed via env vars to avoid PowerShell string
+    // interpolation injection (session names are user-controlled).
     try {
       spawnSync(
         "powershell",
@@ -177,20 +179,24 @@ export class WindowsPlatform implements Platform {
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          // Use the Windows API via COM to show a tray notification
+          // Read title/content from env vars — no interpolation of user data
           `
           $notif = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
           $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
           $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($template)
           $nodes = $xml.GetElementsByTagName('text')
-          $nodes.Item(0).AppendChild($xml.CreateTextNode('${title.replace(/'/g, "''")}')) | Out-Null
-          $nodes.Item(1).AppendChild($xml.CreateTextNode('${content.replace(/'/g, "''")}')) | Out-Null
+          $nodes.Item(0).AppendChild($xml.CreateTextNode($env:OPERAD_NOTIFY_TITLE)) | Out-Null
+          $nodes.Item(1).AppendChild($xml.CreateTextNode($env:OPERAD_NOTIFY_CONTENT)) | Out-Null
           $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
           $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('operad')
           $notifier.Show($toast)
           `.trim(),
         ],
-        { timeout: 5000, stdio: "ignore" },
+        {
+          timeout: 5000,
+          stdio: "ignore",
+          env: { ...process.env, OPERAD_NOTIFY_TITLE: title, OPERAD_NOTIFY_CONTENT: content },
+        },
       );
     } catch {
       // Notification is best-effort — non-fatal

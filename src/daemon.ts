@@ -239,9 +239,11 @@ export class Daemon {
     const ctx: OrchestratorContext = {
       config: this.config,
       state: this.state,
-      memoryDb: this.memoryDb ?? null,
+      // Lazy getters — memoryDb and sdkBridge are set in startDashboard() after
+      // the context is built; capturing them as values here would snapshot null.
+      getMemoryDb: () => this.memoryDb,
       getSwitchboard: () => this.switchboard,
-      sdkBridge: this.sdkBridge ?? null,
+      getSdkBridge: () => this.sdkBridge,
       log: this.log,
       agentConfigs: this.agentConfigs ?? [],
       broadcast: (type, payload) => this.broadcastSwitchboard(type, payload),

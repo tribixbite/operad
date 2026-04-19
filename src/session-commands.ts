@@ -84,7 +84,8 @@ export class SessionCommands {
       };
     }
 
-    const { budget, wake, memoryDb, agentConfigs } = this.ctx;
+    const { budget, wake, agentConfigs } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
     return {
       ok: true,
       data: {

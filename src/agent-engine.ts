@@ -64,8 +64,9 @@ export class AgentEngine {
 
     // Apply switchboard overrides: master switch + per-agent toggles
     const enabledAgents = this.ctx.agentConfigs.filter((a) => this.ctx.isAgentEnabled(a.name));
-    if (this.ctx.sdkBridge) {
-      this.ctx.sdkBridge.updateAgents(toSdkAgentMap(enabledAgents));
+    const sdkBridgeForAgents = this.ctx.getSdkBridge();
+    if (sdkBridgeForAgents) {
+      sdkBridgeForAgents.updateAgents(toSdkAgentMap(enabledAgents));
     }
 
     // Seed default specializations for builtin agents (idempotent — upsert won't overwrite)
@@ -79,7 +80,7 @@ export class AgentEngine {
    * Called automatically by reloadAgents().
    */
   seedSpecializations(): void {
-    const { memoryDb } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
     if (!memoryDb) return;
 
     const defaults: Record<string, string[]> = {
@@ -112,7 +113,9 @@ export class AgentEngine {
    * Called every 60s by cognitiveTimer in Daemon.
    */
   async maybeTriggerOoda(): Promise<void> {
-    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
+    const { agentConfigs, config, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
 
     // Don't run if SDK is busy or no memory DB
     if (!sdkBridge || !memoryDb) return;
@@ -156,7 +159,9 @@ export class AgentEngine {
    * execute actions from its response.
    */
   async runOodaCycle(): Promise<void> {
-    const { sdkBridge, memoryDb, state, config, agentConfigs, log } = this.ctx;
+    const { state, config, agentConfigs, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
 
     if (!sdkBridge || !memoryDb) return;
     if (sdkBridge.isAttached) {
@@ -256,7 +261,8 @@ export class AgentEngine {
    * Moved here from Daemon so the OODA loop is fully self-contained in AgentEngine.
    */
   async executeOodaActions(actions: OodaAction[]): Promise<void> {
-    const { memoryDb, agentConfigs, config, log } = this.ctx;
+    const { agentConfigs, config, log } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
     if (!memoryDb) return;
 
     // Per-run tool call budget tracking
@@ -458,7 +464,7 @@ export class AgentEngine {
    * Prepended to agent prompts for contextual awareness and self-reflection.
    */
   buildAgentContext(agentName: string): string {
-    const { memoryDb } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
     if (!memoryDb) return "";
 
     const parts: string[] = [];
@@ -540,7 +546,8 @@ export class AgentEngine {
    * Used after agent chat responses and standalone runs.
    */
   extractAgentActions(agentName: string, responseText: string): void {
-    const { memoryDb, log } = this.ctx;
+    const { log } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
     if (!memoryDb || !responseText) return;
     const actions = parseOodaResponse(responseText);
     for (const action of actions) {
@@ -577,7 +584,9 @@ export class AgentEngine {
    * Enriches the prompt with agent context and tracks the run in DB.
    */
   async handleStandaloneAgentRun(agentName: string, prompt: string): Promise<Record<string, unknown>> {
-    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
+    const { agentConfigs, config, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
     if (!sdkBridge) throw new Error("SDK bridge not initialized");
     if (!this.ctx.getSwitchboard().all || !this.ctx.getSwitchboard().sdkBridge) throw new Error("SDK bridge disabled by switchboard");
     if (sdkBridge.isAttached) throw new Error("Cannot run agent — SDK session already active");
@@ -636,7 +645,9 @@ export class AgentEngine {
    * Replays conversation history for multi-turn context.
    */
   async handleAgentChat(agentName: string, userPrompt: string, ws: WebSocket): Promise<void> {
-    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
+    const { agentConfigs, config, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
     if (!sdkBridge) throw new Error("SDK bridge not initialized");
     if (!memoryDb) throw new Error("Memory DB not initialized");
     if (sdkBridge.isAttached || sdkBridge.isBusy) throw new Error("SDK bridge busy — try again shortly");
@@ -737,7 +748,9 @@ export class AgentEngine {
   async executeRoundtable(
     topic: string, agentNames: string[], context?: string,
   ): Promise<{ transcript: string; contributions: Array<{ agent: string; response: string }> }> {
-    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
+    const { agentConfigs, config, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
     if (!sdkBridge || !memoryDb) throw new Error("SDK bridge or DB not ready");
     if (sdkBridge.isAttached) throw new Error("SDK session already active");
 
@@ -875,7 +888,9 @@ export class AgentEngine {
    * Returns success/failure and cost for schedule bookkeeping.
    */
   async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
-    const { sdkBridge, memoryDb, agentConfigs, config, log } = this.ctx;
+    const { agentConfigs, config, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
     if (!sdkBridge || !memoryDb) return { success: false };
     if (sdkBridge.isAttached || sdkBridge.isBusy) {
       log.debug(`Scheduled run "${schedule.schedule_name}" deferred — SDK busy`);
