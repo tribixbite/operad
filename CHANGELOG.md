@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-19
+
+### Fixed
+- **Daemon boot crash**: `loadAutoStopList()` was called in the `Daemon` constructor before `androidEngine` was instantiated, causing "Cannot read properties of undefined (reading 'loadAutoStopList')" on every boot. v0.4.0 users hitting this should upgrade. Discovered by newly-robust e2e test.
+- **E2E test silent false-positives**: `src/__tests__/e2e.test.ts` previously used `describe.skipIf(!daemonReady)` + per-test `if (!daemonReady) return` which made every test "pass" when the daemon couldn't start. It now throws in `beforeAll` with full stderr capture if the daemon isn't ready within 20s. Uses a random high-range port and an explicit hermetic config.
+
+### Added
+- 30+ new unit tests across three files:
+  - `session-resolver.test.ts` — fuzzy name matching, path resolution
+  - `config-state.test.ts` — `validateConfig` error shape, `migrateState` idempotency
+  - `cli-smoke.test.ts` — `operad --version/init/doctor` exit codes + output format
+
 ## [0.4.0] — 2026-04-19
 
 ### Added
