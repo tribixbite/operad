@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-04-19
+
+### Fixed (P0)
+- **Daemon silently boots with no tmux**: `Daemon.preflight()` now hard-fails with a multi-platform install hint (`apt`/`brew`/`pkg`/MSYS2). Previously the daemon would start, sessions would silently never boot, and the dashboard looked healthy.
+- **`TMUX_BIN` frozen at module load**: Resolved on first call instead — fixes wrong path when tmux is installed late on PATH (MSYS2 on Windows, late Termux pkgs).
+- **`operad doctor` dashboard fallback** pointed at `~/git/operad/dashboard/dist` (a developer's local checkout). Removed; npm-installed users now get the correct fix instruction (`bun add -g operadic@latest`).
+
+### Fixed (P1)
+- **`bunx operadic` (no args)** now prints help instead of `Daemon not running. Start with: operad stream`.
+- **`operad init` template** uses Windows-friendly paths (`%APPDATA%\operad` config dir on Windows; `pathJoin` for the `cwd` example).
+- **`operad upgrade`** refuses cleanly on npm installs (no `build.cjs`) with a hint to use `bun add -g operadic@latest` instead of crashing.
+- **`migrate.ts`** generated config no longer hardcodes `~/git/termux-tools/tools/adb-wireless-connect.sh` for `connect_script` (was a developer-specific path); empty default now.
+- **`/api/bridge` 404 on missing claude-chrome-android**: Previously wrote a startup script pointing at a non-existent file and silently failed via TermuxService intent. Now returns `{ status: 404, fix: "bun add -g claude-chrome-android" }` immediately.
+- **Windows `notify()` PowerShell injection** via session-name interpolation. Title and content now passed via env vars (`OPERAD_NOTIFY_TITLE`/`OPERAD_NOTIFY_CONTENT`) — no string interpolation in the heredoc.
+- **`isTmuxServerAlive()` swallowed ENOENT**: now writes a stderr diagnostic so a missing tmux is visible.
+- **OrchestratorContext.memoryDb / sdkBridge** captured by value at constructor time when both were `null`. Engines reading them post-init saw stale `null`. Converted to lazy getters (`getMemoryDb()` / `getSdkBridge()`); all 6 consumer files updated.
+
+### Added
+- **`operad doctor`**: two new Android-only checks
+  - `cfc-bridge` — searches global bun + npm install paths for `claude-chrome-android`; warns with install command when missing
+  - `edge-canary` — `pm list packages com.microsoft.emmx.canary`; warns with install hint when missing
+- **`peerDependenciesMeta`** declares `claude-chrome-android` as an optional peer so `bun i -g operadic` surfaces it
+- **`docs/cfc-bridge.md`** — explains what CFC is, install paths, Edge Canary requirements, troubleshooting
+
+### Changed
+- **`scripts/fix-android-binaries.mjs`** silent on non-Android (was logging confusing `[fix-android-binaries] Not on Android, skipping.` during every `npm install` on Linux/Mac/Windows)
+- Postinstall tries `bun add` before `npm install` for the android-arm64 esbuild binary
+
 ## [0.4.2] — 2026-04-19
 
 ### Fixed
