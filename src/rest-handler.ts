@@ -2,17 +2,23 @@
  * rest-handler.ts — REST API handler for the operad daemon dashboard.
  *
  * Extracted from ServerEngine (server-engine.ts) as part of the
- * transport-layer split. Owns handleDashboardApi() and all private helpers
- * (customization, MCP CRUD, scripts, ADB management).
+ * transport-layer split. Owns handleDashboardApi() main dispatch; delegates
+ * domain-specific work to route modules under src/routes/.
+ *
+ * Domain route modules:
+ *   - CustomizationRoutes  (src/routes/customization-routes.ts)
+ *   - McpRoutes            (src/routes/mcp-routes.ts)
+ *   - ScriptsRoutes        (src/routes/scripts-routes.ts)
+ *   - AdbRoutes            (src/routes/adb-routes.ts)
  *
  * WS dispatch lives in ws-handler.ts.
  * IPC routing lives in ipc-handler.ts.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { openSync, closeSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { AgentEngine } from "./agent-engine.js";
@@ -54,14 +60,15 @@ import {
   getLastConsolidationTime, getConsolidationHistory,
 } from "./consolidation.js";
 import { computeQuotaStatus } from "./memory-db.js";
+import { CustomizationRoutes } from "./routes/customization-routes.js";
+import { McpRoutes } from "./routes/mcp-routes.js";
+import { ScriptsRoutes } from "./routes/scripts-routes.js";
+import { AdbRoutes } from "./routes/adb-routes.js";
 
 /** Portable bash shebang — matches the one in daemon.ts */
 const BASH_SHEBANG = process.env.PREFIX
   ? `#!${process.env.PREFIX}/bin/bash`
   : `#!/usr/bin/env bash`;
-
-/** Resolve ADB binary path via platform abstraction */
-const ADB_BIN = detectPlatform().resolveAdbPath() ?? "adb";
 
 /** Chunk text into ~maxChars segments splitting on paragraph/newline boundaries */
 function chunkText(text: string, maxChars = 2000): string[] {
@@ -89,11 +96,22 @@ function chunkText(text: string, maxChars = 2000): string[] {
  * can delegate to them without reaching back into Daemon.
  */
 export class RestHandler {
+  /** Domain-specific route handlers — extracted from RestHandler private helpers */
+  private readonly customizationRoutes: CustomizationRoutes;
+  private readonly mcpRoutes: McpRoutes;
+  private readonly scriptsRoutes: ScriptsRoutes;
+  private readonly adbRoutes: AdbRoutes;
+
   constructor(
     private readonly ctx: OrchestratorContext,
     private readonly agentEngine: AgentEngine,
     private readonly toolEngine: ToolEngine,
-  ) {}
+  ) {
+    this.customizationRoutes = new CustomizationRoutes(ctx);
+    this.mcpRoutes = new McpRoutes(ctx);
+    this.scriptsRoutes = new ScriptsRoutes(ctx);
+    this.adbRoutes = new AdbRoutes(ctx);
+  }
 
   // ---------------------------------------------------------------------------
   // REST API handler (extracted from Daemon.handleDashboardApi — Sprint 13 Task 7)
@@ -363,14 +381,14 @@ export class RestHandler {
         }
         case "scripts": {
           if (!name) return { status: 400, data: { error: "Session name required" } };
-          return this.cmdListScripts(name);
+          return this.scriptsRoutes.cmdListScripts(name);
         }
         case "run-script": {
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Session name required" } };
           try {
             const parsed = JSON.parse(body) as { command?: string; script?: string; source?: string };
-            return this.cmdRunScript(name, parsed);
+            return this.scriptsRoutes.cmdRunScript(name, parsed);
           } catch {
             return { status: 400, data: { error: "Invalid JSON body" } };
           }
@@ -380,7 +398,7 @@ export class RestHandler {
           if (!name) return { status: 400, data: { error: "Session name required" } };
           try {
             const parsed = JSON.parse(body) as { name: string; command: string };
-            return this.cmdSaveScript(name, parsed);
+            return this.scriptsRoutes.cmdSaveScript(name, parsed);
           } catch {
             return { status: 400, data: { error: "Invalid JSON body" } };
           }
@@ -397,17 +415,17 @@ export class RestHandler {
           return this.ctx.toggleAutoStop(name);
         case "adb":
           if (!name) {
-            return { status: 200, data: this.getAdbDevices() };
+            return { status: 200, data: this.adbRoutes.getAdbDevices() };
           }
           if (name === "connect") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            return this.adbWirelessConnect();
+            return this.adbRoutes.adbWirelessConnect();
           }
           if (name === "disconnect") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
             const serial = segments[2] ? decodeURIComponent(segments[2]) : undefined;
-            if (serial) return this.adbDisconnectDevice(serial);
-            return this.adbDisconnectAll();
+            if (serial) return this.adbRoutes.adbDisconnectDevice(serial);
+            return this.adbRoutes.adbDisconnectAll();
           }
           return { status: 400, data: { error: `Unknown ADB action: ${name}` } };
         case "recent":
@@ -479,20 +497,20 @@ export class RestHandler {
           break;
         }
         case "customization":
-          resp = this.cmdCustomization(name);
+          resp = this.customizationRoutes.cmdCustomization(name);
           break;
         case "customization-file": {
           if (method === "GET") {
             const filePath = segments.slice(1).map(s => decodeURIComponent(s)).join("/");
             if (!filePath) return { status: 400, data: { error: "File path required" } };
-            resp = this.cmdReadCustomizationFile(filePath);
+            resp = this.customizationRoutes.cmdReadCustomizationFile(filePath);
           } else if (method === "POST") {
             try {
               const parsed = JSON.parse(body) as { path: string; content: string };
               if (!parsed.path || typeof parsed.content !== "string") {
                 return { status: 400, data: { error: "path and content required" } };
               }
-              resp = this.cmdWriteCustomizationFile(parsed.path, parsed.content);
+              resp = this.customizationRoutes.cmdWriteCustomizationFile(parsed.path, parsed.content);
             } catch {
               return { status: 400, data: { error: "Invalid JSON body" } };
             }
@@ -570,9 +588,9 @@ export class RestHandler {
         }
         case "mcp": {
           if (method === "GET" && !name) {
-            const config = this.readClaudeJson();
-            const settingsData = existsSync(this.settingsJsonPath)
-              ? JSON.parse(readFileSync(this.settingsJsonPath, "utf-8")) : {};
+            const config = this.mcpRoutes.readClaudeJson();
+            const settingsData = existsSync(this.mcpRoutes.settingsJsonPath)
+              ? JSON.parse(readFileSync(this.mcpRoutes.settingsJsonPath, "utf-8")) : {};
             const disabled: string[] = settingsData.disabledMcpServers ?? [];
             const servers = Object.entries(config.mcpServers ?? {}).map(([n, cfg]: [string, any]) => ({
               name: n,
@@ -587,13 +605,13 @@ export class RestHandler {
           const mcpAction = segments[2] ? decodeURIComponent(segments[2]) : undefined;
           if (mcpAction === "toggle" && name) {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            return this.cmdMcpToggle(name);
+            return this.mcpRoutes.cmdMcpToggle(name);
           }
           if (method === "POST" && !name) {
             try {
               const parsed = JSON.parse(body) as { name: string; command: string; args?: string[]; env?: Record<string, string> };
               if (!parsed.name || !parsed.command) return { status: 400, data: { error: "name and command required" } };
-              return this.cmdMcpAdd(parsed.name, parsed);
+              return this.mcpRoutes.cmdMcpAdd(parsed.name, parsed);
             } catch {
               return { status: 400, data: { error: "Invalid JSON body" } };
             }
@@ -601,13 +619,13 @@ export class RestHandler {
           if (method === "PUT" && name) {
             try {
               const parsed = JSON.parse(body) as { command?: string; args?: string[]; env?: Record<string, string> };
-              return this.cmdMcpUpdate(name, parsed);
+              return this.mcpRoutes.cmdMcpUpdate(name, parsed);
             } catch {
               return { status: 400, data: { error: "Invalid JSON body" } };
             }
           }
           if (method === "DELETE" && name) {
-            return this.cmdMcpDelete(name);
+            return this.mcpRoutes.cmdMcpDelete(name);
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }
@@ -1542,685 +1560,4 @@ export class RestHandler {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Helper methods moved from Daemon (customization, MCP CRUD, scripts, ADB)
-  // ---------------------------------------------------------------------------
-
-  /** Sensitive env var key patterns — values are redacted in API responses */
-  private static readonly SENSITIVE_ENV_KEYS = /KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL/i;
-
-  /** Read a JSON file, returning null on any error */
-  private readJsonFile(path: string): unknown {
-    try {
-      if (!existsSync(path)) return null;
-      return JSON.parse(readFileSync(path, "utf-8"));
-    } catch {
-      return null;
-    }
-  }
-
-  /** Validate that a file path is safe to read/write (under ~/.claude/ or a known project) */
-  private isAllowedCustomizationPath(filePath: string): boolean {
-    const home = homedir();
-    const claudeDir = join(home, ".claude");
-    const resolved = resolve(filePath);
-
-    if (resolved.startsWith(claudeDir + "/")) return true;
-
-    const knownPaths = this.ctx.config.sessions
-      .map((s: SessionConfig) => s.path)
-      .filter(Boolean) as string[];
-    for (const entry of this.ctx.registry.entries()) {
-      if (entry.path) knownPaths.push(entry.path);
-    }
-    for (const p of knownPaths) {
-      const projectDir = resolve(p);
-      if (resolved === join(projectDir, "CLAUDE.md")) return true;
-      if (resolved.startsWith(join(projectDir, ".claude") + "/")) return true;
-    }
-    return false;
-  }
-
-  /** Redact sensitive env values */
-  private redactEnv(env: Record<string, string>): Record<string, string> {
-    const redacted: Record<string, string> = {};
-    for (const [k, v] of Object.entries(env)) {
-      redacted[k] = RestHandler.SENSITIVE_ENV_KEYS.test(k) ? "***" : v;
-    }
-    return redacted;
-  }
-
-  /** Build full customization response */
-  private cmdCustomization(projectPath?: string): { ok: boolean; data?: unknown; error?: string } {
-    try {
-      const home = homedir();
-      const claudeDir = join(home, ".claude");
-
-      const claudeJson = this.readJsonFile(join(home, ".claude.json")) as Record<string, unknown> | null;
-      const settingsJson = this.readJsonFile(join(claudeDir, "settings.json")) as Record<string, unknown> | null;
-      const installedPluginsJson = this.readJsonFile(join(claudeDir, "plugins", "installed_plugins.json")) as Record<string, unknown> | null;
-      const blocklistJson = this.readJsonFile(join(claudeDir, "plugins", "blocklist.json")) as Record<string, unknown> | null;
-      const installCountsJson = this.readJsonFile(join(claudeDir, "plugins", "install-counts-cache.json")) as Record<string, unknown> | null;
-      const marketplacesJson = this.readJsonFile(join(claudeDir, "plugins", "known_marketplaces.json")) as Record<string, unknown> | null;
-
-      const mcpServers: Array<{
-        name: string; scope: string; source: string; command: string;
-        args: string[]; env?: Record<string, string>; disabled: boolean;
-      }> = [];
-
-      const cjMcps = (claudeJson?.mcpServers ?? {}) as Record<string, { command?: string; args?: string[]; env?: Record<string, string> }>;
-      for (const [n, cfg] of Object.entries(cjMcps)) {
-        mcpServers.push({
-          name: n, scope: "user", source: "claude-json",
-          command: cfg.command ?? "", args: cfg.args ?? [],
-          env: cfg.env ? this.redactEnv(cfg.env) : undefined,
-          disabled: false,
-        });
-      }
-
-      const sjMcps = ((settingsJson?.mcpServers ?? {}) as Record<string, { command?: string; args?: string[]; env?: Record<string, string> }>);
-      for (const [n, cfg] of Object.entries(sjMcps)) {
-        const existing = mcpServers.find(m => m.name === n);
-        if (existing) {
-          existing.source = "settings-json";
-          existing.command = cfg.command ?? existing.command;
-          existing.args = cfg.args ?? existing.args;
-          if (cfg.env) existing.env = this.redactEnv(cfg.env);
-        } else {
-          mcpServers.push({
-            name: n, scope: "user", source: "settings-json",
-            command: cfg.command ?? "", args: cfg.args ?? [],
-            env: cfg.env ? this.redactEnv(cfg.env) : undefined,
-            disabled: false,
-          });
-        }
-      }
-
-      if (projectPath && claudeJson?.projects) {
-        const projects = claudeJson.projects as Record<string, { disabledMcpServers?: string[]; mcpServers?: Record<string, unknown> }>;
-        const projCfg = projects[projectPath];
-        if (projCfg?.disabledMcpServers) {
-          for (const disabledName of projCfg.disabledMcpServers) {
-            const srv = mcpServers.find(m => m.name === disabledName);
-            if (srv) srv.disabled = true;
-          }
-        }
-        if (projCfg?.mcpServers) {
-          for (const [n, cfg] of Object.entries(projCfg.mcpServers as Record<string, { command?: string; args?: string[]; env?: Record<string, string> }>)) {
-            mcpServers.push({
-              name: n, scope: "project", source: "claude-json",
-              command: cfg.command ?? "", args: cfg.args ?? [],
-              env: cfg.env ? this.redactEnv(cfg.env) : undefined,
-              disabled: false,
-            });
-          }
-        }
-      }
-
-      const enabledPlugins = (settingsJson?.enabledPlugins ?? {}) as Record<string, boolean>;
-      const blocklist = ((blocklistJson?.plugins ?? []) as Array<{ plugin: string; reason?: string }>);
-      const blockMap = new Map(blocklist.map(b => [b.plugin, b.reason ?? "blocked"]));
-      const installCounts = ((installCountsJson?.counts ?? []) as Array<{ plugin: string; unique_installs: number }>);
-      const countMap = new Map(installCounts.map(c => [c.plugin, c.unique_installs]));
-
-      const plugins: Array<{
-        id: string; name: string; description: string; author: string; scope: string;
-        enabled: boolean; blocked: boolean; blockReason?: string; version: string;
-        installedAt: string; installPath: string; type: string; installs?: number;
-      }> = [];
-
-      const installedMap = ((installedPluginsJson?.plugins ?? {}) as Record<string, Array<{
-        scope?: string; installPath?: string; version?: string; installedAt?: string;
-      }>>);
-
-      for (const [pluginId, entries] of Object.entries(installedMap)) {
-        const entry = entries[0];
-        if (!entry) continue;
-        let pluginName = pluginId.split("@")[0];
-        let pluginDesc = "";
-        let pluginAuthor = "";
-        let pluginType: "native" | "external" = "native";
-
-        if (entry.installPath) {
-          const pjPath = join(entry.installPath, ".claude-plugin", "plugin.json");
-          const pj = this.readJsonFile(pjPath) as { name?: string; description?: string; author?: { name?: string } } | null;
-          if (pj) {
-            pluginName = pj.name ?? pluginName;
-            pluginDesc = pj.description ?? "";
-            pluginAuthor = pj.author?.name ?? "";
-          }
-          if (existsSync(join(entry.installPath, ".mcp.json"))) {
-            pluginType = "external";
-          }
-        }
-
-        plugins.push({
-          id: pluginId, name: pluginName, description: pluginDesc,
-          author: pluginAuthor, scope: entry.scope ?? "user",
-          enabled: enabledPlugins[pluginId] ?? false,
-          blocked: blockMap.has(pluginId),
-          blockReason: blockMap.get(pluginId),
-          version: entry.version ?? "", installedAt: entry.installedAt ?? "",
-          installPath: entry.installPath ?? "", type: pluginType,
-          installs: countMap.get(pluginId),
-        });
-      }
-
-      const skills: Array<{ name: string; path: string; scope: string; source?: string }> = [];
-      const userSkillsDir = join(claudeDir, "skills");
-      if (existsSync(userSkillsDir)) {
-        try {
-          for (const f of readdirSync(userSkillsDir)) {
-            if (!f.endsWith(".md")) continue;
-            skills.push({ name: f.replace(/\.md$/, ""), path: join(userSkillsDir, f), scope: "user" });
-          }
-        } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projSkillsDir = join(projectPath, ".claude", "skills");
-        if (existsSync(projSkillsDir)) {
-          try {
-            for (const f of readdirSync(projSkillsDir)) {
-              if (!f.endsWith(".md")) continue;
-              skills.push({ name: f.replace(/\.md$/, ""), path: join(projSkillsDir, f), scope: "project" });
-            }
-          } catch { /* skip */ }
-        }
-      }
-
-      const plans: Array<{ name: string; path: string; scope: string }> = [];
-      const userPlansDir = join(claudeDir, "plans");
-      if (existsSync(userPlansDir)) {
-        try {
-          for (const f of readdirSync(userPlansDir)) {
-            if (!f.endsWith(".md")) continue;
-            plans.push({ name: f.replace(/\.md$/, ""), path: join(userPlansDir, f), scope: "user" });
-          }
-        } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projPlansDir = join(projectPath, ".claude", "plans");
-        if (existsSync(projPlansDir)) {
-          try {
-            for (const f of readdirSync(projPlansDir)) {
-              if (!f.endsWith(".md")) continue;
-              plans.push({ name: f.replace(/\.md$/, ""), path: join(projPlansDir, f), scope: "project" });
-            }
-          } catch { /* skip */ }
-        }
-      }
-
-      const claudeMds: Array<{ label: string; path: string; scope: string }> = [];
-      const globalMd = join(claudeDir, "CLAUDE.md");
-      if (existsSync(globalMd)) {
-        claudeMds.push({ label: "Global (User)", path: globalMd, scope: "user" });
-      }
-      const projectsDir = join(claudeDir, "projects");
-      if (existsSync(projectsDir)) {
-        try {
-          const mangledProject = projectPath
-            ? "-" + projectPath.replace(/[/.]/g, "-").replace(/^-+/, "")
-            : null;
-          for (const d of readdirSync(projectsDir)) {
-            if (mangledProject && d !== mangledProject) continue;
-            const memDir = join(projectsDir, d, "memory");
-            if (!existsSync(memDir)) continue;
-            const gitIdx = d.lastIndexOf("-git-");
-            const projName = gitIdx >= 0
-              ? d.slice(gitIdx + 5)
-              : d.split("-").filter(Boolean).pop() ?? d;
-            try {
-              for (const f of readdirSync(memDir)) {
-                if (!f.endsWith(".md")) continue;
-                claudeMds.push({ label: `${projName}: ${f.replace(/\.md$/, "")}`, path: join(memDir, f), scope: "memory" });
-              }
-            } catch { /* skip */ }
-          }
-        } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projMd = join(projectPath, "CLAUDE.md");
-        if (existsSync(projMd)) {
-          claudeMds.push({ label: `Project: ${projectPath.split("/").pop() ?? projectPath}`, path: projMd, scope: "project" });
-        }
-      }
-
-      const hooks: Array<{ event: string; matcher: string; type: string; command: string; timeout?: number }> = [];
-      const hooksConfig = (settingsJson?.hooks ?? {}) as Record<string, Array<{
-        matcher?: string;
-        hooks?: Array<{ type?: string; command?: string; timeout?: number }>;
-      }>>;
-      for (const [event, matchers] of Object.entries(hooksConfig)) {
-        if (!Array.isArray(matchers)) continue;
-        for (const m of matchers) {
-          if (!m.hooks || !Array.isArray(m.hooks)) continue;
-          for (const h of m.hooks) {
-            hooks.push({ event, matcher: m.matcher ?? "*", type: h.type ?? "command", command: h.command ?? "", timeout: h.timeout });
-          }
-        }
-      }
-
-      const marketplaceSources: Array<{ name: string; repo: string; lastUpdated: string }> = [];
-      const marketplacePlugins: Array<{
-        id: string; name: string; description: string; author: string;
-        marketplace: string; type: string; installed: boolean; enabled: boolean; installs: number;
-      }> = [];
-      const installedIds = new Set(Object.keys(installedMap));
-
-      if (marketplacesJson) {
-        for (const [mktName, mktCfg] of Object.entries(marketplacesJson as Record<string, {
-          source?: { repo?: string }; installLocation?: string; lastUpdated?: string;
-        }>)) {
-          marketplaceSources.push({ name: mktName, repo: mktCfg.source?.repo ?? "", lastUpdated: mktCfg.lastUpdated ?? "" });
-          const mktDir = mktCfg.installLocation;
-          if (!mktDir || !existsSync(mktDir)) continue;
-          for (const [subDir, pluginType] of [["plugins", "native"], ["external_plugins", "external"]] as [string, string][]) {
-            const dir = join(mktDir, subDir);
-            if (!existsSync(dir)) continue;
-            try {
-              for (const n of readdirSync(dir)) {
-                const pj = this.readJsonFile(join(dir, n, ".claude-plugin", "plugin.json")) as { name?: string; description?: string; author?: { name?: string } } | null;
-                if (!pj) continue;
-                const pluginId = `${n}@${mktName}`;
-                marketplacePlugins.push({
-                  id: pluginId, name: pj.name ?? n,
-                  description: pj.description ?? "", author: pj.author?.name ?? "",
-                  marketplace: mktName, type: pluginType,
-                  installed: installedIds.has(pluginId),
-                  enabled: enabledPlugins[pluginId] ?? false,
-                  installs: countMap.get(pluginId) ?? 0,
-                });
-              }
-            } catch { /* skip */ }
-          }
-        }
-      }
-      marketplacePlugins.sort((a, b) => b.installs - a.installs);
-
-      return {
-        ok: true,
-        data: {
-          mcpServers, plugins, skills, plans, claudeMds, hooks,
-          marketplace: { sources: marketplaceSources, available: marketplacePlugins },
-          projectPath: projectPath ?? undefined,
-        },
-      };
-    } catch (err) {
-      return { ok: false, error: `Failed to read customization data: ${err}` };
-    }
-  }
-
-  /** Read a customization file's content (skills, CLAUDE.md) */
-  private cmdReadCustomizationFile(filePath: string): { ok: boolean; data?: unknown; error?: string } {
-    if (!filePath || !this.isAllowedCustomizationPath(filePath)) {
-      return { ok: false, error: "Path not allowed" };
-    }
-    try {
-      const content = readFileSync(filePath, "utf-8");
-      return { ok: true, data: { content } };
-    } catch (err) {
-      return { ok: false, error: `Failed to read file: ${err}` };
-    }
-  }
-
-  /** Write a customization file's content (only .md files) */
-  private cmdWriteCustomizationFile(filePath: string, content: string): { ok: boolean; data?: unknown; error?: string } {
-    if (!filePath || !this.isAllowedCustomizationPath(filePath)) {
-      return { ok: false, error: "Path not allowed" };
-    }
-    if (!filePath.endsWith(".md")) {
-      return { ok: false, error: "Only .md files can be edited" };
-    }
-    try {
-      writeFileSync(filePath, content, "utf-8");
-      return { ok: true, data: { written: filePath } };
-    } catch (err) {
-      return { ok: false, error: `Failed to write file: ${err}` };
-    }
-  }
-
-  // -- MCP CRUD ---------------------------------------------------------------
-
-  /** Atomic JSON file write: write .tmp then rename */
-  private writeJsonFileAtomic(filePath: string, data: unknown): void {
-    const tmp = `${filePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8");
-    renameSync(tmp, filePath);
-  }
-
-  /** Path to ~/.claude.json */
-  private get claudeJsonPath(): string {
-    return join(homedir(), ".claude.json");
-  }
-
-  /** Path to settings.json (Claude Code settings) */
-  private get settingsJsonPath(): string {
-    return join(homedir(), ".claude", "settings.json");
-  }
-
-  /** Read ~/.claude.json, returning parsed object or empty default */
-  private readClaudeJson(): Record<string, unknown> {
-    try {
-      if (existsSync(this.claudeJsonPath)) {
-        return JSON.parse(readFileSync(this.claudeJsonPath, "utf-8")) as Record<string, unknown>;
-      }
-    } catch { /* fall through */ }
-    return {};
-  }
-
-  /** Add a new MCP server to ~/.claude.json */
-  private cmdMcpAdd(
-    serverName: string,
-    config: { command: string; args?: string[]; env?: Record<string, string> },
-  ): { status: number; data: unknown } {
-    try {
-      const data = this.readClaudeJson();
-      if (!data.mcpServers) data.mcpServers = {};
-      const servers = data.mcpServers as Record<string, unknown>;
-      if (servers[serverName]) {
-        return { status: 409, data: { error: `MCP server '${serverName}' already exists` } };
-      }
-      servers[serverName] = {
-        command: config.command,
-        args: config.args ?? [],
-        ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
-      };
-      this.writeJsonFileAtomic(this.claudeJsonPath, data);
-      return { status: 200, data: { ok: true, servers: Object.keys(servers) } };
-    } catch (err) {
-      return { status: 500, data: { error: `Failed to add MCP server: ${err}` } };
-    }
-  }
-
-  /** Update an existing MCP server in ~/.claude.json */
-  private cmdMcpUpdate(
-    serverName: string,
-    config: { command?: string; args?: string[]; env?: Record<string, string> },
-  ): { status: number; data: unknown } {
-    try {
-      const data = this.readClaudeJson();
-      const servers = (data.mcpServers ?? {}) as Record<string, Record<string, unknown>>;
-      if (!servers[serverName]) {
-        return { status: 404, data: { error: `MCP server '${serverName}' not found` } };
-      }
-      if (config.command !== undefined) servers[serverName].command = config.command;
-      if (config.args !== undefined) servers[serverName].args = config.args;
-      if (config.env !== undefined) {
-        if (Object.keys(config.env).length > 0) {
-          servers[serverName].env = config.env;
-        } else {
-          delete servers[serverName].env;
-        }
-      }
-      this.writeJsonFileAtomic(this.claudeJsonPath, data);
-      return { status: 200, data: { ok: true } };
-    } catch (err) {
-      return { status: 500, data: { error: `Failed to update MCP server: ${err}` } };
-    }
-  }
-
-  /** Delete an MCP server from ~/.claude.json */
-  private cmdMcpDelete(serverName: string): { status: number; data: unknown } {
-    try {
-      const data = this.readClaudeJson();
-      const servers = (data.mcpServers ?? {}) as Record<string, unknown>;
-      if (!servers[serverName]) {
-        return { status: 404, data: { error: `MCP server '${serverName}' not found` } };
-      }
-      delete servers[serverName];
-      this.writeJsonFileAtomic(this.claudeJsonPath, data);
-      return { status: 200, data: { ok: true, servers: Object.keys(servers) } };
-    } catch (err) {
-      return { status: 500, data: { error: `Failed to delete MCP server: ${err}` } };
-    }
-  }
-
-  /** Toggle MCP server enable/disable in settings.json */
-  private cmdMcpToggle(serverName: string): { status: number; data: unknown } {
-    try {
-      let settings: Record<string, unknown> = {};
-      if (existsSync(this.settingsJsonPath)) {
-        try {
-          settings = JSON.parse(readFileSync(this.settingsJsonPath, "utf-8")) as Record<string, unknown>;
-        } catch { /* use empty */ }
-      }
-      const disabled = (settings.disabledMcpServers ?? []) as string[];
-      const idx = disabled.indexOf(serverName);
-      if (idx >= 0) {
-        disabled.splice(idx, 1);
-      } else {
-        disabled.push(serverName);
-      }
-      settings.disabledMcpServers = disabled;
-      this.writeJsonFileAtomic(this.settingsJsonPath, settings);
-      return { status: 200, data: { ok: true, disabled: idx < 0 } };
-    } catch (err) {
-      return { status: 500, data: { error: `Failed to toggle MCP server: ${err}` } };
-    }
-  }
-
-  // -- Script runner ----------------------------------------------------------
-
-  /** List available scripts for a session project */
-  private cmdListScripts(sessionName: string): { status: number; data: unknown } {
-    const sessionPath = this.ctx.resolveSessionPath(sessionName);
-    if (!sessionPath) return { status: 400, data: { error: `Session '${sessionName}' has no path` } };
-
-    interface ScriptEntryOut {
-      name: string;
-      path: string;
-      source: "root" | "scripts" | "package.json" | "saved";
-      command?: string;
-    }
-    const scripts: ScriptEntryOut[] = [];
-
-    try {
-      const entries = readdirSync(sessionPath);
-      for (const f of entries) {
-        if (f.endsWith(".sh")) {
-          const full = join(sessionPath, f);
-          try {
-            if (statSync(full).isFile()) {
-              scripts.push({ name: f, path: full, source: "root" });
-            }
-          } catch { /* stat failed — skip */ }
-        }
-      }
-    } catch { /* dir unreadable — skip */ }
-
-    try {
-      const scriptsDir = join(sessionPath, "scripts");
-      const entries = readdirSync(scriptsDir);
-      for (const f of entries) {
-        if (f.endsWith(".sh")) {
-          scripts.push({ name: f, path: join(scriptsDir, f), source: "scripts" });
-        }
-      }
-    } catch { /* no scripts/ dir — skip */ }
-
-    try {
-      const pkgPath = join(sessionPath, "package.json");
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { scripts?: Record<string, string> };
-      if (pkg.scripts) {
-        for (const [scriptName, cmd] of Object.entries(pkg.scripts)) {
-          scripts.push({ name: scriptName, path: "", source: "package.json", command: cmd });
-        }
-      }
-    } catch { /* no package.json or parse error — skip */ }
-
-    try {
-      const savedDir = join(sessionPath, ".tmx-scripts");
-      const entries = readdirSync(savedDir);
-      for (const f of entries) {
-        if (f.endsWith(".sh")) {
-          scripts.push({ name: f, path: join(savedDir, f), source: "saved" });
-        }
-      }
-    } catch { /* no saved scripts — skip */ }
-
-    return { status: 200, data: { scripts } };
-  }
-
-  /** Run a script or ad-hoc command in a session's Termux tab */
-  private cmdRunScript(
-    sessionName: string,
-    opts: { command?: string; script?: string; source?: string },
-  ): { status: number; data: unknown } {
-    const resolved = this.ctx.resolveName(sessionName);
-    if (!resolved) return { status: 400, data: { error: `Unknown session: ${sessionName}` } };
-    const sessionPath = this.ctx.resolveSessionPath(sessionName);
-    if (!sessionPath) return { status: 400, data: { error: `Session '${sessionName}' has no path` } };
-
-    const prefix = process.env.PREFIX ?? "/usr";
-
-    if (opts.command) {
-      const tempScript = join(prefix, "tmp", `tmx-cmd-${resolved}.sh`);
-      writeFileSync(tempScript, `${BASH_SHEBANG}\n${opts.command}\n`, { mode: 0o755 });
-      if (runScriptInTab(tempScript, sessionPath, resolved, this.ctx.log)) {
-        return { status: 200, data: { ok: true } };
-      }
-      return { status: 500, data: { error: "Failed to launch command" } };
-    }
-
-    if (opts.script && opts.source) {
-      let scriptPath: string;
-      switch (opts.source) {
-        case "root":
-          scriptPath = join(sessionPath, opts.script);
-          break;
-        case "scripts":
-          scriptPath = join(sessionPath, "scripts", opts.script);
-          break;
-        case "package.json": {
-          const tempScript = join(prefix, "tmp", `tmx-npm-${resolved}.sh`);
-          writeFileSync(
-            tempScript,
-            `${BASH_SHEBANG}\ncd "${sessionPath}" || exit 1\nbun run ${opts.script}\n`,
-            { mode: 0o755 },
-          );
-          if (runScriptInTab(tempScript, sessionPath, resolved, this.ctx.log)) {
-            return { status: 200, data: { ok: true } };
-          }
-          return { status: 500, data: { error: "Failed to launch npm script" } };
-        }
-        case "saved":
-          scriptPath = join(sessionPath, ".tmx-scripts", opts.script);
-          break;
-        default:
-          return { status: 400, data: { error: `Unknown script source: ${opts.source}` } };
-      }
-
-      if (!existsSync(scriptPath)) {
-        return { status: 404, data: { error: `Script not found: ${scriptPath}` } };
-      }
-      if (runScriptInTab(scriptPath, sessionPath, resolved, this.ctx.log)) {
-        return { status: 200, data: { ok: true } };
-      }
-      return { status: 500, data: { error: `Failed to launch script: ${opts.script}` } };
-    }
-
-    return { status: 400, data: { error: "Provide either 'command' or 'script' + 'source'" } };
-  }
-
-  /** Save an ad-hoc command as a reusable .sh script in .tmx-scripts/ */
-  private cmdSaveScript(
-    sessionName: string,
-    opts: { name: string; command: string },
-  ): { status: number; data: unknown } {
-    const sessionPath = this.ctx.resolveSessionPath(sessionName);
-    if (!sessionPath) return { status: 400, data: { error: `Session '${sessionName}' has no path` } };
-
-    if (!/^[a-zA-Z0-9_-]+$/.test(opts.name)) {
-      return { status: 400, data: { error: "Script name must be alphanumeric (a-z, 0-9, -, _)" } };
-    }
-    if (!opts.command?.trim()) {
-      return { status: 400, data: { error: "Command cannot be empty" } };
-    }
-
-    const savedDir = join(sessionPath, ".tmx-scripts");
-    mkdirSync(savedDir, { recursive: true });
-    const fileName = opts.name.endsWith(".sh") ? opts.name : `${opts.name}.sh`;
-    const filePath = join(savedDir, fileName);
-
-    writeFileSync(filePath, `${BASH_SHEBANG}\n${opts.command}\n`, { mode: 0o755 });
-    this.ctx.log.info(`Saved script '${fileName}' for session '${sessionName}'`);
-    return { status: 200, data: { name: fileName, path: filePath, source: "saved" as const } };
-  }
-
-  // -- ADB device management (moved from Daemon) ------------------------------
-
-  /** List connected ADB devices */
-  private getAdbDevices(): { devices: { serial: string; state: string }[] } {
-    try {
-      const result = spawnSync(ADB_BIN, ["devices"], {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      if (result.status !== 0 || !result.stdout) return { devices: [] };
-      const devices = result.stdout
-        .split("\n")
-        .slice(1)
-        .filter((l) => l.includes("\t"))
-        .map((l) => {
-          const [serial, state] = l.split("\t");
-          return { serial: serial.trim(), state: state.trim() };
-        });
-      return { devices };
-    } catch (err) {
-      this.ctx.log.warn("getAdbDevices failed", { err: String(err) });
-      return { devices: [] };
-    }
-  }
-
-  /** Initiate ADB wireless connection using the adbc script */
-  private adbWirelessConnect(): { status: number; data: unknown } {
-    const script = this.ctx.config.adb.connect_script;
-    if (!script) {
-      return { status: 400, data: { error: "adb.connect_script not configured" } };
-    }
-    try {
-      const result = spawnSync("bash", [script], {
-        encoding: "utf-8",
-        timeout: 20_000,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, PATH: process.env.PATH },
-      });
-      const output = (result.stdout ?? "") + (result.stderr ?? "");
-      if (output.includes("connected") || output.includes("Reconnected")) {
-        this.ctx.invalidateAdbSerial();
-        return { status: 200, data: { ok: true, message: output.trim().split("\n").pop() } };
-      }
-      return { status: 500, data: { ok: false, message: output.trim().split("\n").pop() || "Connection failed" } };
-    } catch (err) {
-      return { status: 500, data: { ok: false, message: (err as Error).message } };
-    }
-  }
-
-  /** Disconnect all ADB devices */
-  private adbDisconnectAll(): { status: number; data: unknown } {
-    try {
-      spawnSync(ADB_BIN, ["disconnect", "-a"], { timeout: 5000, stdio: "ignore" });
-      this.ctx.invalidateAdbSerial();
-      return { status: 200, data: { ok: true } };
-    } catch (err) {
-      return { status: 500, data: { ok: false, message: (err as Error).message } };
-    }
-  }
-
-  /** Disconnect a specific ADB device by serial */
-  private adbDisconnectDevice(serial: string): { status: number; data: unknown } {
-    try {
-      const result = spawnSync(ADB_BIN, ["disconnect", serial], {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      this.ctx.invalidateAdbSerial();
-      const output = (result.stdout ?? "").trim();
-      return { status: 200, data: { ok: true, serial, message: output } };
-    } catch (err) {
-      return { status: 500, data: { ok: false, message: (err as Error).message } };
-    }
-  }
 }
