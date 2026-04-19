@@ -224,8 +224,7 @@ export class Daemon {
     const registryPath = join(dirname(this.config.orchestrator.state_file), "registry.json");
     this.registry = new Registry(registryPath);
 
-    // Load auto-stop package list
-    this.androidEngine.loadAutoStopList();
+    // Auto-stop package list is loaded after AndroidEngine is constructed below.
 
     // Wire up IPC handler — delegates to ipcHandler once it's constructed below.
     // Use a late-binding lambda so this.ipcHandler is available after construction.
@@ -336,6 +335,8 @@ export class Daemon {
     this.restHandler = new RestHandler(ctx, this.agentEngine, this.toolEngine);
     // AndroidEngine owns ADB serial/fix/phantom budget + auto-stop list + app mgmt.
     this.androidEngine = new AndroidEngine(ctx);
+    // Load auto-stop package list now that AndroidEngine exists
+    this.androidEngine.loadAutoStopList();
     // MonitoringEngine owns memory/battery polling, SSE push, conversation deltas,
     // and Android status notification. Constructed after AndroidEngine so it can
     // call androidEngine.autoStopFlaggedApps() on memory pressure.
