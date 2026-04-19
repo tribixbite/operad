@@ -32,6 +32,30 @@ describe.skipIf(skipReason !== null)("CLI — operad --version", () => {
   });
 });
 
+/** Where `operad init` writes the config — platform-specific.
+ *  Mirrors the runInit() logic in src/tmx.ts. */
+function expectedConfigPath(tmpHome: string): string {
+  if (process.platform === "win32") {
+    // init prefers $APPDATA, falls back to USERPROFILE\AppData\Roaming
+    return join(tmpHome, "AppData", "Roaming", "operad", "operad.toml");
+  }
+  return join(tmpHome, ".config", "operad", "operad.toml");
+}
+
+/** Cross-platform env override for a synthetic "fresh HOME". */
+function freshHomeEnv(tmpHome: string): NodeJS.ProcessEnv {
+  if (process.platform === "win32") {
+    return {
+      ...process.env,
+      USERPROFILE: tmpHome,
+      // Force runInit to derive APPDATA from USERPROFILE so output lands inside tmpHome
+      APPDATA: join(tmpHome, "AppData", "Roaming"),
+      HOME: tmpHome,
+    };
+  }
+  return { ...process.env, HOME: tmpHome };
+}
+
 describe.skipIf(skipReason !== null)("CLI — operad init", () => {
   test("creates a valid config on a fresh HOME and exits 0", () => {
     const tmpHome = mkdtempSync(join(tmpdir(), "operad-init-smoke-"));
@@ -39,12 +63,12 @@ describe.skipIf(skipReason !== null)("CLI — operad init", () => {
       const result = spawn("node", [DAEMON_BIN, "init"], {
         encoding: "utf8",
         timeout: 5000,
-        env: { ...process.env, HOME: tmpHome },
+        env: freshHomeEnv(tmpHome),
       });
       expect(result.status).toBe(0);
       expect(result.stdout).toMatch(/Created/);
 
-      const configPath = join(tmpHome, ".config/operad/operad.toml");
+      const configPath = expectedConfigPath(tmpHome);
       expect(existsSync(configPath)).toBe(true);
 
       const body = readFileSync(configPath, "utf8");
@@ -61,23 +85,23 @@ describe.skipIf(skipReason !== null)("CLI — operad init", () => {
       const first = spawn("node", [DAEMON_BIN, "init"], {
         encoding: "utf8",
         timeout: 5000,
-        env: { ...process.env, HOME: tmpHome },
+        env: freshHomeEnv(tmpHome),
       });
       expect(first.status).toBe(0);
 
-      const configPath = join(tmpHome, ".config/operad/operad.toml");
-      const originalMtime = readFileSync(configPath, "utf8").length;
+      const configPath = expectedConfigPath(tmpHome);
+      const originalSize = readFileSync(configPath, "utf8").length;
 
       const second = spawn("node", [DAEMON_BIN, "init"], {
         encoding: "utf8",
         timeout: 5000,
-        env: { ...process.env, HOME: tmpHome },
+        env: freshHomeEnv(tmpHome),
       });
       expect(second.status).toBe(0);
       expect(second.stdout).toMatch(/already exists/i);
 
       // File unchanged
-      expect(readFileSync(configPath, "utf8").length).toBe(originalMtime);
+      expect(readFileSync(configPath, "utf8").length).toBe(originalSize);
     } finally {
       try { rmSync(tmpHome, { recursive: true, force: true }); } catch {}
     }
