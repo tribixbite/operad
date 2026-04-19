@@ -29,7 +29,7 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
+      # Trusted publishing via OIDC — repo + workflow registered on npmjs.com.
+      # No NPM_TOKEN needed; `id-token: write` permission + --provenance is enough.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
