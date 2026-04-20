@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-04-20
+
+Customization aggregation extended beyond hooks and skills. Adds slash commands, subagent definitions, memories, and the cross-tool `AGENTS.md` file (Claude Code + Codex + OpenCode compat). Every type supports User / Current Project / All Projects tabs with JSON download.
+
+### Added
+- **Slash commands** (`.claude/commands/*.md`) — new `CommandsPanel.svelte` with User / Current Project / All Projects tabs.
+- **Subagent markdown files** (`.claude/agents/*.md`) — new `SubagentsPanel.svelte` for Claude Code's agent registry files.
+- **Memories** (`.claude/memories/*.md`) — new `MemoriesPanel.svelte` for user-authored context notes.
+- **`AGENTS.md` cross-tool compat** — new `AgentsMdPanel.svelte` with a `consumers` badge row showing which tools read each file (Claude Code, Codex, OpenCode). Subtle info banner links to [agents.md](https://agents.md).
+- **Backend**: `/api/customization` response extended with `commands[]`, `agentsMd[]`, `memories[]`, `agentsMdFiles[]`. `/api/customization/all-projects` response extended with the same fields in `user` + per-`projects[]` entries.
+- **`$HOME/AGENTS.md`** and **`<project>/AGENTS.md`** added to the file-read/write allowlist.
+- **`docs/customization.md`** — new doc explaining what operad scans, where each file lives, and which tools consume it.
+- **`docs/api.md` § Customization** rewritten with complete response shapes.
+
+### Notes on OpenCode + Codex
+operad surfaces `AGENTS.md` as a first-class cross-tool file — read by Claude Code, Codex, and OpenCode alike. Operad itself still runs tmux sessions; the new view is about making the user's multi-tool config visible in one place. Future work: start sessions targeted at `codex` / `opencode` runtimes and route to the correct tool's config paths on boot.
+
 ## [0.4.6] — 2026-04-20
 
 This release focuses on bundle size, real fresh-install proof, runtime hardening, and a hooks/skills aggregation view in the dashboard.
