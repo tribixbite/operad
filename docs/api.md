@@ -208,18 +208,94 @@ Query: `?limit=50`, `?since=<iso>`.
 
 ---
 
-### Customization (CLAUDE.md / memory files)
+### Customization
+
+Aggregates all user- and project-level customization a user has installed
+across the Claude Code / Codex / OpenCode ecosystem — hooks, skills, plans,
+slash commands, subagent markdown, memories, `CLAUDE.md`, `AGENTS.md`, MCP
+servers, plugins, and marketplace data.
 
 #### `GET /api/customization[/:projectPath]`
-List CLAUDE.md files and memory files for the given project (or all projects).
+
+Returns user-level + optionally project-scoped customization for a single
+project. When `projectPath` is supplied (URL-encoded), project-level sources
+from `<projectPath>/.claude/…` and `<projectPath>/{CLAUDE,AGENTS}.md` are
+merged in.
+
+Response body (shape):
+
+```json
+{
+  "ok": true,
+  "data": {
+    "mcpServers": [...],
+    "plugins": [...],
+    "skills":       [ { "name", "path", "scope": "user"|"project" } ],
+    "plans":        [ { "name", "path", "scope" } ],
+    "commands":     [ { "name", "path", "scope" } ],   // .claude/commands/*.md
+    "agentsMd":     [ { "name", "path", "scope" } ],   // .claude/agents/*.md
+    "memories":     [ { "name", "path", "scope" } ],   // .claude/memories/*.md
+    "claudeMds":    [ { "label", "path", "scope" } ],  // CLAUDE.md everywhere
+    "agentsMdFiles":[ { "label", "path", "scope",
+                        "consumers": ["Claude Code","Codex","OpenCode"] } ],
+    "hooks":        [ { "event", "matcher", "type", "command", "timeout?",
+                        "scope": "user"|"project" } ],
+    "marketplace": { "sources": [...], "available": [...] },
+    "projectPath": "string?"
+  }
+}
+```
+
+Scopes are `"user"` (from `~/.claude/…` or `$HOME/AGENTS.md`) or
+`"project"` (from `<projectPath>/.claude/…` or `<projectPath>/AGENTS.md`).
+
+#### `GET /api/customization/all-projects`
+
+Returns customization across **every** known project — enumerated from
+`~/.claude/history.jsonl`. Projects are included only if they contribute at
+least one entry.
+
+Response shape:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "user": {
+      "hooks": [...], "skills": [...], "plans": [...],
+      "commands": [...], "agentsMd": [...], "memories": [...],
+      "claudeMds": [...], "agentsMdFiles": [...]
+    },
+    "projects": [
+      {
+        "path": "/abs/project",
+        "name": "project-basename",
+        "hooks": [...], "skills": [...], "plans": [...],
+        "commands": [...], "agentsMd": [...], "memories": [...],
+        "claudeMd":     { "path": "..." }?,        // optional, single file
+        "agentsMdFile": { "path": "...", "consumers": [...] }?
+      }
+    ]
+  }
+}
+```
 
 #### `GET /api/customization-file/:path`
-Read a CLAUDE.md or memory file by its filesystem path (URL-encoded).
+Read any allowed customization file by its filesystem path (URL-encoded). Allowed paths:
+- Anything under `~/.claude/`
+- `<project>/CLAUDE.md`, `<project>/AGENTS.md`, `<project>/.claude/**` for known projects
+- `$HOME/AGENTS.md`
 
 #### `POST /api/customization-file`
 Write a file.
 
 Body: `{ "path": "string", "content": "string" }`
+
+Paths must satisfy the same allowlist as the GET variant.
+
+#### AGENTS.md cross-tool compat
+
+`AGENTS.md` is the emerging cross-tool standard ([agents.md](https://agents.md)) read by Claude Code, Codex, OpenCode, and others. operad surfaces it as a distinct `agentsMdFiles[]` array rather than lumping it with `CLAUDE.md`, and each entry carries a `consumers` list so the UI can indicate which tools will pick it up.
 
 ---
 
