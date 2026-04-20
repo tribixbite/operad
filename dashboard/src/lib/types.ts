@@ -422,6 +422,36 @@ export interface TelemetryResponse {
 
 // -- Customization / Settings types ------------------------------------------
 
+/** Slash command from .claude/commands/*.md */
+export interface CommandInfo {
+  name: string;
+  path: string;
+  scope: "user" | "project";
+}
+
+/** Claude subagent definition from .claude/agents/*.md */
+export interface AgentMdInfo {
+  name: string;
+  path: string;
+  scope: "user" | "project";
+}
+
+/** User-authored context note from .claude/memories/*.md */
+export interface MemoryFileInfo {
+  name: string;
+  path: string;
+  scope: "user" | "project";
+}
+
+/** Cross-tool AGENTS.md file (Claude Code + Codex + OpenCode compat) */
+export interface AgentsMdFile {
+  label: string;
+  path: string;
+  scope: "user" | "project";
+  /** Tool names that read this file, e.g. ["Claude Code", "Codex", "OpenCode"] */
+  consumers: string[];
+}
+
 /** Full customization response from /api/customization */
 export interface CustomizationResponse {
   mcpServers: McpServerInfo[];
@@ -432,6 +462,14 @@ export interface CustomizationResponse {
   hooks: HookInfo[];
   marketplace: MarketplaceInfo;
   projectPath?: string;
+  /** Slash commands from .claude/commands/*.md */
+  commands?: CommandInfo[];
+  /** Subagent definitions from .claude/agents/*.md */
+  agentsMd?: AgentMdInfo[];
+  /** User-authored context notes from .claude/memories/*.md */
+  memories?: MemoryFileInfo[];
+  /** Cross-tool AGENTS.md files */
+  agentsMdFiles?: AgentsMdFile[];
 }
 
 /** Per-project entry in the all-projects aggregated customization response */
@@ -441,6 +479,16 @@ export interface ProjectCustomizationEntry {
   hooks: HookInfo[];
   skills: SkillInfo[];
   plans: PlanInfo[];
+  /** Slash commands from .claude/commands/*.md */
+  commands?: CommandInfo[];
+  /** Subagent definitions from .claude/agents/*.md */
+  agentsMd?: AgentMdInfo[];
+  /** User-authored context notes from .claude/memories/*.md */
+  memories?: MemoryFileInfo[];
+  /** Single CLAUDE.md for this project (if present) */
+  claudeMd?: ClaudeMdInfo;
+  /** Single AGENTS.md for this project (if present) */
+  agentsMdFile?: AgentsMdFile;
 }
 
 /** Response from /api/customization/all-projects */
@@ -449,6 +497,16 @@ export interface AllProjectsCustomizationResponse {
     hooks: HookInfo[];
     skills: SkillInfo[];
     plans: PlanInfo[];
+    /** Slash commands from ~/.claude/commands/ */
+    commands?: CommandInfo[];
+    /** Subagent definitions from ~/.claude/agents/ */
+    agentsMd?: AgentMdInfo[];
+    /** User-authored context notes from ~/.claude/memories/ */
+    memories?: MemoryFileInfo[];
+    /** CLAUDE.md files at user scope */
+    claudeMds?: ClaudeMdInfo[];
+    /** Cross-tool AGENTS.md files at user scope */
+    agentsMdFiles?: AgentsMdFile[];
   };
   projects: ProjectCustomizationEntry[];
 }
