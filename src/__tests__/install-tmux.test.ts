@@ -30,13 +30,15 @@ describe("detectPkgManager", () => {
     }
   });
 
-  test("detected manager builds an install command with 'tmux' in args", () => {
+  test("detected manager builds an install command with a tmux-related arg", () => {
     const pm = detectPkgManager();
     if (pm.kind === "windows-manual" || pm.kind === "unknown") {
       // Still valid outcomes — no args to verify
       return;
     }
-    expect(pm.args).toContain("tmux");
+    // Most pms take a literal "tmux" arg; winget takes "arndawg.tmux-windows".
+    // Assert at least one arg contains the substring "tmux".
+    expect(pm.args.some((a) => a.includes("tmux"))).toBe(true);
     expect(typeof pm.cmd).toBe("string");
     expect(pm.cmd.length).toBeGreaterThan(0);
   });
