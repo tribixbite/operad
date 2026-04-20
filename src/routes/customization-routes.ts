@@ -9,10 +9,11 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "../orchestrator-context.js";
 import type { SessionConfig } from "../types.js";
+import { parseRecentProjects } from "../registry.js";
 
 /** Regex for env key names that should be redacted in API responses */
 const SENSITIVE_ENV_KEYS = /KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL/i;
@@ -270,7 +271,7 @@ export class CustomizationRoutes {
         }
       }
 
-      const hooks: Array<{ event: string; matcher: string; type: string; command: string; timeout?: number }> = [];
+      const hooks: Array<{ event: string; matcher: string; type: string; command: string; timeout?: number; scope: "user" | "project" }> = [];
       const hooksConfig = (settingsJson?.hooks ?? {}) as Record<string, Array<{
         matcher?: string;
         hooks?: Array<{ type?: string; command?: string; timeout?: number }>;
@@ -280,7 +281,26 @@ export class CustomizationRoutes {
         for (const m of matchers) {
           if (!m.hooks || !Array.isArray(m.hooks)) continue;
           for (const h of m.hooks) {
-            hooks.push({ event, matcher: m.matcher ?? "*", type: h.type ?? "command", command: h.command ?? "", timeout: h.timeout });
+            hooks.push({ event, matcher: m.matcher ?? "*", type: h.type ?? "command", command: h.command ?? "", timeout: h.timeout, scope: "user" });
+          }
+        }
+      }
+
+      // Merge project-scoped hooks from <projectPath>/.claude/settings.json
+      if (projectPath) {
+        const projSettingsPath = join(projectPath, ".claude", "settings.json");
+        const projSettings = this.readJsonFile(projSettingsPath) as Record<string, unknown> | null;
+        const projHooksConfig = (projSettings?.hooks ?? {}) as Record<string, Array<{
+          matcher?: string;
+          hooks?: Array<{ type?: string; command?: string; timeout?: number }>;
+        }>>;
+        for (const [event, matchers] of Object.entries(projHooksConfig)) {
+          if (!Array.isArray(matchers)) continue;
+          for (const m of matchers) {
+            if (!m.hooks || !Array.isArray(m.hooks)) continue;
+            for (const h of m.hooks) {
+              hooks.push({ event, matcher: m.matcher ?? "*", type: h.type ?? "command", command: h.command ?? "", timeout: h.timeout, scope: "project" });
+            }
           }
         }
       }
@@ -332,6 +352,143 @@ export class CustomizationRoutes {
       };
     } catch (err) {
       return { ok: false, error: `Failed to read customization data: ${err}` };
+    }
+  }
+
+  /**
+   * Enumerate hooks, skills, and plans from EVERY known project (from history.jsonl).
+   * Returns a structured response with user-level and per-project entries.
+   * Only projects that have at least one hook/skill/plan are included.
+   */
+  cmdAllProjectsCustomization(): { ok: boolean; data?: unknown; error?: string } {
+    try {
+      const home = homedir();
+      const claudeDir = join(home, ".claude");
+
+      // --- User-level data ---
+      const userSettingsJson = this.readJsonFile(join(claudeDir, "settings.json")) as Record<string, unknown> | null;
+      const userHooks: Array<{ event: string; matcher: string; type: string; command: string; timeout?: number; scope: "user" | "project" }> = [];
+      const userHooksConfig = (userSettingsJson?.hooks ?? {}) as Record<string, Array<{
+        matcher?: string;
+        hooks?: Array<{ type?: string; command?: string; timeout?: number }>;
+      }>>;
+      for (const [event, matchers] of Object.entries(userHooksConfig)) {
+        if (!Array.isArray(matchers)) continue;
+        for (const m of matchers) {
+          if (!m.hooks || !Array.isArray(m.hooks)) continue;
+          for (const h of m.hooks) {
+            userHooks.push({ event, matcher: m.matcher ?? "*", type: h.type ?? "command", command: h.command ?? "", timeout: h.timeout, scope: "user" });
+          }
+        }
+      }
+
+      const userSkills: Array<{ name: string; path: string; scope: "user" | "project"; source?: string }> = [];
+      const userSkillsDir = join(claudeDir, "skills");
+      if (existsSync(userSkillsDir)) {
+        try {
+          for (const f of readdirSync(userSkillsDir)) {
+            if (!f.endsWith(".md")) continue;
+            userSkills.push({ name: f.replace(/\.md$/, ""), path: join(userSkillsDir, f), scope: "user" });
+          }
+        } catch { /* skip */ }
+      }
+
+      const userPlans: Array<{ name: string; path: string; scope: "user" | "project" }> = [];
+      const userPlansDir = join(claudeDir, "plans");
+      if (existsSync(userPlansDir)) {
+        try {
+          for (const f of readdirSync(userPlansDir)) {
+            if (!f.endsWith(".md")) continue;
+            userPlans.push({ name: f.replace(/\.md$/, ""), path: join(userPlansDir, f), scope: "user" });
+          }
+        } catch { /* skip */ }
+      }
+
+      // --- Per-project data ---
+      const historyPath = join(claudeDir, "history.jsonl");
+      const recentProjects = parseRecentProjects(historyPath, 1000);
+
+      // Deduplicate project paths (history may have the same path multiple times)
+      const seenPaths = new Set<string>();
+      const projectEntries: Array<{
+        path: string;
+        name: string;
+        hooks: typeof userHooks;
+        skills: typeof userSkills;
+        plans: typeof userPlans;
+      }> = [];
+
+      for (const proj of recentProjects) {
+        if (!proj.path || seenPaths.has(proj.path)) continue;
+        seenPaths.add(proj.path);
+        if (!existsSync(proj.path)) continue;
+
+        const projClaudeDir = join(proj.path, ".claude");
+        const projHooks: typeof userHooks = [];
+        const projSkills: typeof userSkills = [];
+        const projPlans: typeof userPlans = [];
+
+        // Read project settings.json for hooks
+        const projSettings = this.readJsonFile(join(projClaudeDir, "settings.json")) as Record<string, unknown> | null;
+        if (projSettings) {
+          const projHooksConfig = (projSettings.hooks ?? {}) as Record<string, Array<{
+            matcher?: string;
+            hooks?: Array<{ type?: string; command?: string; timeout?: number }>;
+          }>>;
+          for (const [event, matchers] of Object.entries(projHooksConfig)) {
+            if (!Array.isArray(matchers)) continue;
+            for (const m of matchers) {
+              if (!m.hooks || !Array.isArray(m.hooks)) continue;
+              for (const h of m.hooks) {
+                projHooks.push({ event, matcher: m.matcher ?? "*", type: h.type ?? "command", command: h.command ?? "", timeout: h.timeout, scope: "project" });
+              }
+            }
+          }
+        }
+
+        // Read project skills
+        const projSkillsDir = join(projClaudeDir, "skills");
+        if (existsSync(projSkillsDir)) {
+          try {
+            for (const f of readdirSync(projSkillsDir)) {
+              if (!f.endsWith(".md")) continue;
+              projSkills.push({ name: f.replace(/\.md$/, ""), path: join(projSkillsDir, f), scope: "project" });
+            }
+          } catch { /* skip */ }
+        }
+
+        // Read project plans
+        const projPlansDir = join(projClaudeDir, "plans");
+        if (existsSync(projPlansDir)) {
+          try {
+            for (const f of readdirSync(projPlansDir)) {
+              if (!f.endsWith(".md")) continue;
+              projPlans.push({ name: f.replace(/\.md$/, ""), path: join(projPlansDir, f), scope: "project" });
+            }
+          } catch { /* skip */ }
+        }
+
+        // Only include projects that have at least one hook/skill/plan
+        if (projHooks.length === 0 && projSkills.length === 0 && projPlans.length === 0) continue;
+
+        projectEntries.push({
+          path: proj.path,
+          name: proj.name || basename(proj.path),
+          hooks: projHooks,
+          skills: projSkills,
+          plans: projPlans,
+        });
+      }
+
+      return {
+        ok: true,
+        data: {
+          user: { hooks: userHooks, skills: userSkills, plans: userPlans },
+          projects: projectEntries,
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: `Failed to read all-projects customization: ${err}` };
     }
   }
 

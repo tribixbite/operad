@@ -177,6 +177,8 @@ export interface HookInfo {
   type: string;
   command: string;
   timeout?: number;
+  /** "user" = ~/.claude/settings.json, "project" = <projectPath>/.claude/settings.json */
+  scope?: "user" | "project";
 }
 
 /** Plugin available in a marketplace */
@@ -430,6 +432,25 @@ export interface CustomizationResponse {
   hooks: HookInfo[];
   marketplace: MarketplaceInfo;
   projectPath?: string;
+}
+
+/** Per-project entry in the all-projects aggregated customization response */
+export interface ProjectCustomizationEntry {
+  path: string;
+  name: string;
+  hooks: HookInfo[];
+  skills: SkillInfo[];
+  plans: PlanInfo[];
+}
+
+/** Response from /api/customization/all-projects */
+export interface AllProjectsCustomizationResponse {
+  user: {
+    hooks: HookInfo[];
+    skills: SkillInfo[];
+    plans: PlanInfo[];
+  };
+  projects: ProjectCustomizationEntry[];
 }
 
 // -- SDK streaming types ------------------------------------------------------

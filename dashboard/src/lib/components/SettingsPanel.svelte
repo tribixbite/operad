@@ -10,6 +10,8 @@
   import AgentPanel from "./AgentPanel.svelte";
   import MindMeldPanel from "./MindMeldPanel.svelte";
   import CognitivePanel from "./CognitivePanel.svelte";
+  import HooksPanel from "./HooksPanel.svelte";
+  import SkillsPanel from "./SkillsPanel.svelte";
 
   // -- Constants --------------------------------------------------------------
 
@@ -623,6 +625,14 @@ Example usage or output
       </div>
       {#if sections.skills}
         <div class="section-body">
+          <!-- Skills aggregation: user / project / all-projects tabs with download -->
+          <SkillsPanel
+            skills={data.skills}
+            selectedProject={selectedProject}
+            projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
+            onExpand={toggleExpand}
+          />
+          <hr class="section-divider" />
           <!-- New skill form -->
           {#if newSkillOpen}
             <div class="new-skill-form">
@@ -895,7 +905,7 @@ Example usage or output
       {/if}
     </div>
 
-    <!-- Section 6: Hooks -->
+    <!-- Section 6: Hooks (user + project + all-projects tabs) -->
     <div class="card section-card">
       <button class="section-header" onclick={() => toggleSection("hooks")}>
         <span class="chevron">{sections.hooks ? "▾" : "▸"}</span>
@@ -904,32 +914,11 @@ Example usage or output
       </button>
       {#if sections.hooks}
         <div class="section-body">
-          {#if data.hooks.length === 0}
-            <p class="muted">No hooks configured</p>
-          {:else}
-            <div class="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Event</th>
-                    <th>Matcher</th>
-                    <th>Command</th>
-                    <th>Timeout</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each data.hooks as hook, i}
-                    <tr>
-                      <td>{hook.event}</td>
-                      <td class="mono">{hook.matcher}</td>
-                      <td class="cmd-cell mono" title={shortenPath(hook.command)}>{shortenPath(hook.command)}</td>
-                      <td class="muted">{hook.timeout ? `${hook.timeout}s` : "-"}</td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
+          <HooksPanel
+            hooks={data.hooks}
+            selectedProject={selectedProject}
+            projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
+          />
         </div>
       {/if}
     </div>
@@ -1420,5 +1409,12 @@ Example usage or output
     .btn-sm-icon { width: 1.25rem; height: 1.25rem; font-size: 0.7rem; }
     .item-path { font-size: 0.5rem; }
     .project-path-hint { font-size: 0.5625rem; }
+  }
+
+  /* Divider between SkillsPanel tabs and the detailed item list */
+  .section-divider {
+    border: none;
+    border-top: 1px solid var(--border, #333);
+    margin: 0.75rem 0;
   }
 </style>

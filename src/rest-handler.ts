@@ -517,7 +517,12 @@ export class RestHandler {
           break;
         }
         case "customization":
-          resp = this.customizationRoutes.cmdCustomization(name);
+          // Special sub-route: /api/customization/all-projects — aggregated view
+          if (name === "all-projects") {
+            resp = this.customizationRoutes.cmdAllProjectsCustomization();
+          } else {
+            resp = this.customizationRoutes.cmdCustomization(name);
+          }
           break;
         case "customization-file": {
           if (method === "GET") {
