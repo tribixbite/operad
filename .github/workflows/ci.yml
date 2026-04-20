@@ -207,10 +207,8 @@ jobs:
       # winget install against a fresh runner needs msstore source agreement
       # + UAC negotiation that's hard to script non-interactively. Instead
       # we verify the non-interactive code path prints the right guidance.
-      - name: operad install-tmux (non-interactive: expect instructions, exit 0)
+      - name: "operad install-tmux (non-interactive — expect instructions, exit 0)"
         run: |
-          # stdin redirected so the installer knows it's non-interactive and
-          # falls through to printed guidance. operad exits 0 on no-op.
           $out = operad install-tmux 2>&1 | Out-String
           Write-Host $out
           if ($out -notmatch "winget install") {
@@ -218,7 +216,7 @@ jobs:
             exit 1
           }
 
-      - name: operad doctor (tmux-windows WARN must mention winget)
+      - name: "operad doctor (tmux-windows WARN must mention winget)"
         run: |
           $out = operad doctor 2>&1 | Out-String
           Write-Host $out
