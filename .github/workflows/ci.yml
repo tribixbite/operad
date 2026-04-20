@@ -215,13 +215,18 @@ jobs:
             Write-Error "Expected non-interactive output to include the winget command"
             exit 1
           }
+          exit 0
 
       - name: "operad doctor (tmux-windows WARN must mention winget)"
         run: |
+          # operad doctor intentionally exits 1 when any check fails
+          # (tmux is missing here). Capture output and reset exit code.
           $out = operad doctor 2>&1 | Out-String
+          $LASTEXITCODE = 0
           Write-Host $out
           if ($out -notmatch "winget") {
             Write-Error "Expected doctor output to mention winget when tmux missing"
             exit 1
           }
+          exit 0
 
