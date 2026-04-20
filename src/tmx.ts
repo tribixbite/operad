@@ -104,6 +104,9 @@ async function main(): Promise<void> {
     case "install-tmux":
       return runInstallTmux();
 
+    case "watch":
+      return runWatch();
+
     case "switchboard":
       return runSwitchboard();
 
@@ -464,6 +467,75 @@ async function runInstallTmux(): Promise<void> {
   // Not attempted (user declined, non-interactive, or unsupported platform) — exit 0 so
   // it doesn't trip CI jobs that happen to hit this path.
   process.exit(0);
+}
+
+/**
+ * Watch — render live session status in the terminal.
+ *
+ * Opens a one-shot status pull every 1s (simpler than SSE for a CLI) and
+ * re-renders the table in place using an alternate screen buffer. Exits on
+ * Ctrl+C; daemon is untouched.
+ */
+async function runWatch(): Promise<void> {
+  const configPath = getConfigFlag();
+  const client = getClient(configPath);
+
+  if (!(await client.isRunning())) {
+    console.error(`${RED}Daemon not running. Start with: operad stream${RESET}`);
+    process.exit(1);
+  }
+
+  // Alternate screen buffer + hide cursor
+  process.stdout.write("\x1b[?1049h\x1b[?25l");
+  const restore = () => {
+    process.stdout.write("\x1b[?1049l\x1b[?25h");
+  };
+  const onExit = () => { restore(); process.exit(0); };
+  process.on("SIGINT", onExit);
+  process.on("SIGTERM", onExit);
+
+  try {
+    while (true) {
+      const resp = await client.send({ cmd: "status" } as IpcCommand, 5000).catch(() => null);
+      process.stdout.write("\x1b[H\x1b[2J"); // home + clear
+
+      const now = new Date().toTimeString().slice(0, 8);
+      process.stdout.write(`${BOLD}operad watch${RESET}  ${DIM}${now} — Ctrl+C to exit${RESET}\n\n`);
+
+      if (!resp || !(resp as { ok?: boolean }).ok) {
+        process.stdout.write(`${RED}(daemon not responding)${RESET}\n`);
+      } else {
+        const data = (resp as { sessions?: Array<{
+          name: string; status: string; uptime?: string | null;
+          rss_mb?: number | null; restart_count?: number; activity?: string | null;
+        }> }).sessions ?? [];
+        if (data.length === 0) {
+          process.stdout.write(`${DIM}No sessions configured.${RESET}\n`);
+        } else {
+          process.stdout.write(`${BOLD}${"NAME".padEnd(24)}${"STATUS".padEnd(14)}${"UPTIME".padEnd(12)}${"RSS".padEnd(8)}${"ACT".padEnd(8)}${"RST"}${RESET}\n`);
+          for (const s of data) {
+            const color =
+              s.status === "running" ? GREEN :
+              s.status === "degraded" ? YELLOW :
+              s.status === "failed" ? RED :
+              s.status === "starting" || s.status === "waiting" ? CYAN :
+              DIM;
+            const rss = typeof s.rss_mb === "number" ? `${Math.round(s.rss_mb)}M` : "-";
+            const up = s.uptime ?? "-";
+            const act = s.activity ?? "-";
+            const rst = String(s.restart_count ?? 0);
+            process.stdout.write(
+              `${s.name.slice(0, 23).padEnd(24)}${color}${s.status.padEnd(14)}${RESET}${up.padEnd(12)}${rss.padEnd(8)}${act.padEnd(8)}${rst}\n`,
+            );
+          }
+        }
+      }
+
+      await sleep(1000);
+    }
+  } finally {
+    restore();
+  }
 }
 
 async function runDoctor(): Promise<void> {
@@ -1190,6 +1262,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}doctor${RESET}                Diagnose install issues and report fix steps
   ${CYAN}init${RESET}                  Generate a minimal config at ~/.config/operad/operad.toml
   ${CYAN}install-tmux${RESET}          Install tmux via the platform's package manager (prompts on TTY)
+  ${CYAN}watch${RESET}                 Live-update session status in the terminal (Ctrl+C to exit)
   ${CYAN}switchboard reset${RESET}     Reset cognitive/OODA/mindMeld to opt-in defaults
 
 ${BOLD}OPTIONS${RESET}
