@@ -200,32 +200,30 @@ jobs:
           npm install -g ".\$tarball"
           operad --version
 
-      - name: Verify winget is available (prereq for install-tmux test)
+      - name: Verify winget is available
+        run: winget --version
+
+      # We DON'T actually run `operad install-tmux -y` on Windows CI:
+      # winget install against a fresh runner needs msstore source agreement
+      # + UAC negotiation that's hard to script non-interactively. Instead
+      # we verify the non-interactive code path prints the right guidance.
+      - name: operad install-tmux (non-interactive: expect instructions, exit 0)
         run: |
-          winget --version
-          # Confirm the package exists before attempting install
-          winget show --id arndawg.tmux-windows --exact || {
-            Write-Host "arndawg.tmux-windows not in winget source — skipping install attempt"
-            exit 0
+          # stdin redirected so the installer knows it's non-interactive and
+          # falls through to printed guidance. operad exits 0 on no-op.
+          $out = operad install-tmux 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch "winget install") {
+            Write-Error "Expected non-interactive output to include the winget command"
+            exit 1
           }
 
-      # NOTE: We don't actually run `operad install-tmux -y` on Windows because
-      # winget install in GitHub runners needs msstore source acceptance + UAC
-      # negotiation that's hard to script non-interactively. Instead we verify
-      # the command runs, prints the correct guidance, and exits cleanly.
-      - name: operad install-tmux (dry — non-interactive path)
+      - name: operad doctor (tmux-windows WARN must mention winget)
         run: |
-          # No TTY → installer prints instructions and exits 0
-          operad install-tmux
-        continue-on-error: true
-
-      - name: operad doctor (expect tmux-windows WARN with winget fix hint)
-        run: |
-          $output = operad doctor 2>&1 | Out-String
-          Write-Host $output
-          if ($output -notmatch "winget") {
+          $out = operad doctor 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch "winget") {
             Write-Error "Expected doctor output to mention winget when tmux missing"
             exit 1
           }
-        continue-on-error: true
 
