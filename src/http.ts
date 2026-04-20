@@ -52,6 +52,12 @@ interface SseClient {
   id: number;
 }
 
+/** Maximum write-buffer bytes per SSE client before the connection is dropped */
+const MAX_SSE_BUFFER_BYTES = 1024 * 1024; // 1 MB
+
+/** Maximum concurrent SSE client connections */
+const MAX_SSE_CLIENTS = 50;
+
 export class DashboardServer {
   private server: http.Server | null = null;
   private log: Logger;
@@ -181,11 +187,28 @@ export class DashboardServer {
     }
   }
 
-  /** Push an SSE event to all connected clients */
+  /** Push an SSE event to all connected clients.
+   *
+   * Backpressure guard: if a client's underlying socket write buffer exceeds
+   * MAX_SSE_BUFFER_BYTES the connection is destroyed and removed from the set.
+   * This prevents a stalled or slow client from causing unbounded memory growth.
+   */
   pushEvent(event: string, data: unknown): void {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
     for (const client of this.sseClients) {
+      // Drop clients whose socket buffer is past the threshold
+      const buffered = client.res.socket?.writableLength ?? 0;
+      if (buffered > MAX_SSE_BUFFER_BYTES) {
+        const addr = client.res.socket?.remoteAddress ?? "unknown";
+        this.log.warn(
+          `SSE client id=${client.id} addr=${addr} dropped — buffer ${buffered} bytes exceeds ${MAX_SSE_BUFFER_BYTES}`
+        );
+        client.res.destroy();
+        this.sseClients.delete(client);
+        continue;
+      }
+
       try {
         client.res.write(payload);
       } catch {
@@ -336,6 +359,18 @@ export class DashboardServer {
 
   /** Handle SSE connection */
   private handleSse(req: http.IncomingMessage, res: http.ServerResponse): void {
+    // Reject when at the concurrent-client cap to prevent resource exhaustion
+    if (this.sseClients.size >= MAX_SSE_CLIENTS) {
+      const addr = req.socket?.remoteAddress ?? "unknown";
+      this.log.warn(`SSE connection rejected — at cap (${MAX_SSE_CLIENTS}), addr=${addr}`);
+      res.writeHead(503, {
+        "Content-Type": "application/json",
+        "Retry-After": "5",
+      });
+      res.end(JSON.stringify({ error: "Too many SSE connections" }));
+      return;
+    }
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
