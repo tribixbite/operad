@@ -33,8 +33,19 @@ type PkgManager =
   | { kind: "pacman"; cmd: string; args: string[]; needsSudo: boolean }
   | { kind: "zypper"; cmd: string; args: string[]; needsSudo: boolean }
   | { kind: "apk"; cmd: string; args: string[]; needsSudo: boolean }
+  | { kind: "winget"; cmd: string; args: string[] }
+  | { kind: "scoop"; cmd: string; args: string[] }
+  | { kind: "choco"; cmd: string; args: string[] }
   | { kind: "windows-manual"; link: string }
   | { kind: "unknown" };
+
+/** Does the given binary resolve on PATH? Works on Unix (`which`) + Windows (`where`). */
+function commandExists(bin: string): boolean {
+  const probe = process.platform === "win32"
+    ? spawnSync("where", [bin], { stdio: "ignore", timeout: 3000 })
+    : spawnSync("which", [bin], { stdio: "ignore", timeout: 3000 });
+  return probe.status === 0;
+}
 
 /** Detect the best package manager for this host. */
 export function detectPkgManager(): PkgManager {
@@ -43,6 +54,19 @@ export function detectPkgManager(): PkgManager {
     return { kind: "termux", cmd: "pkg", args: ["install", "-y", "tmux"] };
   }
   if (process.platform === "win32") {
+    // Prefer winget (pre-installed on Windows 10 1809+ / Windows 11).
+    // arndawg.tmux-windows is the community native tmux build for Windows.
+    if (commandExists("winget")) {
+      return { kind: "winget", cmd: "winget", args: ["install", "-e", "--id", "arndawg.tmux-windows"] };
+    }
+    if (commandExists("scoop")) {
+      // Scoop's tmux lives in the "main" bucket as a WSL-style port.
+      return { kind: "scoop", cmd: "scoop", args: ["install", "tmux"] };
+    }
+    if (commandExists("choco")) {
+      // Chocolatey's tmux package ships via msys2; install requires admin shell.
+      return { kind: "choco", cmd: "choco", args: ["install", "-y", "tmux"] };
+    }
     return { kind: "windows-manual", link: "https://www.msys2.org/" };
   }
   if (process.platform === "darwin") {
@@ -62,10 +86,7 @@ export function detectPkgManager(): PkgManager {
     { bin: "apk", kind: "apk", args: ["add", "tmux"] },
   ];
   for (const c of candidates) {
-    const found = spawnSync("command", ["-v", c.bin], { stdio: "ignore" });
-    // `command -v` only works in shells — fall back to `which`
-    const which = found.status === 0 ? found : spawnSync("which", [c.bin], { stdio: "ignore" });
-    if (which.status === 0) {
+    if (commandExists(c.bin)) {
       return { kind: c.kind, cmd: c.bin, args: c.args, needsSudo: !isRoot };
     }
   }
@@ -97,10 +118,12 @@ function buildCommand(pm: Exclude<PkgManager, { kind: "windows-manual" } | { kin
   args: string[];
   display: string;
 } {
-  if (pm.kind === "termux" || pm.kind === "brew") {
+  // Managers that don't need sudo / run their own elevation.
+  if (pm.kind === "termux" || pm.kind === "brew" ||
+      pm.kind === "winget" || pm.kind === "scoop" || pm.kind === "choco") {
     return { cmd: pm.cmd, args: pm.args, display: `${pm.cmd} ${pm.args.join(" ")}` };
   }
-  // Linux pms
+  // Linux managers may need sudo
   if (pm.needsSudo) {
     return { cmd: "sudo", args: [pm.cmd, ...pm.args], display: `sudo ${pm.cmd} ${pm.args.join(" ")}` };
   }

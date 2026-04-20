@@ -73,7 +73,13 @@ Short for **Claude For Chrome** — the original automation surface name. The An
 
 ## Linux / macOS / Windows desktop
 
-CFC bridge isn't supported on desktop platforms today. operad's doctor only runs the bridge/Edge checks on `platformId === "android"`. If you want similar functionality on desktop, run Chrome/Edge with `--remote-debugging-port=9222` directly and connect Claude Code's MCP via the standard CDP MCP server — operad has no special integration for that path.
+The Android CFC bridge (`claude-chrome-android` + Edge Canary) does not run on desktop platforms. The desktop equivalent is the **Claude for Chrome** browser extension from Anthropic, which runs inside Chrome/Chromium/Edge/Brave and talks to Claude directly.
+
+**Install:** [Claude for Chrome on the Chrome Web Store](https://chromewebstore.google.com/detail/claude-for-chrome/mhlfhmbeohhnidmkdpjmaflpcnhfchck)
+
+operad's doctor now checks for a Chromium-based browser on desktop and surfaces the extension install URL as a `[OK]`-with-hint row (or a `[WARN]` if no supported browser is detected).
+
+If you want low-level CDP access from Claude Code (for more advanced browser automation), run Chrome/Edge with `--remote-debugging-port=9222` directly and connect via a standard CDP MCP server — operad has no special integration for that raw-CDP path on desktop.
 
 ## Troubleshooting
 

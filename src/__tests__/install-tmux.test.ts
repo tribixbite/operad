@@ -11,7 +11,7 @@ describe("tmuxAvailable", () => {
 describe("detectPkgManager", () => {
   test("returns non-empty result on every supported platform", () => {
     const pm = detectPkgManager();
-    expect(pm.kind).toMatch(/^(termux|brew|apt|dnf|pacman|zypper|apk|windows-manual|unknown)$/);
+    expect(pm.kind).toMatch(/^(termux|brew|apt|dnf|pacman|zypper|apk|winget|scoop|choco|windows-manual|unknown)$/);
   });
 
   test("Termux detection via TERMUX_VERSION env", () => {

@@ -252,19 +252,26 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
     results.push(checkEdgeCanary());
   }
 
+  // Claude for Chrome extension — desktop equivalent of the Android CFC bridge.
+  // Extensions live inside a Chrome profile and can't be reliably detected
+  // from the OS, so this is an info-level row pointing at the install URL
+  // when a Chromium-based browser is detected on PATH.
+  if (platformId === "linux" || platformId === "darwin" || platformId === "windows") {
+    results.push(checkClaudeForChromeExtension(platformId));
+  }
+
   if (platformId === "windows") {
     // Check that tmux is on PATH (required for session management).
-    // Users install tmux via MSYS2 (`pacman -S tmux`) or WSL.
     const tmuxCheck = spawnSync("where", ["tmux"], { encoding: "utf8", timeout: 3000 });
     if (tmuxCheck.error || tmuxCheck.status !== 0) {
-      results.push({
-        name: "tmux-windows",
-        status: "warn",
-        message: "tmux not found on PATH — session management requires tmux",
-        fix:
-          "Install tmux via MSYS2: open an MSYS2 shell and run `pacman -S tmux`, then add " +
-          "C:\\msys64\\usr\\bin to your Windows PATH. Alternatively, run operad inside WSL.",
-      });
+      // Prefer winget (preinstalled on Win10 1809+ / Win11). Fall back to MSYS2.
+      const wingetCheck = spawnSync("where", ["winget"], { stdio: "ignore", timeout: 3000 });
+      const fix = wingetCheck.status === 0
+        ? "Install via winget:  winget install -e --id arndawg.tmux-windows\n" +
+          "  (Or run:  operad install-tmux)"
+        : "Install via MSYS2: https://msys2.org → `pacman -S tmux` → add C:\\msys64\\usr\\bin to PATH.\n" +
+          "  Alternatively run inside WSL, or install winget and re-run `operad install-tmux`.";
+      results.push({ name: "tmux-windows", status: "warn", message: "tmux not found on PATH", fix });
     } else {
       results.push({
         name: "tmux-windows",
@@ -342,6 +349,70 @@ function checkCfcBridge(): CheckResult {
     fix:
       "Install: bun add -g claude-chrome-android  (or npm i -g claude-chrome-android)\n" +
       "Then run: operad bridge start  (or call POST http://localhost:18970/api/bridge)",
+  };
+}
+
+/** Claude for Chrome extension — desktop equivalent of the Android CFC bridge.
+ *  We can't detect an installed extension from outside the browser profile,
+ *  so this is a heuristic: if a Chromium-based browser is on PATH, surface
+ *  the install URL as an `ok`-with-hint row. If no browser is detected,
+ *  report `warn` with browser install suggestions too. */
+function checkClaudeForChromeExtension(platformId: PlatformId): CheckResult {
+  const EXT_URL =
+    "https://chromewebstore.google.com/detail/claude-for-chrome/mhlfhmbeohhnidmkdpjmaflpcnhfchck";
+  // Candidate browser binaries per platform
+  const candidates: string[] =
+    platformId === "darwin"
+      ? [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+          "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+          "/Applications/Arc.app/Contents/MacOS/Arc",
+          "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+      : platformId === "windows"
+      ? [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+          "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+          "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+        ]
+      : [
+          "/usr/bin/google-chrome",
+          "/usr/bin/chromium",
+          "/usr/bin/chromium-browser",
+          "/usr/bin/microsoft-edge",
+          "/usr/bin/brave-browser",
+          "/opt/google/chrome/chrome",
+        ];
+
+  const hasBrowser =
+    candidates.some((p) => existsSync(p)) ||
+    // PATH-based fallback
+    ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser", "chrome"]
+      .some((bin) => {
+        const probe = platformId === "windows"
+          ? spawnSync("where", [bin], { stdio: "ignore", timeout: 2000 })
+          : spawnSync("which", [bin], { stdio: "ignore", timeout: 2000 });
+        return probe.status === 0;
+      });
+
+  if (!hasBrowser) {
+    return {
+      name: "claude-for-chrome",
+      status: "warn",
+      message: "No Chromium-based browser detected — Claude for Chrome extension install won't work",
+      fix:
+        "Install Chrome/Chromium/Edge/Brave, then install the extension:\n" +
+        `  ${EXT_URL}`,
+    };
+  }
+  // Browser present — surface the extension as an info-level nudge
+  return {
+    name: "claude-for-chrome",
+    status: "ok",
+    message: "Browser detected — install extension manually if desired",
+    fix: `Claude for Chrome extension: ${EXT_URL}`,
   };
 }
 

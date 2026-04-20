@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-04-20
+
+### Added
+- **Windows tmux install via winget** — `operad install-tmux` and `operad init` now prefer `winget install -e --id arndawg.tmux-windows` on Windows 10 1809+ / Windows 11 (where winget is pre-installed). Falls back to `scoop` then `choco` if on PATH, then MSYS2 manual instructions if no package manager is found.
+- **Claude for Chrome extension check** in `operad doctor` on Linux/macOS/Windows — heuristically detects a Chromium-based browser (Chrome, Chromium, Edge, Brave) and surfaces the [extension install URL](https://chromewebstore.google.com/detail/claude-for-chrome/mhlfhmbeohhnidmkdpjmaflpcnhfchck). Warns if no browser detected. This is the desktop equivalent of the Android CFC bridge.
+
+### Changed
+- Windows `doctor.ts` tmux-missing fix message now recommends `winget install -e --id arndawg.tmux-windows` when winget is present, before falling back to MSYS2.
+- `docs/cfc-bridge.md` now documents the desktop (Chrome extension) path alongside the Android (bridge + Edge Canary) path.
+
 ## [0.4.4] — 2026-04-19
 
 ### Added
