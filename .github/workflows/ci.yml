@@ -143,15 +143,14 @@ jobs:
           npm pack
           ls -la operadic-*.tgz
 
-      - name: Install from tarball globally (bun)
+      # bun add -g doesn't resolve local tarball paths — use npm for install,
+      # which puts the binary on standard PATH (/usr/local/bin/operad). This
+      # still exercises the same dist/tmx.js bundle and bin mapping.
+      - name: Install from tarball globally (npm)
         run: |
-          bun add -g "$(ls operadic-*.tgz | head -1)"
-          which operad || {
-            # bun's global bin isn't always on PATH by default — add it
-            export PATH="$HOME/.bun/bin:$PATH"
-            echo "PATH=$HOME/.bun/bin:$PATH" >> "$GITHUB_ENV"
-            which operad
-          }
+          sudo npm install -g "$(ls operadic-*.tgz | head -1)"
+          which operad
+          operad --version
 
       - name: Verify tmux is NOT on PATH (control check)
         run: |
@@ -194,16 +193,12 @@ jobs:
           npm pack
           Get-ChildItem operadic-*.tgz
 
-      - name: Install from tarball globally (bun)
+      # bun add -g doesn't resolve local tarball paths on Windows either
+      - name: Install from tarball globally (npm)
         run: |
           $tarball = (Get-ChildItem operadic-*.tgz | Select-Object -First 1).Name
-          bun add -g $tarball
-          # Put bun global bin on PATH for subsequent steps
-          $env:PATH = "$env:USERPROFILE\.bun\bin;$env:PATH"
-          "$env:USERPROFILE\.bun\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
-
-      - name: operad --version (proves global install works)
-        run: operad --version
+          npm install -g ".\$tarball"
+          operad --version
 
       - name: Verify winget is available (prereq for install-tmux test)
         run: |
