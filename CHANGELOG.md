@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-04-19
+
+### Added
+- **`operad install-tmux`** — new CLI command. Detects the platform's package manager (`pkg` on Termux, `brew` on macOS, `apt`/`dnf`/`pacman`/`zypper`/`apk` on Linux) and runs the install with `sudo` when needed. Prompts on TTY; falls through to printed instructions on non-interactive invocations. Windows routes to the MSYS2 install page.
+- **`operad init` now offers to install tmux** after writing the config. Keeps the fresh-install flow to a single prompt.
+- **`operad boot`/`stream` offers install before forking the daemon** — if tmux is missing and stdin is a TTY, prompts with the platform's package manager command; declines or non-TTY fall through to a clean error.
+- 4 new unit tests for pkg-manager detection + availability check.
+
+### Changed
+- `operad init` help line clarifies the new flow (config → tmux prompt → run doctor/boot).
+
 ## [0.4.3] — 2026-04-19
 
 ### Fixed (P0)

@@ -101,6 +101,9 @@ async function main(): Promise<void> {
     case "doctor":
       return runDoctor();
 
+    case "install-tmux":
+      return runInstallTmux();
+
     case "switchboard":
       return runSwitchboard();
 
@@ -147,6 +150,19 @@ async function runStream(): Promise<void> {
   // Check if daemon is already running
   const running = await client.isRunning();
   if (!running) {
+    // Before spawning the daemon, make sure tmux is available. If it's
+    // missing AND we have a TTY, offer to install. Non-TTY invocations
+    // (e.g., systemd units, background tabs) get printed instructions and
+    // the daemon preflight will then fail with a clearer error.
+    const { promptAndInstallTmux } = await import("./install-tmux.js");
+    const tmuxCheck = await promptAndInstallTmux();
+    if (!tmuxCheck.installed) {
+      console.error(`${RED}Cannot start daemon without tmux.${RESET}`);
+      console.error(`  Reason: ${tmuxCheck.reason}`);
+      console.error(`  Retry interactively: ${CYAN}operad install-tmux${RESET}\n`);
+      process.exit(1);
+    }
+
     // Start daemon in background (fork), capturing stderr for diagnostics
     console.log(`${CYAN}Starting daemon...${RESET}`);
     const daemonArgs = ["daemon"];
@@ -415,9 +431,39 @@ enabled = true
 
   fsWrite(configPath, template, "utf8");
   console.log(`\n${GREEN}Created ${configPath}${RESET}`);
-  console.log(`\nEdit it to add your sessions, then run:\n`);
-  console.log(`  ${CYAN}operad boot${RESET}    # start the daemon`);
-  console.log(`  ${CYAN}operad doctor${RESET}  # validate your setup\n`);
+
+  // Opportunistically offer to install tmux while we have the user's attention.
+  // If tmux is already present, this returns immediately.
+  const { promptAndInstallTmux } = await import("./install-tmux.js");
+  const result = await promptAndInstallTmux();
+  if (!result.installed && result.attempted) {
+    console.log(`${YELLOW}tmux install did not complete: ${result.reason}${RESET}`);
+    console.log(`Run ${CYAN}operad install-tmux${RESET} to retry, or install manually.\n`);
+  }
+
+  console.log(`\nEdit ${configPath} to add your sessions, then run:\n`);
+  console.log(`  ${CYAN}operad doctor${RESET}  # validate your setup`);
+  console.log(`  ${CYAN}operad boot${RESET}    # start the daemon\n`);
+}
+
+/**
+ * Install tmux via the platform's package manager. Prompts on TTY.
+ */
+async function runInstallTmux(): Promise<void> {
+  const yes = subArgs.includes("-y") || subArgs.includes("--yes");
+  const { promptAndInstallTmux } = await import("./install-tmux.js");
+  const result = await promptAndInstallTmux({ yes });
+  if (result.installed) {
+    console.log(`${GREEN}tmux is available.${RESET}`);
+    return;
+  }
+  if (result.attempted) {
+    console.error(`${RED}Install failed: ${result.reason}${RESET}`);
+    process.exit(1);
+  }
+  // Not attempted (user declined, non-interactive, or unsupported platform) — exit 0 so
+  // it doesn't trip CI jobs that happen to hit this path.
+  process.exit(0);
 }
 
 async function runDoctor(): Promise<void> {
@@ -1143,6 +1189,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}upgrade${RESET}               Rebuild, shutdown daemon, let watchdog auto-restart
   ${CYAN}doctor${RESET}                Diagnose install issues and report fix steps
   ${CYAN}init${RESET}                  Generate a minimal config at ~/.config/operad/operad.toml
+  ${CYAN}install-tmux${RESET}          Install tmux via the platform's package manager (prompts on TTY)
   ${CYAN}switchboard reset${RESET}     Reset cognitive/OODA/mindMeld to opt-in defaults
 
 ${BOLD}OPTIONS${RESET}
