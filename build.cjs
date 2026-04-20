@@ -14,16 +14,21 @@ build({
   outfile: resolve(__dirname, "dist/tmx.js"),
   format: "cjs",
   banner: { js: "#!/usr/bin/env node" },
-  external: ["ws", "@anthropic-ai/claude-agent-sdk", "bun:sqlite"],
+  external: ["ws", "@anthropic-ai/claude-agent-sdk", "bun:sqlite", "better-sqlite3"],
   // Replace import.meta references with CJS equivalents
   define: {
     "import.meta.url": "import_meta_url",
   },
   inject: [resolve(__dirname, "src/import-meta-shim.js")],
-  minify: false,
+  // Minify with keepNames so stack traces and dynamic require() paths still
+  // show meaningful symbols in logs. Cuts bundle size significantly.
+  minify: true,
+  keepNames: true,
   sourcemap: false,
 }).then(() => {
-  console.log("Built dist/tmx.js");
+  const { statSync } = require("fs");
+  const size = statSync(resolve(__dirname, "dist/tmx.js")).size;
+  console.log(`Built dist/tmx.js (${(size / 1024).toFixed(1)} KB)`);
 }).catch((err) => {
   console.error("Build failed:", err);
   process.exit(1);
