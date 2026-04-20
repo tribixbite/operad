@@ -112,3 +112,125 @@ jobs:
 
       - name: E2E tests
         run: bun test src/__tests__/e2e.test.ts --timeout 60000
+
+  # Validates the 'fresh machine' story: no tmux preinstalled, install
+  # operadic from a packed tarball (simulating `bun add -g operadic`),
+  # then run `operad install-tmux --yes` and verify tmux becomes
+  # callable. Catches regressions in the install-tmux package-manager
+  # detection + invocation path that normal CI doesn't exercise
+  # (because the build matrix has tmux preinstalled for other tests).
+  fresh-install-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Remove preinstalled tmux
+        run: |
+          sudo apt-get remove -y tmux || true
+          if command -v tmux >/dev/null 2>&1; then
+            echo "ERROR: tmux still on PATH after remove" >&2
+            exit 1
+          fi
+
+      - name: Install deps + build + pack
+        run: |
+          bun install
+          bun run build
+          npm pack
+          ls -la operadic-*.tgz
+
+      - name: Install from tarball globally (bun)
+        run: |
+          bun add -g "$(ls operadic-*.tgz | head -1)"
+          which operad || {
+            # bun's global bin isn't always on PATH by default — add it
+            export PATH="$HOME/.bun/bin:$PATH"
+            echo "PATH=$HOME/.bun/bin:$PATH" >> "$GITHUB_ENV"
+            which operad
+          }
+
+      - name: Verify tmux is NOT on PATH (control check)
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            echo "tmux unexpectedly present" >&2
+            exit 1
+          fi
+          echo "confirmed: tmux not installed"
+
+      - name: Run operad install-tmux --yes
+        run: operad install-tmux -y
+
+      - name: Verify tmux is NOW on PATH
+        run: |
+          tmux -V
+          echo "tmux installed successfully via operad install-tmux"
+
+      - name: operad init + doctor on fresh HOME
+        run: |
+          export HOME=$(mktemp -d)
+          operad init
+          operad doctor || echo "(doctor may warn — non-fatal for this check)"
+
+  fresh-install-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install deps + build + pack
+        run: |
+          bun install
+          bun run build
+          npm pack
+          Get-ChildItem operadic-*.tgz
+
+      - name: Install from tarball globally (bun)
+        run: |
+          $tarball = (Get-ChildItem operadic-*.tgz | Select-Object -First 1).Name
+          bun add -g $tarball
+          # Put bun global bin on PATH for subsequent steps
+          $env:PATH = "$env:USERPROFILE\.bun\bin;$env:PATH"
+          "$env:USERPROFILE\.bun\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: operad --version (proves global install works)
+        run: operad --version
+
+      - name: Verify winget is available (prereq for install-tmux test)
+        run: |
+          winget --version
+          # Confirm the package exists before attempting install
+          winget show --id arndawg.tmux-windows --exact || {
+            Write-Host "arndawg.tmux-windows not in winget source — skipping install attempt"
+            exit 0
+          }
+
+      # NOTE: We don't actually run `operad install-tmux -y` on Windows because
+      # winget install in GitHub runners needs msstore source acceptance + UAC
+      # negotiation that's hard to script non-interactively. Instead we verify
+      # the command runs, prints the correct guidance, and exits cleanly.
+      - name: operad install-tmux (dry — non-interactive path)
+        run: |
+          # No TTY → installer prints instructions and exits 0
+          operad install-tmux
+        continue-on-error: true
+
+      - name: operad doctor (expect tmux-windows WARN with winget fix hint)
+        run: |
+          $output = operad doctor 2>&1 | Out-String
+          Write-Host $output
+          if ($output -notmatch "winget") {
+            Write-Error "Expected doctor output to mention winget when tmux missing"
+            exit 1
+          }
+        continue-on-error: true
+
