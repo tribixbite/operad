@@ -43,12 +43,23 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResul
 function checkTmux(): CheckResult {
   const result = spawnSync("tmux", ["-V"], { encoding: "utf8" });
   if (result.error || result.status !== 0) {
-    return {
-      name: "tmux",
-      status: "fail",
-      message: "tmux not found",
-      fix: "Install tmux: apt install tmux (Linux) / brew install tmux (macOS) / pkg install tmux (Termux)",
-    };
+    // Platform-aware install guidance. The daemon preflight and
+    // `operad install-tmux` use the same detection order.
+    let fix: string;
+    if (process.platform === "win32") {
+      fix =
+        "Run: operad install-tmux   (uses winget install -e --id arndawg.tmux-windows)\n" +
+        "       or manually: winget install -e --id arndawg.tmux-windows";
+    } else if (process.platform === "darwin") {
+      fix = "Run: operad install-tmux   (or manually: brew install tmux)";
+    } else if (process.env.TERMUX_VERSION || process.env.PREFIX?.includes("com.termux")) {
+      fix = "Run: operad install-tmux   (or manually: pkg install tmux)";
+    } else {
+      fix =
+        "Run: operad install-tmux   (detects apt/dnf/pacman/zypper/apk)\n" +
+        "       or manually: sudo apt install tmux  /  sudo dnf install tmux  /  sudo pacman -S tmux";
+    }
+    return { name: "tmux", status: "fail", message: "tmux not found", fix };
   }
   const version = result.stdout.trim();
   const match = version.match(/tmux (\d+)\.(\d+)/);
