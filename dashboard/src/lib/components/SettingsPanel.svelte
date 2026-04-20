@@ -1044,6 +1044,7 @@ Example usage or output
   }
   .selector-label {
     font-size: 0.75rem;
+    font-weight: 500;
     color: var(--text-secondary);
     white-space: nowrap;
   }
@@ -1054,7 +1055,7 @@ Example usage or output
     border-radius: 6px;
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     padding: 0.375rem 0.5rem;
     max-width: 300px;
   }
@@ -1065,14 +1066,16 @@ Example usage or output
     border-radius: 6px;
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     padding: 0.375rem 0.5rem;
     flex-shrink: 0;
   }
   .project-filter::placeholder { color: var(--text-muted); }
   .project-filter:focus { outline: none; border-color: var(--accent-blue); }
   .project-path-hint {
-    font-size: 0.625rem;
+    /* Bumped from 0.625rem — paths are meaningful info */
+    font-size: 0.6875rem;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
     color: var(--text-muted);
     margin-top: -0.25rem;
     padding-left: 0.25rem;
@@ -1088,7 +1091,7 @@ Example usage or output
     align-items: center;
     gap: 0.5rem;
     width: 100%;
-    padding: 0.75rem;
+    padding: 0.75rem 1rem;
     background: none;
     border: none;
     color: var(--text-primary);
@@ -1097,16 +1100,19 @@ Example usage or output
     text-align: left;
   }
   .section-header:hover { background: var(--bg-tertiary); }
-  .chevron { font-size: 0.625rem; color: var(--text-muted); width: 0.75rem; flex-shrink: 0; }
+  /* Chevron: larger and more readable */
+  .chevron { font-size: 0.6875rem; color: var(--text-muted); width: 0.875rem; flex-shrink: 0; }
   .section-title {
-    font-size: 0.75rem;
+    /* Bumped from 0.75rem — more readable section heading */
+    font-size: 0.8125rem;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     color: var(--text-secondary);
     flex: 1;
   }
-  .section-body { padding: 0 0.75rem 0.75rem; }
+  /* Top padding gives breathing room between header and content */
+  .section-body { padding: 0.25rem 1rem 1rem; }
 
   /* Header action buttons (download all, new skill) */
   .header-actions {
@@ -1124,19 +1130,21 @@ Example usage or output
 
   /* Tables */
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
   th {
     text-align: left;
-    padding: 0.375rem 0.5rem;
+    /* Increased vertical padding: was 0.375rem, now 0.5rem */
+    padding: 0.5rem 0.625rem;
     color: var(--text-muted);
     font-size: 0.6875rem;
-    font-weight: 500;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
     border-bottom: 1px solid var(--border);
   }
   td {
-    padding: 0.5rem;
+    /* Minimum py-2 row padding */
+    padding: 0.625rem 0.625rem;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }
@@ -1152,8 +1160,9 @@ Example usage or output
     white-space: nowrap;
     color: var(--text-secondary);
   }
-  .mono { font-family: inherit; color: var(--accent-purple); }
-  .muted { color: var(--text-muted); font-size: 0.75rem; }
+  .mono { font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace; color: var(--accent-purple); }
+  /* Empty state text: muted with leading-relaxed */
+  .muted { color: var(--text-muted); font-size: 0.8125rem; line-height: 1.6; }
 
   /* Detail row (expanded MCP server) */
   .detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
@@ -1184,20 +1193,23 @@ Example usage or output
     align-items: center;
     gap: 0.5rem;
     width: 100%;
-    padding: 0.5rem 0.25rem;
+    /* Increased padding for easier touch targets */
+    padding: 0.625rem 0.25rem;
     background: none;
     border: none;
     color: var(--text-primary);
     font: inherit;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     cursor: pointer;
     text-align: left;
   }
-  .item-header:hover { background: rgba(88, 166, 255, 0.04); }
+  .item-header:hover { background: rgba(88, 166, 255, 0.05); }
   .item-name { font-weight: 500; white-space: nowrap; }
   .item-path {
     flex: 1;
-    font-size: 0.5625rem;
+    /* Bumped from 0.5625rem — was illegibly tiny */
+    font-size: 0.6875rem;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1209,20 +1221,23 @@ Example usage or output
 
   /* File content viewer */
   .item-content {
-    padding: 0 0.25rem 0.5rem;
+    /* Slightly more padding so content doesn't crowd item edge */
+    padding: 0 0.5rem 0.75rem;
   }
   .file-actions {
     display: flex;
     gap: 0.375rem;
-    margin-bottom: 0.375rem;
+    margin-bottom: 0.5rem;
   }
   .file-preview {
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 0.5rem;
-    font-size: 0.6875rem;
-    line-height: 1.5;
+    padding: 0.75rem;
+    /* Bumped from 0.6875rem — mono code should be readable */
+    font-size: 0.75rem;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+    line-height: 1.6;
     overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1236,10 +1251,11 @@ Example usage or output
     background: var(--bg-primary);
     border: 1px solid var(--accent-blue);
     border-radius: 6px;
-    padding: 0.5rem;
-    font-family: inherit;
-    font-size: 0.6875rem;
-    line-height: 1.5;
+    padding: 0.75rem;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+    /* Bumped from 0.6875rem */
+    font-size: 0.75rem;
+    line-height: 1.6;
     color: var(--text-primary);
     resize: vertical;
     min-height: 200px;
@@ -1247,7 +1263,7 @@ Example usage or output
   .edit-actions {
     display: flex;
     gap: 0.375rem;
-    margin-top: 0.375rem;
+    margin-top: 0.5rem;
   }
 
   /* New skill form */
@@ -1352,14 +1368,16 @@ Example usage or output
     align-items: center;
   }
   .sdk-label {
-    font-size: 0.6875rem;
+    /* Bumped label size for legibility */
+    font-size: 0.75rem;
     color: var(--text-secondary);
     font-weight: 500;
   }
   .sdk-select, .sdk-input {
-    font-size: 0.6875rem;
+    /* Bumped from 0.6875rem */
+    font-size: 0.75rem;
     font-family: inherit;
-    padding: 0.3rem 0.5rem;
+    padding: 0.375rem 0.5rem;
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -1370,10 +1388,11 @@ Example usage or output
     border-color: var(--accent-blue);
   }
   .sdk-hint {
-    font-size: 0.625rem;
+    /* Bumped from 0.625rem — was sub-caption tiny */
+    font-size: 0.6875rem;
     color: var(--text-muted);
     margin: 0.75rem 0 0;
-    line-height: 1.4;
+    line-height: 1.5;
   }
   .badge-green {
     background: rgba(34, 197, 94, 0.15);
@@ -1393,22 +1412,26 @@ Example usage or output
   }
   .error-text { color: var(--accent-red); font-size: 0.75rem; margin: 0; }
 
-  /* Mobile */
+  /* Mobile — keep font sizes readable; don't shrink below 0.6875rem */
   @media (max-width: 768px) {
-    .section-header { padding: 0.625rem; }
-    .section-title { font-size: 0.6875rem; }
-    .section-body { padding: 0 0.5rem 0.5rem; }
-    table { font-size: 0.6875rem; }
-    th { font-size: 0.5625rem; padding: 0.25rem 0.375rem; }
-    td { padding: 0.375rem; }
-    .file-preview { font-size: 0.5625rem; max-height: 300px; }
-    .edit-area { font-size: 0.5625rem; }
-    .item-header { font-size: 0.6875rem; }
-    .mp-name { font-size: 0.6875rem; }
-    .mp-desc { font-size: 0.5625rem; }
+    .section-header { padding: 0.625rem 0.75rem; }
+    /* Section titles stay at 0.75rem on mobile — not shrunk further */
+    .section-title { font-size: 0.75rem; }
+    .section-body { padding: 0.25rem 0.625rem 0.75rem; }
+    table { font-size: 0.75rem; }
+    th { font-size: 0.625rem; padding: 0.375rem; }
+    td { padding: 0.5rem 0.375rem; }
+    /* Floor for mono code preview: 0.6875rem */
+    .file-preview { font-size: 0.6875rem; max-height: 300px; }
+    .edit-area { font-size: 0.6875rem; }
+    .item-header { font-size: 0.75rem; }
+    .mp-name { font-size: 0.75rem; }
+    /* Description text: floor at 0.6875rem */
+    .mp-desc { font-size: 0.6875rem; }
     .btn-sm-icon { width: 1.25rem; height: 1.25rem; font-size: 0.7rem; }
-    .item-path { font-size: 0.5rem; }
-    .project-path-hint { font-size: 0.5625rem; }
+    /* Path hint: floor at 0.625rem */
+    .item-path { font-size: 0.625rem; }
+    .project-path-hint { font-size: 0.625rem; }
   }
 
   /* Divider between SkillsPanel tabs and the detailed item list */

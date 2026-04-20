@@ -287,7 +287,8 @@
     grid-template-columns: 1fr auto;
     grid-template-rows: auto auto;
     gap: 0 0.5rem;
-    padding: 0.375rem 0.25rem;
+    /* Increased py: was 0.375rem — minimum py-2 for touch */
+    padding: 0.5rem 0.25rem;
     border-top: 1px solid var(--border);
     align-items: center;
   }
@@ -301,19 +302,23 @@
   }
   .recent-name {
     font-weight: 600;
-    font-size: 0.75rem;
+    /* Bumped from 0.75rem */
+    font-size: 0.8125rem;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .recent-time {
-    font-size: 0.625rem;
+    /* Bumped from 0.625rem */
+    font-size: 0.6875rem;
     color: var(--text-muted);
     white-space: nowrap;
   }
   .recent-path {
-    font-size: 0.625rem;
+    /* Bumped from 0.625rem; mono for paths */
+    font-size: 0.6875rem;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
     color: var(--text-muted);
     grid-column: 1;
     grid-row: 2;
@@ -329,12 +334,13 @@
   }
 
   .badge {
-    font-size: 0.5rem;
-    padding: 0.0625rem 0.25rem;
+    /* Bumped from 0.5rem — was sub-caption tiny */
+    font-size: 0.625rem;
+    padding: 0.125rem 0.3125rem;
     border-radius: 3px;
     text-transform: uppercase;
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
     white-space: nowrap;
   }
   .badge-green { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
@@ -343,11 +349,12 @@
   .badge-dim { background: rgba(110, 118, 129, 0.15); color: var(--text-muted); }
 
   .action-msg {
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     color: var(--text-secondary);
     margin-bottom: 0.5rem;
-    padding: 0.25rem 0.5rem;
+    padding: 0.3125rem 0.625rem;
     background: var(--bg-tertiary);
     border-radius: 4px;
+    line-height: 1.4;
   }
 </style>

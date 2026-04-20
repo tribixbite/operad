@@ -26,7 +26,7 @@
 
 <!-- Session table -->
 <div class="card mb-4">
-  <h2 class="text-xs font-medium text-[var(--text-secondary)] uppercase tracking-wide mb-3">Sessions</h2>
+  <h2 class="section-heading">Sessions</h2>
   <SessionTable />
 </div>
 
@@ -42,5 +42,16 @@
     flex-direction: column;
     gap: 0.375rem;
     margin-bottom: 0.75rem;
+  }
+
+  /* Consistent section heading for overview cards */
+  .section-heading {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 0.75rem;
+    line-height: 1;
   }
 </style>

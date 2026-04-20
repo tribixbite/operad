@@ -272,23 +272,24 @@
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
-    color: var(--text-muted, #888);
+    color: var(--text-muted);
     cursor: pointer;
-    font-size: 0.8rem;
-    padding: 0.4rem 0.75rem;
+    /* Bumped from 0.8rem for consistent scale */
+    font-size: 0.8125rem;
+    padding: 0.5rem 0.875rem;
     display: flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: 0.375rem;
     transition: color 0.15s, border-color 0.15s;
   }
 
   .tab-btn:hover:not(:disabled) {
-    color: var(--text, #e2e8f0);
+    color: var(--text-primary);
   }
 
   .tab-btn.active {
-    border-bottom-color: var(--accent, #60a5fa);
-    color: var(--text, #e2e8f0);
+    border-bottom-color: var(--accent-blue);
+    color: var(--text-primary);
   }
 
   .tab-btn:disabled {
@@ -297,10 +298,10 @@
   }
 
   .tab-count {
-    background: var(--surface2, #2d3748);
+    background: var(--bg-tertiary);
     border-radius: 9999px;
-    font-size: 0.7rem;
-    padding: 0 0.35rem;
+    font-size: 0.6875rem;
+    padding: 0.0625rem 0.375rem;
     line-height: 1.4;
   }
 
@@ -317,8 +318,9 @@
   }
 
   .tab-subtitle {
-    font-size: 0.72rem;
-    color: var(--text-muted, #888);
+    font-size: 0.75rem;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+    color: var(--text-muted);
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -326,19 +328,19 @@
   }
 
   .btn-dl {
-    background: var(--surface2, #2d3748);
-    border: 1px solid var(--border, #333);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
     border-radius: 4px;
-    color: var(--text, #e2e8f0);
+    color: var(--text-primary);
     cursor: pointer;
     font-size: 0.75rem;
-    padding: 0.25rem 0.6rem;
+    padding: 0.3125rem 0.625rem;
     transition: background 0.15s;
     white-space: nowrap;
   }
 
   .btn-dl:hover:not(:disabled) {
-    background: var(--surface3, #374151);
+    background: var(--border);
   }
 
   .btn-dl:disabled {
@@ -354,37 +356,45 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.78rem;
+    /* Bumped from 0.78rem for consistent scale */
+    font-size: 0.8125rem;
   }
 
   thead tr {
-    border-bottom: 1px solid var(--border, #333);
+    border-bottom: 1px solid var(--border);
   }
 
   th {
-    color: var(--text-muted, #888);
-    font-weight: 500;
-    padding: 0.3rem 0.5rem;
+    color: var(--text-muted);
+    /* Bumped weight: 500 → 600 for header distinctiveness */
+    font-weight: 600;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    /* Minimum py-2 padding */
+    padding: 0.5rem 0.625rem;
     text-align: left;
     white-space: nowrap;
   }
 
   td {
-    border-bottom: 1px solid var(--border-subtle, #1e2533);
-    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    /* Minimum py-2 cell padding */
+    padding: 0.5rem 0.625rem;
     vertical-align: middle;
   }
 
   .mono {
-    font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
   }
 
   .small {
-    font-size: 0.72rem;
+    /* Bumped from 0.72rem — consistent scale floor */
+    font-size: 0.75rem;
   }
 
   .muted {
-    color: var(--text-muted, #888);
+    color: var(--text-muted);
   }
 
   .event-cell {
@@ -407,7 +417,8 @@
   }
 
   .error-msg {
-    color: var(--red, #f87171);
-    font-size: 0.8rem;
+    /* Use design token: was var(--red, ...) which is not a defined token */
+    color: var(--accent-red);
+    font-size: 0.8125rem;
   }
 </style>
