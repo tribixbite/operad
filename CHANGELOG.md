@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-04-20
+
+This release focuses on bundle size, real fresh-install proof, runtime hardening, and a hooks/skills aggregation view in the dashboard.
+
+### Added
+- **`operad watch`** — live session status in the terminal. Polls the daemon once per second in an alt-screen buffer with color-coded state, uptime, RSS, activity, restart count. Ctrl+C restores the main screen and exits.
+- **Dashboard Hooks panel** (`HooksPanel.svelte`) — three tabs (User / Current Project / All Projects), tables with event / matcher / command / timeout columns, and a per-tab "Download JSON" button. Fixes "per-project hooks don't display" and gives a way to export hooks.
+- **Dashboard Skills panel** (`SkillsPanel.svelte`) — same three-tab structure for skills.
+- **`/api/customization/all-projects`** — new endpoint returning hooks + skills + plans aggregated across every known project (enumerated from Claude's `history.jsonl` via `parseRecentProjects`).
+- **Platform-aware `checkTmux()` fix message** — Windows users now see `operad install-tmux` and winget guidance instead of apt/brew/pkg text.
+- **CI job `fresh-install-ubuntu`** — removes tmux, installs operadic from packed tarball (simulating `npm i -g operadic`), runs `operad install-tmux -y`, asserts `tmux -V` works, then runs `operad init` + `operad doctor`. First real proof the install story works on a truly fresh machine.
+- **CI job `fresh-install-windows`** — asserts `operad install-tmux` (non-interactive path) and `operad doctor` both emit winget guidance.
+- **IPC fuzz tests** (`src/__tests__/ipc-fuzz.test.ts`) — 10 scenarios covering malformed JSON, partial messages, binary garbage, concatenated messages, unicode. Confirms the existing 1 MB buffer cap holds.
+
+### Changed
+- **Bundle size**: `dist/tmx.js` reduced from **692 KB → 369 KB (-47%)** via esbuild minification with `keepNames: true` (stack traces stay readable).
+- **`@anthropic-ai/claude-agent-sdk` moved** from `dependencies` to `optionalDependencies`. Already external in the bundle; this removes the install footprint for users who don't use agentic features.
+- **Dashboard visual polish** — consistent typography scale, restored mono font on paths/previews, better spacing in SettingsPanel tables, design-token cleanup in HooksPanel + SkillsPanel. No feature changes.
+- **GitHub Actions**: `actions/checkout@v4 → v5`, `actions/setup-node@v4 → v5` across all workflows. Removes the Node.js 20 deprecation warning.
+
+### Fixed
+- **SSE backpressure**: slow clients with >1 MB of buffered output now get dropped via `res.destroy()` instead of leaking memory. Max 50 concurrent SSE clients (new connections over cap get 503).
+- **`operad doctor` on Windows with `FAIL tmux`** now mentions winget (`arndawg.tmux-windows`) and routes to `operad install-tmux`.
+
 ## [0.4.5] — 2026-04-20
 
 ### Added
