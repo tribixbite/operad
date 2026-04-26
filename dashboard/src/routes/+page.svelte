@@ -30,11 +30,11 @@
   <SessionTable />
 </div>
 
-<!-- Prompt library -->
-<PromptLibrary />
-
 <!-- Recent projects from history -->
 <RecentSessions />
+
+<!-- Prompt library -->
+<PromptLibrary />
 
 <style>
   .status-strip {

@@ -13,6 +13,7 @@
 
   import { fetchAllCustomization } from "$lib/api";
   import type { ClaudeMdInfo, AllProjectsCustomizationResponse } from "$lib/types";
+  import { formatBytes, formatRelativeTime, copyToClipboard } from "$lib/format";
 
   // -- Props ------------------------------------------------------------------
 
@@ -169,7 +170,9 @@
             <tr>
               <th>Label</th>
               <th>Scope</th>
-              <th>Path</th>
+              <th class="meta-col">Modified</th>
+              <th class="meta-col">Size</th>
+              <th class="path-col">Path</th>
             </tr>
           </thead>
           <tbody>
@@ -188,7 +191,13 @@
                     class:badge-yellow={md.scope === "memory"}
                   >{md.scope}</span>
                 </td>
-                <td class="mono small muted">{shortenPath(md.path)}</td>
+                <td class="muted small meta-col">{formatRelativeTime(md.modified)}</td>
+                <td class="muted small meta-col mono">{formatBytes(md.size)}</td>
+                <td class="path-col">
+                  <button class="path-icon-btn" title={md.path} onclick={() => copyToClipboard(md.path)} aria-label="Copy path to clipboard">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
+                  </button>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -213,7 +222,9 @@
           <thead>
             <tr>
               <th>Label</th>
-              <th>Path</th>
+              <th class="meta-col">Modified</th>
+              <th class="meta-col">Size</th>
+              <th class="path-col">Path</th>
             </tr>
           </thead>
           <tbody>
@@ -226,7 +237,13 @@
                     <span class="item-name">{md.label}</span>
                   {/if}
                 </td>
-                <td class="mono small muted">{shortenPath(md.path)}</td>
+                <td class="muted small meta-col">{formatRelativeTime(md.modified)}</td>
+                <td class="muted small meta-col mono">{formatBytes(md.size)}</td>
+                <td class="path-col">
+                  <button class="path-icon-btn" title={md.path} onclick={() => copyToClipboard(md.path)} aria-label="Copy path to clipboard">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
+                  </button>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -254,7 +271,9 @@
               <th>Project</th>
               <th>Label</th>
               <th>Scope</th>
-              <th>Path</th>
+              <th class="meta-col">Modified</th>
+              <th class="meta-col">Size</th>
+              <th class="path-col">Path</th>
             </tr>
           </thead>
           <tbody>
@@ -275,7 +294,13 @@
                     class:badge-yellow={md.scope === "memory"}
                   >{md.scope}</span>
                 </td>
-                <td class="mono small muted">{shortenPath(md.path)}</td>
+                <td class="muted small meta-col">{formatRelativeTime(md.modified)}</td>
+                <td class="muted small meta-col mono">{formatBytes(md.size)}</td>
+                <td class="path-col">
+                  <button class="path-icon-btn" title={md.path} onclick={() => copyToClipboard(md.path)} aria-label="Copy path to clipboard">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
+                  </button>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -446,5 +471,37 @@
   .error-msg {
     color: var(--accent-red);
     font-size: 0.8125rem;
+  }
+
+  /* Shared row metadata columns — added by refactor-panels.py */
+  .meta-col {
+    white-space: nowrap;
+    width: 1%;
+    text-align: right;
+    padding-left: 0.25rem;
+  }
+  .path-col {
+    width: 1.75rem;
+    text-align: center;
+    padding-left: 0;
+    padding-right: 0.25rem;
+  }
+  .path-icon-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0.1875rem 0.25rem;
+    border-radius: 4px;
+    line-height: 0;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+  }
+  .path-icon-btn:hover {
+    color: var(--accent-blue);
+    border-color: var(--border);
+    background: var(--bg-tertiary);
+  }
+  .path-icon-btn:active {
+    color: var(--accent-green);
   }
 </style>

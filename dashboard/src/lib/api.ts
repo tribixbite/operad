@@ -367,13 +367,12 @@ export async function fetchCustomization(project?: string): Promise<Customizatio
   return checkedJson(res);
 }
 
-/** Fetch aggregated hooks/skills/plans from all known projects + user level */
+/** Fetch aggregated hooks/skills/plans from all known projects + user level.
+ * The rest-handler already unwraps the {ok, data} envelope before sending — see
+ * rest-handler.ts:1592 — so the body is the raw {user, projects} payload. */
 export async function fetchAllCustomization(): Promise<import("./types").AllProjectsCustomizationResponse> {
   const res = await fetch("/api/customization/all-projects");
-  if (!res.ok) throw new Error(`fetchAllCustomization failed: ${res.status}`);
-  const body = await res.json() as { ok: boolean; data?: import("./types").AllProjectsCustomizationResponse; error?: string };
-  if (!body.ok || !body.data) throw new Error(body.error ?? "No data");
-  return body.data;
+  return checkedJson(res);
 }
 
 /** Fetch file content for expand/edit (skills, CLAUDE.md) */

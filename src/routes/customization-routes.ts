@@ -8,12 +8,29 @@
  * Extracted from RestHandler (rest-handler.ts) as part of domain split.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "../orchestrator-context.js";
 import type { SessionConfig } from "../types.js";
 import { parseRecentProjects } from "../registry.js";
+
+/** File metadata attached to skill/plan/memory/etc. entries. */
+interface FileMeta {
+  /** mtime in epoch ms, or null if stat failed. */
+  modified: number | null;
+  /** Size in bytes, or null if stat failed. */
+  size: number | null;
+}
+
+function statMeta(path: string): FileMeta {
+  try {
+    const s = statSync(path);
+    return { modified: s.mtimeMs, size: s.size };
+  } catch {
+    return { modified: null, size: null };
+  }
+}
 
 /** Regex for env key names that should be redacted in API responses */
 const SENSITIVE_ENV_KEYS = /KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL/i;
@@ -195,13 +212,14 @@ export class CustomizationRoutes {
         });
       }
 
-      const skills: Array<{ name: string; path: string; scope: string; source?: string }> = [];
+      const skills: Array<{ name: string; path: string; scope: string; source?: string; modified: number | null; size: number | null }> = [];
       const userSkillsDir = join(claudeDir, "skills");
       if (existsSync(userSkillsDir)) {
         try {
           for (const f of readdirSync(userSkillsDir)) {
             if (!f.endsWith(".md")) continue;
-            skills.push({ name: f.replace(/\.md$/, ""), path: join(userSkillsDir, f), scope: "user" });
+            const p = join(userSkillsDir, f);
+            skills.push({ name: f.replace(/\.md$/, ""), path: p, scope: "user", ...statMeta(p) });
           }
         } catch { /* skip */ }
       }
@@ -211,84 +229,48 @@ export class CustomizationRoutes {
           try {
             for (const f of readdirSync(projSkillsDir)) {
               if (!f.endsWith(".md")) continue;
-              skills.push({ name: f.replace(/\.md$/, ""), path: join(projSkillsDir, f), scope: "project" });
+              const p = join(projSkillsDir, f);
+              skills.push({ name: f.replace(/\.md$/, ""), path: p, scope: "project", ...statMeta(p) });
             }
           } catch { /* skip */ }
         }
       }
 
-      const plans: Array<{ name: string; path: string; scope: string }> = [];
-      const userPlansDir = join(claudeDir, "plans");
-      if (existsSync(userPlansDir)) {
+      // Helper: scan a directory for .md files and push each as a metadata-tagged
+      // entry. Used by plans/commands/agentsMd/memories — the dashboard now displays
+      // last-modified and size next to each entry, so every list builder needs the
+      // FileMeta. (Skills uses a slightly richer shape with `source` and is built
+      // separately above.)
+      type FileEntry = { name: string; path: string; scope: string; modified: number | null; size: number | null };
+      const scanMdInto = (dir: string, scope: "user" | "project", out: FileEntry[]) => {
+        if (!existsSync(dir)) return;
         try {
-          for (const f of readdirSync(userPlansDir)) {
+          for (const f of readdirSync(dir)) {
             if (!f.endsWith(".md")) continue;
-            plans.push({ name: f.replace(/\.md$/, ""), path: join(userPlansDir, f), scope: "user" });
+            const p = join(dir, f);
+            out.push({ name: f.replace(/\.md$/, ""), path: p, scope, ...statMeta(p) });
           }
         } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projPlansDir = join(projectPath, ".claude", "plans");
-        if (existsSync(projPlansDir)) {
-          try {
-            for (const f of readdirSync(projPlansDir)) {
-              if (!f.endsWith(".md")) continue;
-              plans.push({ name: f.replace(/\.md$/, ""), path: join(projPlansDir, f), scope: "project" });
-            }
-          } catch { /* skip */ }
-        }
-      }
+      };
+
+      const plans: FileEntry[] = [];
+      scanMdInto(join(claudeDir, "plans"), "user", plans);
+      if (projectPath) scanMdInto(join(projectPath, ".claude", "plans"), "project", plans);
 
       // Slash commands — user-defined commands invoked via '/name' in Claude Code.
       //   ~/.claude/commands/*.md          (user-global)
       //   <project>/.claude/commands/*.md  (project-scoped)
-      const commands: Array<{ name: string; path: string; scope: string }> = [];
-      const userCmdDir = join(claudeDir, "commands");
-      if (existsSync(userCmdDir)) {
-        try {
-          for (const f of readdirSync(userCmdDir)) {
-            if (!f.endsWith(".md")) continue;
-            commands.push({ name: f.replace(/\.md$/, ""), path: join(userCmdDir, f), scope: "user" });
-          }
-        } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projCmdDir = join(projectPath, ".claude", "commands");
-        if (existsSync(projCmdDir)) {
-          try {
-            for (const f of readdirSync(projCmdDir)) {
-              if (!f.endsWith(".md")) continue;
-              commands.push({ name: f.replace(/\.md$/, ""), path: join(projCmdDir, f), scope: "project" });
-            }
-          } catch { /* skip */ }
-        }
-      }
+      const commands: FileEntry[] = [];
+      scanMdInto(join(claudeDir, "commands"), "user", commands);
+      if (projectPath) scanMdInto(join(projectPath, ".claude", "commands"), "project", commands);
 
       // Claude Code subagents — markdown files with frontmatter that define
       // specialised worker agents invocable via the Task tool.
       //   ~/.claude/agents/*.md            (user-global)
       //   <project>/.claude/agents/*.md    (project-scoped)
-      const agentsMd: Array<{ name: string; path: string; scope: string }> = [];
-      const userAgentsDir = join(claudeDir, "agents");
-      if (existsSync(userAgentsDir)) {
-        try {
-          for (const f of readdirSync(userAgentsDir)) {
-            if (!f.endsWith(".md")) continue;
-            agentsMd.push({ name: f.replace(/\.md$/, ""), path: join(userAgentsDir, f), scope: "user" });
-          }
-        } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projAgentsDir = join(projectPath, ".claude", "agents");
-        if (existsSync(projAgentsDir)) {
-          try {
-            for (const f of readdirSync(projAgentsDir)) {
-              if (!f.endsWith(".md")) continue;
-              agentsMd.push({ name: f.replace(/\.md$/, ""), path: join(projAgentsDir, f), scope: "project" });
-            }
-          } catch { /* skip */ }
-        }
-      }
+      const agentsMd: FileEntry[] = [];
+      scanMdInto(join(claudeDir, "agents"), "user", agentsMd);
+      if (projectPath) scanMdInto(join(projectPath, ".claude", "agents"), "project", agentsMd);
 
       // AGENTS.md — cross-tool instructions file (https://agents.md). Read by
       // Claude Code, Codex, OpenCode, and others as a standard project context
@@ -299,6 +281,8 @@ export class CustomizationRoutes {
         label: string; path: string; scope: string;
         /** Which tools read this location */
         consumers: string[];
+        modified: number | null;
+        size: number | null;
       }> = [];
       if (projectPath) {
         const projAgents = join(projectPath, "AGENTS.md");
@@ -308,6 +292,7 @@ export class CustomizationRoutes {
             path: projAgents,
             scope: "project",
             consumers: ["Claude Code", "Codex", "OpenCode"],
+            ...statMeta(projAgents),
           });
         }
         // Some projects stash a per-project override under ~/.claude/projects/{mangled}/AGENTS.md
@@ -319,6 +304,7 @@ export class CustomizationRoutes {
             path: projectOverride,
             scope: "claude-project-override",
             consumers: ["Claude Code"],
+            ...statMeta(projectOverride),
           });
         }
       }
@@ -329,39 +315,29 @@ export class CustomizationRoutes {
           path: homeAgents,
           scope: "user",
           consumers: ["Claude Code", "Codex", "OpenCode"],
+          ...statMeta(homeAgents),
         });
       }
 
-      // Standalone project memory files ( .claude/memories/*.md ) — distinct
-      // from the projects/{mangled}/memory/*.md auto-snapshots already covered
-      // under claudeMds. Some workflows drop user-authored context notes here.
-      const memories: Array<{ name: string; path: string; scope: string }> = [];
-      const userMemDir = join(claudeDir, "memories");
-      if (existsSync(userMemDir)) {
-        try {
-          for (const f of readdirSync(userMemDir)) {
-            if (!f.endsWith(".md")) continue;
-            memories.push({ name: f.replace(/\.md$/, ""), path: join(userMemDir, f), scope: "user" });
-          }
-        } catch { /* skip */ }
-      }
-      if (projectPath) {
-        const projMemDir = join(projectPath, ".claude", "memories");
-        if (existsSync(projMemDir)) {
-          try {
-            for (const f of readdirSync(projMemDir)) {
-              if (!f.endsWith(".md")) continue;
-              memories.push({ name: f.replace(/\.md$/, ""), path: join(projMemDir, f), scope: "project" });
-            }
-          } catch { /* skip */ }
-        }
-      }
+      // Memory files come from three places:
+      //   ~/.claude/memories/*.md                              — user-authored notes (scope=user)
+      //   <project>/.claude/memories/*.md                      — project-authored notes (scope=project)
+      //   ~/.claude/projects/{mangled}/memory/*.md             — auto-memory snapshots (scope=auto)
+      //                                                          (gotchas.md, MEMORY.md, etc. — written by
+      //                                                          Claude per the user's auto-memory hook)
+      // All three are surfaced through the same Memories panel; CLAUDE.md keeps only the
+      // actual CLAUDE.md files (global + project-root) — no longer the auto-memory mix.
+      const memories: FileEntry[] = [];
+      scanMdInto(join(claudeDir, "memories"), "user", memories);
+      if (projectPath) scanMdInto(join(projectPath, ".claude", "memories"), "project", memories);
 
-      const claudeMds: Array<{ label: string; path: string; scope: string }> = [];
-      const globalMd = join(claudeDir, "CLAUDE.md");
-      if (existsSync(globalMd)) {
-        claudeMds.push({ label: "Global (User)", path: globalMd, scope: "user" });
-      }
+      // Auto-memory snapshots — written by the user's auto-memory system per
+      // the global CLAUDE.md instructions. When a project is in scope, only
+      // that project's snapshots show; classified as scope="project" so the
+      // Memories panel routes them to the project tab. Without a project
+      // selected, every known project's snapshots load — they show up in the
+      // user tab as a flat global dump, prefixed with the project name to
+      // keep them disambiguated.
       const projectsDir = join(claudeDir, "projects");
       if (existsSync(projectsDir)) {
         try {
@@ -379,16 +355,28 @@ export class CustomizationRoutes {
             try {
               for (const f of readdirSync(memDir)) {
                 if (!f.endsWith(".md")) continue;
-                claudeMds.push({ label: `${projName}: ${f.replace(/\.md$/, "")}`, path: join(memDir, f), scope: "memory" });
+                const p = join(memDir, f);
+                memories.push({
+                  name: mangledProject ? f.replace(/\.md$/, "") : `${projName}/${f.replace(/\.md$/, "")}`,
+                  path: p,
+                  scope: mangledProject ? "project" : "user",
+                  ...statMeta(p),
+                });
               }
             } catch { /* skip */ }
           }
         } catch { /* skip */ }
       }
+
+      const claudeMds: Array<{ label: string; path: string; scope: string; modified: number | null; size: number | null }> = [];
+      const globalMd = join(claudeDir, "CLAUDE.md");
+      if (existsSync(globalMd)) {
+        claudeMds.push({ label: "Global (User)", path: globalMd, scope: "user", ...statMeta(globalMd) });
+      }
       if (projectPath) {
         const projMd = join(projectPath, "CLAUDE.md");
         if (existsSync(projMd)) {
-          claudeMds.push({ label: `Project: ${projectPath.split("/").pop() ?? projectPath}`, path: projMd, scope: "project" });
+          claudeMds.push({ label: `Project: ${projectPath.split("/").pop() ?? projectPath}`, path: projMd, scope: "project", ...statMeta(projMd) });
         }
       }
 
@@ -491,12 +479,20 @@ export class CustomizationRoutes {
 
       // Helpers — keep the per-directory scan logic in one place so commands,
       // agents, skills, plans, and memories all share the same ignore rules.
-      const listMd = (dir: string, scope: "user" | "project"): Array<{ name: string; path: string; scope: "user" | "project" }> => {
+      // Each entry carries modified + size so the dashboard can render mtime
+      // and file-size columns in place of the (now icon-collapsed) path.
+      const listMd = (dir: string, scope: "user" | "project"): Array<{
+        name: string; path: string; scope: "user" | "project";
+        modified: number | null; size: number | null;
+      }> => {
         if (!existsSync(dir)) return [];
         try {
           return readdirSync(dir)
             .filter((f) => f.endsWith(".md"))
-            .map((f) => ({ name: f.replace(/\.md$/, ""), path: join(dir, f), scope }));
+            .map((f) => {
+              const p = join(dir, f);
+              return { name: f.replace(/\.md$/, ""), path: p, scope, ...statMeta(p) };
+            });
         } catch {
           return [];
         }
@@ -532,7 +528,7 @@ export class CustomizationRoutes {
       const userCommands = listMd(join(claudeDir, "commands"), "user");
       const userAgentsMd = listMd(join(claudeDir, "agents"), "user");
       const userMemories = listMd(join(claudeDir, "memories"), "user");
-      const userAgentsMdFiles: Array<{ label: string; path: string; scope: string; consumers: string[] }> = [];
+      const userAgentsMdFiles: Array<{ label: string; path: string; scope: string; consumers: string[]; modified: number | null; size: number | null }> = [];
       const homeAgentsMd = join(process.env.HOME ?? home, "AGENTS.md");
       if (existsSync(homeAgentsMd)) {
         userAgentsMdFiles.push({
@@ -540,12 +536,13 @@ export class CustomizationRoutes {
           path: homeAgentsMd,
           scope: "user",
           consumers: ["Claude Code", "Codex", "OpenCode"],
+          ...statMeta(homeAgentsMd),
         });
       }
       const homeClaudeMd = join(claudeDir, "CLAUDE.md");
-      const userClaudeMds: Array<{ label: string; path: string; scope: string }> = [];
+      const userClaudeMds: Array<{ label: string; path: string; scope: string; modified: number | null; size: number | null }> = [];
       if (existsSync(homeClaudeMd)) {
-        userClaudeMds.push({ label: "Global (User)", path: homeClaudeMd, scope: "user" });
+        userClaudeMds.push({ label: "Global (User)", path: homeClaudeMd, scope: "user", ...statMeta(homeClaudeMd) });
       }
 
       // --- Per-project data ---
@@ -562,8 +559,8 @@ export class CustomizationRoutes {
         commands: typeof userCommands;
         agentsMd: typeof userAgentsMd;
         memories: typeof userMemories;
-        claudeMd?: { path: string };
-        agentsMdFile?: { path: string; consumers: string[] };
+        claudeMd?: { path: string; modified: number | null; size: number | null };
+        agentsMdFile?: { path: string; consumers: string[]; modified: number | null; size: number | null };
       }> = [];
 
       for (const proj of recentProjects) {
@@ -580,13 +577,37 @@ export class CustomizationRoutes {
         const projCommands = listMd(join(projClaudeDir, "commands"), "project");
         const projAgentsMd = listMd(join(projClaudeDir, "agents"), "project");
         const projMemories = listMd(join(projClaudeDir, "memories"), "project");
+        // Auto-memory snapshots for this project (~/.claude/projects/{mangled}/memory/*.md).
+        // The mangled key is the project path with /., replaced by - and any leading -
+        // stripped, mirroring how Claude Code records the project in history.jsonl.
+        const mangled = "-" + proj.path.replace(/[/.]/g, "-").replace(/^-+/, "");
+        const autoMemDir = join(claudeDir, "projects", mangled, "memory");
+        if (existsSync(autoMemDir)) {
+          try {
+            for (const f of readdirSync(autoMemDir)) {
+              if (!f.endsWith(".md")) continue;
+              const p = join(autoMemDir, f);
+              projMemories.push({
+                name: f.replace(/\.md$/, ""),
+                path: p,
+                // Cast to "project" because the projectEntry type is fixed; the
+                // dashboard treats anything in projMemories as project-scope. Auto
+                // snapshots do live under each project conceptually.
+                scope: "project",
+                ...statMeta(p),
+              });
+            }
+          } catch { /* skip */ }
+        }
 
         const projClaudeMdPath = join(proj.path, "CLAUDE.md");
-        const projClaudeMd = existsSync(projClaudeMdPath) ? { path: projClaudeMdPath } : undefined;
+        const projClaudeMd = existsSync(projClaudeMdPath)
+          ? { path: projClaudeMdPath, ...statMeta(projClaudeMdPath) }
+          : undefined;
 
         const projAgentsMdPath = join(proj.path, "AGENTS.md");
         const projAgentsMdFile = existsSync(projAgentsMdPath)
-          ? { path: projAgentsMdPath, consumers: ["Claude Code", "Codex", "OpenCode"] }
+          ? { path: projAgentsMdPath, consumers: ["Claude Code", "Codex", "OpenCode"], ...statMeta(projAgentsMdPath) }
           : undefined;
 
         // Include the project only if it has something interesting.

@@ -302,6 +302,23 @@ Example usage or output
     }
   }
 
+  /**
+   * Download a JSON payload as a file. Used by the MCP/Plugins section headers
+   * to export config the user can re-import on a new device. The shape mirrors
+   * what `claude mcp add ...` / plugin manifests expect, so a future
+   * `operad import-config <file>` could replay them.
+   */
+  function downloadJsonPayload(filenameStem: string, payload: unknown): void {
+    const today = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${filenameStem}-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   /** Download all .md files from a section as a zip */
   async function handleDownloadAll(
     items: Array<{ path: string; name?: string; label?: string }>,
@@ -521,27 +538,21 @@ Example usage or output
     <div class="card"><p class="error-text">Error: {error}</p></div>
   {:else if data}
 
-    <!-- Section 0: Switchboard -->
-    <div id="switchboard" class="card section-card">
-      <button class="section-header" onclick={() => toggleSection("switchboard")}>
-        <span class="chevron">{sections.switchboard ? "▾" : "▸"}</span>
-        <span class="section-title">Switchboard</span>
-        <span class="badge badge-green">control</span>
-      </button>
-      {#if sections.switchboard}
-        <div class="section-body">
-          <SwitchboardPanel />
-        </div>
-      {/if}
-    </div>
-
     <!-- Section 1: MCP Servers -->
     <div class="card section-card">
-      <button class="section-header" onclick={() => toggleSection("mcp")}>
+      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("mcp")}>
         <span class="chevron">{sections.mcp ? "▾" : "▸"}</span>
         <span class="section-title">MCP Servers</span>
         <span class="badge badge-blue">{data.mcpServers.length}</span>
-      </button>
+        <span class="header-actions" onclick={stopProp}>
+          <button
+            class="btn-icon btn-sm-icon"
+            title="Download JSON config of all MCP servers (re-importable on a new device)"
+            onclick={() => downloadJsonPayload("operad-mcp-config", { mcpServers: data.mcpServers })}
+            disabled={data.mcpServers.length === 0}
+          >\u2913</button>
+        </span>
+      </div>
       {#if sections.mcp}
         <div class="section-body">
           <McpManager servers={data.mcpServers} onrefresh={loadData} />
@@ -551,11 +562,19 @@ Example usage or output
 
     <!-- Section 2: Plugins -->
     <div class="card section-card">
-      <button class="section-header" onclick={() => toggleSection("plugins")}>
+      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("plugins")}>
         <span class="chevron">{sections.plugins ? "▾" : "▸"}</span>
         <span class="section-title">Plugins</span>
         <span class="badge badge-blue">{data.plugins.length}</span>
-      </button>
+        <span class="header-actions" onclick={stopProp}>
+          <button
+            class="btn-icon btn-sm-icon"
+            title="Download JSON of installed plugins (re-importable on a new device)"
+            onclick={() => downloadJsonPayload("operad-plugins-config", { plugins: data.plugins })}
+            disabled={data.plugins.length === 0}
+          >\u2913</button>
+        </span>
+      </div>
       {#if sections.plugins}
         <div class="section-body">
           {#if data.plugins.length === 0}
@@ -642,9 +661,9 @@ Example usage or output
             projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
             onExpand={toggleExpand}
           />
-          <hr class="section-divider" />
-          <!-- New skill form -->
+          <!-- New skill form (kept here so the panel stays read-only) -->
           {#if newSkillOpen}
+            <hr class="section-divider" />
             <div class="new-skill-form">
               <div class="new-skill-header">
                 <span class="new-skill-title">New Skill</span>
@@ -680,49 +699,31 @@ Example usage or output
               </div>
             </div>
           {/if}
-
-          {#if data.skills.length === 0 && !newSkillOpen}
-            <p class="muted">No skills found</p>
-          {:else}
-            <div class="item-list">
-              {#each data.skills as skill (skill.path)}
-                <div class="item-row">
-                  <button class="item-header" onclick={() => toggleExpand(skill.path)}>
-                    <span class="chevron">{expandedItem === skill.path ? "▾" : "▸"}</span>
-                    <span class="item-name">{skill.name}</span>
-                    <span class="badge" class:badge-blue={skill.scope === "user"} class:badge-dim={skill.scope === "project"}>
-                      {skill.scope}
-                    </span>
-                    <span class="item-path" title={skill.path}>{shortenPath(skill.path)}</span>
+          <!-- Inline expand-flyout: shows file content + edit/download/share when
+               a row in the panel above is clicked. Same pattern as Plans/CLAUDE.md. -->
+          {#if expandedItem && data.skills.some(s => s.path === expandedItem)}
+            <hr class="section-divider" />
+            {@const skill = data.skills.find(s => s.path === expandedItem)!}
+            <div class="item-content">
+              {#if loadingFile === skill.path}
+                <p class="muted">Loading...</p>
+              {:else if editingItem === skill.path}
+                <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
+                <div class="edit-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => saveEdit(skill.path)} disabled={savingFile}>
+                    {savingFile ? "Saving..." : "Save"}
                   </button>
-                  {#if expandedItem === skill.path}
-                    <div class="item-content">
-                      {#if loadingFile === skill.path}
-                        <p class="muted">Loading...</p>
-                      {:else if editingItem === skill.path}
-                        <textarea
-                          class="edit-area"
-                          bind:value={editBuffer}
-                          rows="20"
-                        ></textarea>
-                        <div class="edit-actions">
-                          <button class="btn btn-primary btn-sm" onclick={() => saveEdit(skill.path)} disabled={savingFile}>
-                            {savingFile ? "Saving..." : "Save"}
-                          </button>
-                          <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
-                        </div>
-                      {:else}
-                        <div class="file-actions">
-                          <button class="btn btn-sm" onclick={() => startEdit(skill.path)}>Edit</button>
-                          <button class="btn btn-sm" onclick={() => handleDownload(skill.path)}>Download</button>
-                          <button class="btn btn-sm" onclick={() => handleShare(skill.path)}>Share</button>
-                        </div>
-                        <pre class="file-preview">{fileContents[skill.path] ?? ""}</pre>
-                      {/if}
-                    </div>
-                  {/if}
+                  <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
                 </div>
-              {/each}
+              {:else}
+                <div class="file-actions">
+                  <span class="muted small">{skill.name}</span>
+                  <button class="btn btn-sm" onclick={() => startEdit(skill.path)}>Edit</button>
+                  <button class="btn btn-sm" onclick={() => handleDownload(skill.path)}>Download</button>
+                  <button class="btn btn-sm" onclick={() => handleShare(skill.path)}>Share</button>
+                </div>
+                <pre class="file-preview">{fileContents[skill.path] ?? ""}</pre>
+              {/if}
             </div>
           {/if}
         </div>
@@ -930,42 +931,29 @@ Example usage or output
             projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
             onExpand={toggleExpand}
           />
-          {#if (data.commands ?? []).length > 0}
-            <div class="item-list">
-              {#each data.commands ?? [] as cmd (cmd.path)}
-                <div class="item-row">
-                  <button class="item-header" onclick={() => toggleExpand(cmd.path)}>
-                    <span class="chevron">{expandedItem === cmd.path ? "▾" : "▸"}</span>
-                    <span class="item-name">{cmd.name}</span>
-                    <span class="badge" class:badge-blue={cmd.scope === "user"} class:badge-dim={cmd.scope === "project"}>
-                      {cmd.scope}
-                    </span>
-                    <span class="item-path" title={cmd.path}>{shortenPath(cmd.path)}</span>
+          {#if expandedItem && (data.commands ?? []).some(c => c.path === expandedItem)}
+            <hr class="section-divider" />
+            {@const cmd = (data.commands ?? []).find(c => c.path === expandedItem)!}
+            <div class="item-content">
+              {#if loadingFile === cmd.path}
+                <p class="muted">Loading...</p>
+              {:else if editingItem === cmd.path}
+                <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
+                <div class="edit-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => saveEdit(cmd.path)} disabled={savingFile}>
+                    {savingFile ? "Saving..." : "Save"}
                   </button>
-                  {#if expandedItem === cmd.path}
-                    <div class="item-content">
-                      {#if loadingFile === cmd.path}
-                        <p class="muted">Loading...</p>
-                      {:else if editingItem === cmd.path}
-                        <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
-                        <div class="edit-actions">
-                          <button class="btn btn-primary btn-sm" onclick={() => saveEdit(cmd.path)} disabled={savingFile}>
-                            {savingFile ? "Saving..." : "Save"}
-                          </button>
-                          <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
-                        </div>
-                      {:else}
-                        <div class="file-actions">
-                          <button class="btn btn-sm" onclick={() => startEdit(cmd.path)}>Edit</button>
-                          <button class="btn btn-sm" onclick={() => handleDownload(cmd.path)}>Download</button>
-                          <button class="btn btn-sm" onclick={() => handleShare(cmd.path)}>Share</button>
-                        </div>
-                        <pre class="file-preview">{fileContents[cmd.path] ?? ""}</pre>
-                      {/if}
-                    </div>
-                  {/if}
+                  <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
                 </div>
-              {/each}
+              {:else}
+                <div class="file-actions">
+                  <span class="muted small">{cmd.name}</span>
+                  <button class="btn btn-sm" onclick={() => startEdit(cmd.path)}>Edit</button>
+                  <button class="btn btn-sm" onclick={() => handleDownload(cmd.path)}>Download</button>
+                  <button class="btn btn-sm" onclick={() => handleShare(cmd.path)}>Share</button>
+                </div>
+                <pre class="file-preview">{fileContents[cmd.path] ?? ""}</pre>
+              {/if}
             </div>
           {/if}
         </div>
@@ -987,42 +975,29 @@ Example usage or output
             projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
             onExpand={toggleExpand}
           />
-          {#if (data.agentsMd ?? []).length > 0}
-            <div class="item-list">
-              {#each data.agentsMd ?? [] as agent (agent.path)}
-                <div class="item-row">
-                  <button class="item-header" onclick={() => toggleExpand(agent.path)}>
-                    <span class="chevron">{expandedItem === agent.path ? "▾" : "▸"}</span>
-                    <span class="item-name">{agent.name}</span>
-                    <span class="badge" class:badge-blue={agent.scope === "user"} class:badge-dim={agent.scope === "project"}>
-                      {agent.scope}
-                    </span>
-                    <span class="item-path" title={agent.path}>{shortenPath(agent.path)}</span>
+          {#if expandedItem && (data.agentsMd ?? []).some(a => a.path === expandedItem)}
+            <hr class="section-divider" />
+            {@const agent = (data.agentsMd ?? []).find(a => a.path === expandedItem)!}
+            <div class="item-content">
+              {#if loadingFile === agent.path}
+                <p class="muted">Loading...</p>
+              {:else if editingItem === agent.path}
+                <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
+                <div class="edit-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => saveEdit(agent.path)} disabled={savingFile}>
+                    {savingFile ? "Saving..." : "Save"}
                   </button>
-                  {#if expandedItem === agent.path}
-                    <div class="item-content">
-                      {#if loadingFile === agent.path}
-                        <p class="muted">Loading...</p>
-                      {:else if editingItem === agent.path}
-                        <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
-                        <div class="edit-actions">
-                          <button class="btn btn-primary btn-sm" onclick={() => saveEdit(agent.path)} disabled={savingFile}>
-                            {savingFile ? "Saving..." : "Save"}
-                          </button>
-                          <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
-                        </div>
-                      {:else}
-                        <div class="file-actions">
-                          <button class="btn btn-sm" onclick={() => startEdit(agent.path)}>Edit</button>
-                          <button class="btn btn-sm" onclick={() => handleDownload(agent.path)}>Download</button>
-                          <button class="btn btn-sm" onclick={() => handleShare(agent.path)}>Share</button>
-                        </div>
-                        <pre class="file-preview">{fileContents[agent.path] ?? ""}</pre>
-                      {/if}
-                    </div>
-                  {/if}
+                  <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
                 </div>
-              {/each}
+              {:else}
+                <div class="file-actions">
+                  <span class="muted small">{agent.name}</span>
+                  <button class="btn btn-sm" onclick={() => startEdit(agent.path)}>Edit</button>
+                  <button class="btn btn-sm" onclick={() => handleDownload(agent.path)}>Download</button>
+                  <button class="btn btn-sm" onclick={() => handleShare(agent.path)}>Share</button>
+                </div>
+                <pre class="file-preview">{fileContents[agent.path] ?? ""}</pre>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1044,42 +1019,29 @@ Example usage or output
             projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
             onExpand={toggleExpand}
           />
-          {#if (data.memories ?? []).length > 0}
-            <div class="item-list">
-              {#each data.memories ?? [] as mem (mem.path)}
-                <div class="item-row">
-                  <button class="item-header" onclick={() => toggleExpand(mem.path)}>
-                    <span class="chevron">{expandedItem === mem.path ? "▾" : "▸"}</span>
-                    <span class="item-name">{mem.name}</span>
-                    <span class="badge" class:badge-blue={mem.scope === "user"} class:badge-dim={mem.scope === "project"}>
-                      {mem.scope}
-                    </span>
-                    <span class="item-path" title={mem.path}>{shortenPath(mem.path)}</span>
+          {#if expandedItem && (data.memories ?? []).some(m => m.path === expandedItem)}
+            <hr class="section-divider" />
+            {@const mem = (data.memories ?? []).find(m => m.path === expandedItem)!}
+            <div class="item-content">
+              {#if loadingFile === mem.path}
+                <p class="muted">Loading...</p>
+              {:else if editingItem === mem.path}
+                <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
+                <div class="edit-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => saveEdit(mem.path)} disabled={savingFile}>
+                    {savingFile ? "Saving..." : "Save"}
                   </button>
-                  {#if expandedItem === mem.path}
-                    <div class="item-content">
-                      {#if loadingFile === mem.path}
-                        <p class="muted">Loading...</p>
-                      {:else if editingItem === mem.path}
-                        <textarea class="edit-area" bind:value={editBuffer} rows="20"></textarea>
-                        <div class="edit-actions">
-                          <button class="btn btn-primary btn-sm" onclick={() => saveEdit(mem.path)} disabled={savingFile}>
-                            {savingFile ? "Saving..." : "Save"}
-                          </button>
-                          <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
-                        </div>
-                      {:else}
-                        <div class="file-actions">
-                          <button class="btn btn-sm" onclick={() => startEdit(mem.path)}>Edit</button>
-                          <button class="btn btn-sm" onclick={() => handleDownload(mem.path)}>Download</button>
-                          <button class="btn btn-sm" onclick={() => handleShare(mem.path)}>Share</button>
-                        </div>
-                        <pre class="file-preview">{fileContents[mem.path] ?? ""}</pre>
-                      {/if}
-                    </div>
-                  {/if}
+                  <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
                 </div>
-              {/each}
+              {:else}
+                <div class="file-actions">
+                  <span class="muted small">{mem.name}</span>
+                  <button class="btn btn-sm" onclick={() => startEdit(mem.path)}>Edit</button>
+                  <button class="btn btn-sm" onclick={() => handleDownload(mem.path)}>Download</button>
+                  <button class="btn btn-sm" onclick={() => handleShare(mem.path)}>Share</button>
+                </div>
+                <pre class="file-preview">{fileContents[mem.path] ?? ""}</pre>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1154,6 +1116,21 @@ Example usage or output
             These defaults apply to new SDK streaming sessions started from the dashboard.
             Per-session overrides are available in the conversation drawer.
           </p>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Switchboard — sits above Agents so agent enable/disable controls
+         live next to the agent definitions they govern. -->
+    <div id="switchboard" class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("switchboard")}>
+        <span class="chevron">{sections.switchboard ? "▾" : "▸"}</span>
+        <span class="section-title">Switchboard</span>
+        <span class="badge badge-green">control</span>
+      </button>
+      {#if sections.switchboard}
+        <div class="section-body">
+          <SwitchboardPanel />
         </div>
       {/if}
     </div>

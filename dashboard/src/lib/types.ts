@@ -151,7 +151,20 @@ export interface PluginInfo {
 }
 
 /** Skill file (.md) from ~/.claude/skills/ or project .claude/skills/ */
-export interface SkillInfo {
+/**
+ * File metadata shared by every customization entry the dashboard renders.
+ * Backend captures these via fs.statSync when scanning each ~/.claude/<kind>/
+ * directory; null when stat fails. Used to drive last-modified and size
+ * columns in the panel tables (path is collapsed to a clickable icon).
+ */
+export interface FileMeta {
+  /** mtime in epoch ms — null if backend stat failed. */
+  modified?: number | null;
+  /** Size in bytes — null if backend stat failed. */
+  size?: number | null;
+}
+
+export interface SkillInfo extends FileMeta {
   name: string;
   path: string;
   scope: "user" | "project";
@@ -159,14 +172,14 @@ export interface SkillInfo {
 }
 
 /** Plan file (.md) from ~/.claude/plans/ or project .claude/plans/ */
-export interface PlanInfo {
+export interface PlanInfo extends FileMeta {
   name: string;
   path: string;
   scope: "user" | "project";
 }
 
 /** CLAUDE.md / MEMORY.md file reference */
-export interface ClaudeMdInfo {
+export interface ClaudeMdInfo extends FileMeta {
   label: string;
   path: string;
   scope: "user" | "project" | "memory";
@@ -425,28 +438,28 @@ export interface TelemetryResponse {
 // -- Customization / Settings types ------------------------------------------
 
 /** Slash command from .claude/commands/*.md */
-export interface CommandInfo {
+export interface CommandInfo extends FileMeta {
   name: string;
   path: string;
   scope: "user" | "project";
 }
 
 /** Claude subagent definition from .claude/agents/*.md */
-export interface AgentMdInfo {
+export interface AgentMdInfo extends FileMeta {
   name: string;
   path: string;
   scope: "user" | "project";
 }
 
 /** User-authored context note from .claude/memories/*.md */
-export interface MemoryFileInfo {
+export interface MemoryFileInfo extends FileMeta {
   name: string;
   path: string;
   scope: "user" | "project";
 }
 
 /** Cross-tool AGENTS.md file (Claude Code + Codex + OpenCode compat) */
-export interface AgentsMdFile {
+export interface AgentsMdFile extends FileMeta {
   label: string;
   path: string;
   scope: "user" | "project";
