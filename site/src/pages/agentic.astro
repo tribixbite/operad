@@ -1,0 +1,791 @@
+---
+import Layout from "../layouts/Layout.astro";
+
+const title = "operad — agentic layer (OODA, multi-agent orchestration, learning)";
+const description =
+  "How operad's autonomous agents think, learn, and coordinate: OODA cycle, builtin agents, " +
+  "memory consolidation, roundtable protocol, mind-meld personality, switchboard control, " +
+  "trust calibration, tool autonomy levels.";
+
+// Section nav — anchor IDs match the headings below.
+const nav = [
+  { href: "#overview", label: "Overview" },
+  { href: "#ooda", label: "OODA" },
+  { href: "#agents", label: "Builtin agents" },
+  { href: "#self-improvement", label: "Self-improvement" },
+  { href: "#consolidation", label: "Memory consolidation" },
+  { href: "#orchestration", label: "Orchestration" },
+  { href: "#user-layer", label: "User layer" },
+  { href: "#trust", label: "Trust + autonomy" },
+  { href: "#tools", label: "Tools + schedules" },
+  { href: "#surfaces", label: "Dashboard surfaces" },
+];
+
+// Builtin agents — pulled from src/agents.ts:getBuiltinAgents().
+const agents = [
+  {
+    name: "master-controller",
+    role: "Orchestrator",
+    enabled: false,
+    autonomy: "supervised",
+    effort: "max",
+    categories: ["observe", "analyze", "mutate", "communicate", "orchestrate"],
+    summary:
+      "Runs the OODA loop. Observes system state, orients against goals, decides on actions, acts via direct execution or delegation. Allowed every tool category.",
+    color: "green",
+  },
+  {
+    name: "optimizer",
+    role: "Token quota guardian",
+    enabled: false,
+    autonomy: "observe",
+    effort: "medium",
+    categories: ["observe", "analyze"],
+    summary:
+      "Tracks weekly quota utilization. Flags disproportionate consumers, suggests pruning stale data, analyzes velocity, recommends session consolidation. Read-only.",
+    color: "amber",
+  },
+  {
+    name: "preference-learner",
+    role: "User-modeling",
+    enabled: false,
+    autonomy: "observe",
+    effort: "high",
+    categories: ["observe", "analyze"],
+    summary:
+      "Discovers your coding style, framework preferences, naming conventions, communication patterns, workflow habits — from session history and the mind-meld profile. Read-only.",
+    color: "cyan",
+  },
+  {
+    name: "ideator",
+    role: "Creative strategist",
+    enabled: false,
+    autonomy: "observe",
+    effort: "max",
+    categories: ["observe", "analyze"],
+    summary:
+      "Generates architecture alternatives, what-if analysis, new project concepts, unconventional approaches. Read-only — emits proposals, never mutates.",
+    color: "amber",
+  },
+];
+
+// OODA action block types — emitted as fenced code blocks in master-controller's response.
+// See src/cognitive.ts:parseOodaResponse for the parser, src/agent-engine.ts:executeOodaActions
+// for the dispatcher.
+const oodaBlocks = [
+  { tag: "goal", body: "title, description, priority, parent_id", what: "Add a node to the goal tree" },
+  { tag: "decision", body: "action, rationale, alternatives, expected_outcome, goal_id", what: "Record a decision in the journal" },
+  { tag: "message", body: "to, type, content", what: "Send an inbox message to another agent" },
+  { tag: "strategy", body: "text, rationale", what: "Bump the strategy version with a new directive" },
+  { tag: "schedule", body: "delay_minutes, trigger, reason", what: "Re-fire OODA after a delay" },
+  { tag: "persistent_schedule", body: "name, cron|interval_minutes, prompt, max_budget_usd", what: "Register a recurring agent run (cron-managed)" },
+  { tag: "learning", body: "content, category, confidence", what: "Record a learning in agent_learnings (decays over time)" },
+  { tag: "personality", body: "trait, value, evidence", what: "Update agent_personality trait" },
+  { tag: "tool", body: "name, args (per-tool)", what: "Invoke a registered tool from the tool registry" },
+  { tag: "tool_sequence", body: "name, [{tool, args}, ...]", what: "Run multiple tools in order" },
+  { tag: "roundtable", body: "topic, agents, context", what: "Convene a multi-agent discussion" },
+];
+
+// Autonomy levels — src/types.ts:AutonomyLevel
+const autonomyLevels = [
+  { level: "observe", scope: "read-only tools auto-approved", color: "cyan" },
+  { level: "suggest", scope: "read + propose changes (diffs shown, not applied)", color: "cyan" },
+  { level: "supervised", scope: "all tools available, mutate+ requires approval", color: "amber" },
+  { level: "trusted", scope: "observe/analyze/mutate auto-approved; communicate/orchestrate need approval", color: "amber" },
+  { level: "autonomous", scope: "everything auto-approved; human notified post-hoc", color: "green" },
+];
+---
+
+<Layout title={title} description={description}>
+  <main>
+    <!-- Hero -->
+    <section class="px-4 pt-16 pb-8 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <a href="/" class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim hover:text-terminal-green">
+          ← operad.stream
+        </a>
+        <div class="mt-6 mb-4 inline-block rounded-lg border border-terminal-border bg-terminal-surface px-4 py-2 font-[family-name:var(--font-mono)] text-sm text-terminal-dim">
+          <span class="text-terminal-green">$</span> operad agents
+        </div>
+        <h1 class="mb-3 font-[family-name:var(--font-mono)] text-3xl font-bold tracking-tight text-terminal-bright sm:text-4xl">
+          Agentic layer
+        </h1>
+        <p class="max-w-2xl text-lg text-terminal-text">
+          The opt-in autonomous side of operad. OODA-driven master controller, four specialist agents,
+          a structured-action protocol the agents speak back, persistent memory that decays and consolidates,
+          a personality layer you can shape, and a switchboard with kill-switches at every level.
+        </p>
+        <p class="mt-3 max-w-2xl text-sm text-terminal-dim">
+          Everything below is <strong class="text-terminal-amber">disabled by default</strong>.
+          Enable through the dashboard's <a href="#surfaces" class="text-terminal-green hover:underline">Switchboard</a>
+          when you're ready — until you do, operad is just a session manager.
+        </p>
+
+        <nav class="mt-8 flex flex-wrap gap-2">
+          {nav.map(({ href, label }) => (
+            <a href={href}
+              class="rounded border border-terminal-border/50 px-3 py-1 font-[family-name:var(--font-mono)] text-xs text-terminal-dim transition-colors hover:border-terminal-green hover:text-terminal-green">
+              {label}
+            </a>
+          ))}
+        </nav>
+      </div>
+    </section>
+
+    <!-- Overview -->
+    <section id="overview" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          What this is
+        </h2>
+        <div class="space-y-4 text-sm text-terminal-text">
+          <p>
+            operad ships a small agent runtime layered on top of the session manager. A master-controller
+            agent runs <a href="#ooda" class="text-terminal-green hover:underline">OODA cycles</a> on a
+            periodic timer (or on demand), observing what's happening across your sessions and emitting
+            structured action blocks that operad parses and dispatches. Three specialist agents — optimizer,
+            preference-learner, ideator — sit alongside it, callable from chat or via OODA's
+            <code class="rounded bg-terminal-card px-1 text-terminal-cyan">message</code> blocks.
+          </p>
+          <p>
+            Agents persist what they learn in SQLite tables that <a href="#consolidation" class="text-terminal-green hover:underline">decay,
+            prune, and merge</a> over time. Learnings cross-pollinate between agents (high-confidence
+            insights from optimizer become available to master-controller next run). User preferences
+            and personality live in their own layers — the <a href="#user-layer" class="text-terminal-green hover:underline">mind-meld</a>
+            profile is yours to write, not Claude's.
+          </p>
+          <p>
+            Trust calibration tracks every agent's success/failure ratio and recommends
+            <a href="#trust" class="text-terminal-green hover:underline">autonomy level changes</a>
+            (observe → suggest → supervised → trusted → autonomous) based on the track record. The
+            <a href="#surfaces" class="text-terminal-green hover:underline">Switchboard</a> overrides
+            everything: a master kill-switch plus per-subsystem and per-agent toggles, persisted in
+            <code class="rounded bg-terminal-card px-1 text-terminal-cyan">state.json</code> so toggles survive restarts.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- OODA -->
+    <section id="ooda" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          OODA cycle
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Observe → Orient → Decide → Act. Master-controller's prompt is structured around the four phases.
+          Each cycle ends with one or more fenced action blocks the dispatcher parses and applies.
+        </p>
+
+        <div class="overflow-hidden rounded-lg border border-terminal-border bg-terminal-surface p-5 font-[family-name:var(--font-mono)] text-xs leading-relaxed">
+          <pre class="text-terminal-text whitespace-pre-wrap"><code>{`maybeTriggerOoda  ─┐
+                   │  if (idle for &gt; threshold && switchboard.oodaAutoTrigger)
+                   ▼
+            runOodaCycle
+                   │
+                   ▼
+       buildAgentContext("master-controller")
+                   │   datetime, recent decisions, learnings,
+                   │   personality, mind-meld profile, recent
+                   │   inbox messages, current goals, strategy
+                   ▼
+        sdkBridge.runStandaloneAgent(master-controller, ...)
+                   │
+                   ▼
+            response text
+                   │
+                   ▼
+        parseOodaResponse(text)
+                   │   matches \`\`\`<type>\\n...\\n\`\`\` blocks
+                   ▼
+        executeOodaActions([...])
+                   │
+                   ├──▶ goal       │ insert into agent_goals
+                   ├──▶ decision   │ insert into agent_decisions
+                   ├──▶ message    │ insert into agent_messages (inbox)
+                   ├──▶ strategy   │ bump agent_strategies version
+                   ├──▶ schedule   │ re-fire after delay_minutes
+                   ├──▶ persistent_schedule │ insert agent_schedules (cron/interval)
+                   ├──▶ learning   │ addLearning() → consolidation later
+                   ├──▶ personality│ setPersonalityTrait()
+                   ├──▶ tool       │ invoke registered tool
+                   ├──▶ tool_sequence │ run tool list in order
+                   └──▶ roundtable │ convene specialists on a topic`}</code></pre>
+        </div>
+
+        <h3 class="mt-8 mb-3 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+          Action block types
+        </h3>
+        <p class="mb-4 text-sm text-terminal-dim">
+          Master-controller emits these as fenced code blocks. The parser is permissive — unknown blocks
+          are ignored, missing required fields skip the action with a debug log.
+        </p>
+        <div class="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-surface">
+          <table class="w-full font-[family-name:var(--font-mono)] text-xs">
+            <thead class="border-b border-terminal-border text-terminal-dim">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium">Block</th>
+                <th class="px-4 py-2 text-left font-medium">Fields</th>
+                <th class="px-4 py-2 text-left font-medium">Effect</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-terminal-border">
+              {oodaBlocks.map(({ tag, body, what }) => (
+                <tr class="text-terminal-text">
+                  <td class="px-4 py-2 align-top text-terminal-green">{tag}</td>
+                  <td class="px-4 py-2 align-top text-terminal-dim">{body}</td>
+                  <td class="px-4 py-2 align-top">{what}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p class="mt-4 text-xs text-terminal-dim">
+          Cycles can be triggered three ways: automatically (cognitive timer when idle and
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">switchboard.oodaAutoTrigger=true</code>),
+          on user demand (<code class="rounded bg-terminal-card px-1 text-terminal-cyan">POST /api/cognitive/ooda</code>),
+          or by a registered cron schedule that the previous OODA cycle itself emitted.
+        </p>
+      </div>
+    </section>
+
+    <!-- Builtin agents -->
+    <section id="agents" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Builtin agents
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Four agents ship with operad. All start <strong class="text-terminal-amber">disabled</strong>;
+          flip them on per-agent in the Switchboard. You can also define your own agents in
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">~/.config/operad/operad.toml</code>
+          using <code class="rounded bg-terminal-card px-1 text-terminal-cyan">[[agent]]</code> blocks
+          (see <a href="/" class="text-terminal-green hover:underline">Configuration</a>).
+        </p>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          {agents.map(({ name, role, autonomy, effort, categories, summary, color }) => (
+            <div class={`rounded-lg border bg-terminal-surface p-5 ${
+              color === "green" ? "border-terminal-green/30" :
+              color === "amber" ? "border-terminal-amber/30" :
+              "border-terminal-cyan/30"
+            }`}>
+              <div class="mb-2 flex items-center justify-between">
+                <h3 class={`font-[family-name:var(--font-mono)] text-base font-bold ${
+                  color === "green" ? "text-terminal-green" :
+                  color === "amber" ? "text-terminal-amber" :
+                  "text-terminal-cyan"
+                }`}>
+                  {name}
+                </h3>
+                <span class="font-[family-name:var(--font-mono)] text-[0.65rem] text-terminal-dim">
+                  effort: {effort}
+                </span>
+              </div>
+              <p class="mb-3 font-[family-name:var(--font-mono)] text-[0.7rem] uppercase tracking-wider text-terminal-dim">
+                {role}
+              </p>
+              <p class="mb-4 text-xs text-terminal-text leading-relaxed">{summary}</p>
+              <div class="flex flex-wrap items-center gap-2 font-[family-name:var(--font-mono)] text-[0.65rem]">
+                <span class="rounded border border-terminal-border bg-terminal-card px-2 py-0.5 text-terminal-dim">
+                  autonomy: <span class="text-terminal-text">{autonomy}</span>
+                </span>
+                {categories.map((c) => (
+                  <span class="rounded border border-terminal-border bg-terminal-card px-2 py-0.5 text-terminal-dim">
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div class="mt-6 rounded-lg border border-terminal-border bg-terminal-card p-4">
+          <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim leading-relaxed">
+            <span class="text-terminal-green">Two ways to invoke an agent:</span>
+            <strong class="text-terminal-text">Run</strong> — one-shot, fire-and-forget (the prompt + response
+            land in <code class="rounded bg-terminal-surface px-1 text-terminal-cyan">agent_runs</code>).
+            <strong class="text-terminal-text">Chat</strong> — multi-turn replay-based (prior conversation is
+            replayed into context each turn, persisted in
+            <code class="rounded bg-terminal-surface px-1 text-terminal-cyan">agent_conversations</code>).
+            Both surface in the Agents panel of the dashboard.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Self-improvement -->
+    <section id="self-improvement" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Self-improvement layer
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Every agent response is post-processed by
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">extractAgentActions()</code>,
+          which scans for <code class="rounded bg-terminal-card px-1 text-terminal-cyan">learning</code>
+          and <code class="rounded bg-terminal-card px-1 text-terminal-cyan">personality</code> fenced blocks
+          and folds them into the agent's persistent state. On the next run the new state shows up
+          in the agent's context — that's the "self-improvement" mechanism. There's no fine-tuning;
+          there's prompt accretion with decay.
+        </p>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+              <code class="text-terminal-green">learning</code> blocks
+            </h3>
+            <pre class="overflow-x-auto rounded bg-terminal-card p-3 font-[family-name:var(--font-mono)] text-[0.7rem] text-terminal-text"><code>{`\`\`\`learning
+content: pin sonnet 4.6 for routine
+  refactors; opus only for novel
+  architecture work
+category: routing
+confidence: 0.85
+\`\`\``}</code></pre>
+            <p class="mt-3 text-xs text-terminal-dim leading-relaxed">
+              Stored in <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent_learnings</code>.
+              Decays over 30 days; pruned below 0.15 confidence; merged with similar entries in the
+              same category. High-confidence learnings cross-pollinate via
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">getSharedInsights()</code>.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+              <code class="text-terminal-amber">personality</code> blocks
+            </h3>
+            <pre class="overflow-x-auto rounded bg-terminal-card p-3 font-[family-name:var(--font-mono)] text-[0.7rem] text-terminal-text"><code>{`\`\`\`personality
+trait: communication_style
+value: concise, evidence-first
+evidence: user repeatedly asked for
+  shorter responses with citations
+\`\`\``}</code></pre>
+            <p class="mt-3 text-xs text-terminal-dim leading-relaxed">
+              Stored in <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent_personality</code>.
+              Re-injected into the agent's prompt prefix on every run — so an agent that learns "user
+              prefers terse explanations" stays terse without you reminding it.
+            </p>
+          </div>
+        </div>
+
+        <h3 class="mt-8 mb-3 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+          What gets injected into an agent's context
+        </h3>
+        <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5 font-[family-name:var(--font-mono)] text-xs">
+          <pre class="overflow-x-auto whitespace-pre-wrap text-terminal-text"><code>{`buildAgentContext(agentName) →
+  current datetime + system memory state
+  ┊
+  recent decisions  (last 5 from agent_decisions)
+  recent learnings  (top by confidence)
+  shared insights   (high-confidence learnings from OTHER agents)
+  personality       (current trait values)
+  recent inbox      (last 5 from agent_messages)
+  current goals     (open from agent_goals)
+  current strategy  (latest agent_strategies)
+  mind-meld profile (your written file, if enabled)
+  ┊
+  ──→ prepended to user prompt as context block`}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Memory consolidation -->
+    <section id="consolidation" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Memory consolidation
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Agents accumulate learnings indefinitely if you let them. The consolidation worker runs when
+          the daemon detects user idle for &gt; threshold and squashes the noise. Four operations:
+        </p>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div class="rounded-lg border border-terminal-cyan/30 bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-cyan">decay</h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              Learnings older than 30 days lose 0.1 confidence per pass. Stale insights fade out
+              naturally instead of dominating the prompt forever.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-amber/30 bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-amber">prune</h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              Learnings below 0.15 confidence are deleted. Once decayed past the floor, they're gone —
+              the prompt budget recovers.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-green/30 bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-green">merge</h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              Same-category learnings with similar content (hash-prefix match) collapse into a single
+              entry, taking the max confidence. Stops the same insight from showing up five times.
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">cross-pollinate</h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              High-confidence learnings (≥ 0.75) become "shared insights" surfaced to other agents
+              through their context. Optimizer's quota observations show up in master-controller's prompt next cycle.
+            </p>
+          </div>
+        </div>
+
+        <p class="mt-6 text-xs text-terminal-dim">
+          Daily snapshots of the full agent-state bundle (learnings, personality, goals, decisions,
+          strategies, specializations) write to
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">~/.local/share/operad/snapshots/</code>
+          with retention. Lets you roll back if a consolidation pass deletes something useful.
+        </p>
+      </div>
+    </section>
+
+    <!-- Orchestration -->
+    <section id="orchestration" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Multi-agent orchestration
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Three coordination primitives:
+          <strong class="text-terminal-green">message bus</strong>,
+          <strong class="text-terminal-amber">specialization registry</strong>, and
+          <strong class="text-terminal-cyan">roundtable protocol</strong>.
+        </p>
+
+        <div class="space-y-4">
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-green">
+              Inbox / message bus
+            </h3>
+            <p class="mb-3 text-xs text-terminal-text leading-relaxed">
+              Every agent has an inbox in <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent_messages</code>.
+              Master-controller emits <code class="rounded bg-terminal-card px-1 text-terminal-cyan">message</code>
+              blocks targeting specific agents (or "all"). Recipients see unread messages prepended to
+              their next context. Read receipts persist via
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">read_at</code>.
+            </p>
+            <pre class="overflow-x-auto rounded bg-terminal-card p-3 font-[family-name:var(--font-mono)] text-[0.7rem] text-terminal-text"><code>{`\`\`\`message
+to: optimizer
+type: request
+content: weekly token usage spiked 40%
+  in cleverkeys. investigate cause and
+  recommend mitigations before fri.
+\`\`\``}</code></pre>
+          </div>
+
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-amber">
+              Specialization registry
+            </h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent_specializations</code>
+              tracks domain expertise per agent: <em>which categories does this agent know about,
+              with what confidence</em>. Builtin agents get seed specializations
+              (optimizer ↔ token-quota, preference-learner ↔ user-modeling, etc.). Confidence
+              auto-reinforces when an agent records a learning matching one of its specialization
+              categories — competence in a domain compounds.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-cyan">
+              Roundtable protocol
+            </h3>
+            <p class="mb-3 text-xs text-terminal-text leading-relaxed">
+              Master-controller can convene a multi-agent discussion via a
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">roundtable</code> block.
+              Each named agent runs sequentially with the topic + the running transcript so far.
+              Each contributes 2-4 focused points from its specialization. Final transcript is
+              delivered to master-controller as an inbox message and recorded as a decision.
+            </p>
+            <pre class="overflow-x-auto rounded bg-terminal-card p-3 font-[family-name:var(--font-mono)] text-[0.7rem] text-terminal-text"><code>{`\`\`\`roundtable
+topic: cleverkeys IME memory leak — what next?
+agents: optimizer, ideator, preference-learner
+context: profile data shows steady RSS growth
+  during long typing sessions; no obvious leak
+  in heap snapshot.
+\`\`\``}</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- User layer -->
+    <section id="user-layer" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          User control + influence layers
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          The agentic layer is opt-in <em>and</em> shape-able. You don't just toggle it on — you tell
+          the agents who you are, what you want, and what to ignore. Three layers:
+        </p>
+
+        <div class="space-y-4">
+          <div class="rounded-lg border border-terminal-cyan/30 bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-cyan">
+              Mind-meld profile
+            </h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              A free-form file you write, prepended to OODA prompts when
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">switchboard.mindMeld=true</code>.
+              Whatever you put here — work style, hard constraints ("never email me"), preferences,
+              personality notes — becomes part of the master-controller's orientation phase.
+              Editable from the dashboard's Mind Meld panel. Opting out strips it from prompts entirely.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-terminal-amber/30 bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-amber">
+              Preference-learner agent
+            </h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              Read-only specialist. When invoked (chat or scheduled), it reads session history + the
+              mind-meld profile and emits learnings back into agent state. Those learnings then
+              cross-pollinate to master-controller via the shared-insights channel — so the next OODA
+              cycle "knows you prefer X" without you having said so directly to master-controller.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-terminal-green/30 bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-green">
+              Switchboard
+            </h3>
+            <p class="mb-3 text-xs text-terminal-text leading-relaxed">
+              Hard control surface. Persisted in <code class="rounded bg-terminal-card px-1 text-terminal-cyan">state.json</code>.
+              Six toggles + per-agent overrides:
+            </p>
+            <div class="grid gap-2 sm:grid-cols-2 font-[family-name:var(--font-mono)] text-[0.7rem]">
+              {[
+                { k: "all", v: "master kill-switch — flips everything off" },
+                { k: "sdkBridge", v: "SDK streaming, attach/detach, agent runs" },
+                { k: "cognitive", v: "periodic OODA timer" },
+                { k: "oodaAutoTrigger", v: "automatic master-controller cycles" },
+                { k: "memoryInjection", v: "context built from agent_* tables" },
+                { k: "mindMeld", v: "your profile injected into OODA prompts" },
+                { k: "agents.<name>", v: "per-agent override (force-off without disabling globally)" },
+              ].map(({ k, v }) => (
+                <div class="rounded border border-terminal-border bg-terminal-card px-3 py-2">
+                  <div class="text-terminal-green">{k}</div>
+                  <div class="mt-0.5 text-terminal-dim">{v}</div>
+                </div>
+              ))}
+            </div>
+            <p class="mt-3 text-xs text-terminal-dim">
+              Off-by-default ships safe defaults: SDK bridge on, everything else off. Enable as you
+              want each piece to start running.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Trust + autonomy -->
+    <section id="trust" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Trust + autonomy
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Each agent has an autonomy level. The trust ledger (<code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent_trust_ledger</code>)
+          records signed deltas — successful scheduled runs add credit, failures and bad outcomes
+          subtract — and produces a recommended autonomy level you can accept or override.
+        </p>
+
+        <div class="space-y-2">
+          {autonomyLevels.map(({ level, scope, color }) => (
+            <div class={`flex items-baseline gap-3 rounded border bg-terminal-surface px-4 py-3 ${
+              color === "green" ? "border-terminal-green/30" :
+              color === "amber" ? "border-terminal-amber/30" :
+              "border-terminal-cyan/30"
+            }`}>
+              <span class={`w-24 font-[family-name:var(--font-mono)] text-sm font-bold ${
+                color === "green" ? "text-terminal-green" :
+                color === "amber" ? "text-terminal-amber" :
+                "text-terminal-cyan"
+              }`}>
+                {level}
+              </span>
+              <span class="text-xs text-terminal-text">{scope}</span>
+            </div>
+          ))}
+        </div>
+
+        <div class="mt-6 grid gap-4 sm:grid-cols-2">
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+              Tool leases
+            </h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              An agent at lower autonomy can request a temporary lease on a higher-tier tool —
+              "can I run <em>this specific</em> Bash command for the next 60 seconds?" — and the
+              lease is logged + bounded. Closes the gap between "always allowed" and "always denied".
+            </p>
+          </div>
+          <div class="rounded-lg border border-terminal-border bg-terminal-surface p-5">
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+              Protected checkpoints
+            </h3>
+            <p class="text-xs text-terminal-text leading-relaxed">
+              Even <code class="rounded bg-terminal-card px-1 text-terminal-cyan">autonomous</code>
+              agents must request approval for actions in
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">protected_files</code>,
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">protected_git</code>
+              (e.g. <code>push --force</code>, <code>reset --hard</code>), and
+              <code class="rounded bg-terminal-card px-1 text-terminal-cyan">protected_tools</code>.
+              Configured in the orchestrator section of <code class="rounded bg-terminal-card px-1 text-terminal-cyan">operad.toml</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tools + schedules -->
+    <section id="tools" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Tools, categories, schedules
+        </h2>
+        <p class="mb-6 text-sm text-terminal-text">
+          Agents act through a tool registry, not free-form Claude Code tools. Each tool is tagged
+          with a category that the autonomy level maps to.
+        </p>
+
+        <div class="grid gap-3 sm:grid-cols-3">
+          {[
+            { c: "observe", w: "read-only — list sessions, read files, get status", color: "cyan" },
+            { c: "analyze", w: "compute — token velocity, memory stats, log queries", color: "cyan" },
+            { c: "mutate", w: "modify state — restart sessions, edit files, write memos", color: "amber" },
+            { c: "communicate", w: "external comms — termux notification, send message, broadcast", color: "amber" },
+            { c: "orchestrate", w: "delegate to other agents, spawn sessions, schedule runs", color: "green" },
+          ].map(({ c, w, color }) => (
+            <div class={`rounded border bg-terminal-surface p-4 ${
+              color === "green" ? "border-terminal-green/30" :
+              color === "amber" ? "border-terminal-amber/30" :
+              "border-terminal-cyan/30"
+            }`}>
+              <div class={`font-[family-name:var(--font-mono)] text-sm font-bold ${
+                color === "green" ? "text-terminal-green" :
+                color === "amber" ? "text-terminal-amber" :
+                "text-terminal-cyan"
+              }`}>{c}</div>
+              <p class="mt-1 text-xs text-terminal-text leading-snug">{w}</p>
+            </div>
+          ))}
+        </div>
+
+        <h3 class="mt-8 mb-3 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+          Persistent scheduling
+        </h3>
+        <p class="mb-3 text-sm text-terminal-text leading-relaxed">
+          Master-controller can register recurring agent runs via the
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">persistent_schedule</code>
+          block. Stored in <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent_schedules</code>;
+          a 30-second poll loop fires due entries. Auto-disables after consecutive failures so a broken
+          schedule doesn't burn quota indefinitely.
+        </p>
+        <pre class="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-surface p-4 font-[family-name:var(--font-mono)] text-[0.7rem] text-terminal-text"><code>{`\`\`\`persistent_schedule
+name: weekly-quota-review
+cron: 0 9 * * MON
+prompt: review last week's token usage
+  by session. flag the top 3 consumers.
+  recommend pruning candidates.
+max_budget_usd: 0.50
+\`\`\``}</code></pre>
+        <p class="mt-3 text-xs text-terminal-dim">
+          Either <code class="rounded bg-terminal-card px-1 text-terminal-cyan">cron</code> (5-field expression)
+          or <code class="rounded bg-terminal-card px-1 text-terminal-cyan">interval_minutes</code> (simple
+          repeating delay) — mutually exclusive.
+        </p>
+
+        <h3 class="mt-8 mb-3 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+          Custom tools (TOML)
+        </h3>
+        <p class="text-sm text-terminal-text leading-relaxed">
+          Define your own tools in <code class="rounded bg-terminal-card px-1 text-terminal-cyan">operad.toml</code>
+          with a <code class="rounded bg-terminal-card px-1 text-terminal-cyan">[[tool]]</code> block.
+          Tools are shell commands templated with the tool's args; the registry tags them with a
+          category so they slot into the autonomy framework.
+        </p>
+      </div>
+    </section>
+
+    <!-- Surfaces -->
+    <section id="surfaces" class="px-4 py-12 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-4xl">
+        <h2 class="mb-4 font-[family-name:var(--font-mono)] text-xl font-bold text-terminal-bright">
+          Where each layer lives in the dashboard
+        </h2>
+        <div class="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-surface">
+          <table class="w-full font-[family-name:var(--font-mono)] text-xs">
+            <thead class="border-b border-terminal-border text-terminal-dim">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium">Panel</th>
+                <th class="px-4 py-2 text-left font-medium">What you do there</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-terminal-border">
+              {[
+                { p: "Switchboard", w: "master kill-switch + per-subsystem + per-agent toggles" },
+                { p: "Agents", w: "list, run, chat, view runs (full prompt/response/thinking text)" },
+                { p: "Cognitive", w: "goal tree, decision journal, strategy version, message bus, growth metrics" },
+                { p: "Mind Meld", w: "edit your personality / preferences profile" },
+                { p: "Telemetry", w: "token quota status, weekly utilization, per-agent cost rollup" },
+              ].map(({ p, w }) => (
+                <tr>
+                  <td class="px-4 py-2 align-top text-terminal-green">{p}</td>
+                  <td class="px-4 py-2 align-top text-terminal-text">{w}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="mt-8 mb-3 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">
+          REST surface
+        </h3>
+        <pre class="overflow-x-auto rounded-lg border border-terminal-border bg-terminal-surface p-4 font-[family-name:var(--font-mono)] text-xs text-terminal-text"><code>{`GET    /api/agents                      list configured agents
+POST   /api/agents/<name>/run           one-shot run with prompt
+POST   /api/agents/<name>/toggle        enable/disable
+GET    /api/agents/runs                 paginated runs (preview)
+GET    /api/agents/runs/<id>            full prompt/response/thinking
+GET    /api/agents/<name>/learnings
+GET    /api/agents/<name>/personality
+POST   /api/cognitive/ooda              fire OODA on demand
+GET    /api/cognitive/goals
+GET    /api/cognitive/decisions
+GET    /api/cognitive/strategy
+GET    /api/cognitive/messages
+GET    /api/quota                       weekly quota status
+GET    /api/specializations
+POST   /api/switchboard                 update toggles`}</code></pre>
+
+        <p class="mt-6 text-xs text-terminal-dim">
+          Source of truth lives in
+          <a href="https://github.com/tribixbite/operad/tree/main/src" class="text-terminal-green hover:underline" target="_blank" rel="noopener">
+            src/
+          </a> —
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agents.ts</code>,
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">cognitive.ts</code>,
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">agent-engine.ts</code>,
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">consolidation.ts</code>,
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">memory-db.ts</code>,
+          <code class="rounded bg-terminal-card px-1 text-terminal-cyan">schedule.ts</code>.
+        </p>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="border-t border-terminal-border px-4 py-8 sm:px-6 lg:px-8">
+      <div class="mx-auto flex max-w-4xl flex-col gap-2 font-[family-name:var(--font-mono)] text-xs text-terminal-dim sm:flex-row sm:items-center sm:justify-between">
+        <span>operad — autonomous orchestration for Claude Code</span>
+        <span class="flex gap-4">
+          <a href="/" class="hover:text-terminal-green">home</a>
+          <a href="https://github.com/tribixbite/operad" class="hover:text-terminal-green" target="_blank" rel="noopener">github</a>
+          <a href="https://www.npmjs.com/package/operadic" class="hover:text-terminal-green" target="_blank" rel="noopener">npm</a>
+        </span>
+      </div>
+    </footer>
+  </main>
+</Layout>

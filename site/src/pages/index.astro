@@ -59,6 +59,7 @@ import Layout from "../layouts/Layout.astro";
             { href: "#platforms", label: "Platforms" },
             { href: "#configuration", label: "Configuration" },
             { href: "#architecture", label: "Architecture" },
+            { href: "/agentic", label: "Agentic" },
             { href: "#rest-api", label: "REST API" },
             { href: "#lifecycle", label: "Lifecycle" },
             { href: "#resilience", label: "Resilience" },
@@ -103,14 +104,18 @@ import Layout from "../layouts/Layout.astro";
         </div>
 
         <div class="mt-6 grid gap-6 sm:grid-cols-3">
-          <div class="rounded-lg border border-terminal-green/20 bg-terminal-surface p-5">
-            <div class="mb-3 font-[family-name:var(--font-mono)] text-lg text-terminal-green">04</div>
+          <a href="/agentic"
+            class="block rounded-lg border border-terminal-green/20 bg-terminal-surface p-5 transition-colors hover:border-terminal-green/60">
+            <div class="mb-3 flex items-baseline justify-between font-[family-name:var(--font-mono)] text-lg text-terminal-green">
+              <span>04</span>
+              <span class="text-[0.65rem] uppercase tracking-wider">read more →</span>
+            </div>
             <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">Agentic AI</h3>
             <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim leading-relaxed">
               OODA cognitive loop with 4 specialized agents: master controller, optimizer, preference learner, and ideator.
-              Goal trees, decision journals, strategy versioning, and cross-agent knowledge sharing.
+              Goal trees, decision journals, strategy versioning, cross-agent knowledge sharing, mind-meld personality layer.
             </p>
-          </div>
+          </a>
           <div class="rounded-lg border border-terminal-amber/20 bg-terminal-surface p-5">
             <div class="mb-3 font-[family-name:var(--font-mono)] text-lg text-terminal-amber">05</div>
             <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">Token Quota</h3>
