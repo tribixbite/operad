@@ -317,119 +317,132 @@ export class AndroidEngine {
       return;
     }
 
-    // 1. Phantom process killer fix
-    const phantomCmds = [
-      ["/system/bin/device_config", "put", "activity_manager", "max_phantom_processes", "2147483647"],
-      ["settings", "put", "global", "settings_enable_monitor_phantom_procs", "false"],
-    ];
+    // Per-protection failure accumulator. Each entry is "<protection>: <reason>".
+    // Used to emit a single summary line at the end, instead of pretending the
+    // whole stack succeeded. Critical failures (oom_score_adj write rejected
+    // because adb shell can't write another app's /proc on Android 14+) escalate
+    // to warn so they actually surface in the log.
+    const failures: string[] = [];
 
-    // 2. Doze whitelist — prevent Android from suspending these apps
-    const dozeWhitelistPkgs = ["com.termux", "com.microsoft.emmx.canary"];
-
-    // 3. Active standby bucket — prevent throttling
-    const standbyPkgs = ["com.termux", "com.microsoft.emmx.canary"];
-
-    // 4. Background execution — allow running in background unconditionally
-    const bgPkgs = ["com.termux", "com.microsoft.emmx.canary"];
-
-    // Apply phantom process fixes
-    for (const cmd of phantomCmds) {
+    /**
+     * Run an ADB shell command and verify it actually succeeded. spawnSync's
+     * default failure mode is silent — if the binary exits non-zero, the only
+     * signal is `result.status`. We capture stdout/stderr too so we can include
+     * the device's error message in the warn.
+     */
+    const runAdbVerified = (
+      label: string,
+      args: string[],
+      severity: "warn" | "debug" = "warn",
+    ): { ok: boolean; stdout: string; stderr: string; status: number | null } => {
+      let result;
       try {
-        spawnSync(ADB_BIN, this.adbShellArgs(...cmd), { timeout: 10_000, stdio: "ignore" });
-      } catch (err) {
-        this.ctx.log.warn(`Phantom fix command failed: ${cmd.join(" ")}`, { error: String(err) });
-      }
-    }
-
-    // Apply Doze whitelist
-    for (const pkg of dozeWhitelistPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("cmd", "deviceidle", "whitelist", `+${pkg}`), {
-          timeout: 10_000, stdio: "ignore",
+        result = spawnSync(ADB_BIN, this.adbShellArgs(...args), {
+          encoding: "utf-8",
+          timeout: 10_000,
+          stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (err) {
-        this.ctx.log.warn(`Doze whitelist failed for ${pkg}`, { error: String(err) });
+        failures.push(`${label}: spawn failed (${err})`);
+        if (severity === "warn") this.ctx.log.warn(`${label} failed`, { error: String(err) });
+        return { ok: false, stdout: "", stderr: String(err), status: null };
       }
-    }
-
-    // Apply active standby bucket
-    for (const pkg of standbyPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("am", "set-standby-bucket", pkg, "active"), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch (err) {
-        this.ctx.log.warn(`Standby bucket failed for ${pkg}`, { error: String(err) });
+      const stdout = (result.stdout ?? "").trim();
+      const stderr = (result.stderr ?? "").trim();
+      // ADB exits 0 even when the underlying shell command errored. Many of
+      // these commands signal failure by emitting text on stderr (or stdout
+      // containing "Error:"/"Permission denied"/"Exception"). Treat any of
+      // those as a failure.
+      const looksError =
+        result.status !== 0 ||
+        /(\bError\b|\bException\b|Permission denied|not allowed|Bad command|Unknown command|Failure)/i.test(stderr) ||
+        /(\bError\b|\bException\b|Permission denied|not allowed|Bad command|Unknown command|Failure)/i.test(stdout);
+      if (looksError) {
+        const detail = stderr || stdout || `exit=${result.status}`;
+        failures.push(`${label}: ${detail.split("\n")[0].slice(0, 160)}`);
+        if (severity === "warn") {
+          this.ctx.log.warn(`${label} failed`, { detail: detail.slice(0, 240) });
+        } else {
+          this.ctx.log.debug(`${label} failed: ${detail.slice(0, 240)}`);
+        }
+        return { ok: false, stdout, stderr, status: result.status ?? null };
       }
+      return { ok: true, stdout, stderr, status: result.status ?? 0 };
+    };
+
+    // 1. Phantom process killer disable
+    runAdbVerified("phantom: device_config max_phantom_processes",
+      ["/system/bin/device_config", "put", "activity_manager", "max_phantom_processes", "2147483647"]);
+    runAdbVerified("phantom: settings_enable_monitor_phantom_procs",
+      ["settings", "put", "global", "settings_enable_monitor_phantom_procs", "false"]);
+
+    const protectedPkgs = ["com.termux", "com.microsoft.emmx.canary"];
+
+    // 2. Doze whitelist
+    for (const pkg of protectedPkgs) {
+      runAdbVerified(`doze whitelist +${pkg}`,
+        ["cmd", "deviceidle", "whitelist", `+${pkg}`]);
     }
 
-    // Allow background execution
-    for (const pkg of bgPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("cmd", "appops", "set", pkg, "RUN_ANY_IN_BACKGROUND", "allow"), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch (err) {
-        this.ctx.log.warn(`Background allow failed for ${pkg}`, { error: String(err) });
-      }
+    // 3. Active standby bucket
+    for (const pkg of protectedPkgs) {
+      runAdbVerified(`standby ${pkg}=ACTIVE`,
+        ["am", "set-standby-bucket", pkg, "active"]);
     }
 
-    // 5. OOM score adjustment — make Termux less likely to be killed by LMK
-    // oom_score_adj ranges from -1000 (never kill) to 1000 (kill first).
-    // -200 is moderate — enough to survive pressure spikes without starving
-    // foreground apps. Logcat shows Termux main process already at adj=0
-    // (foreground), so this mainly protects against transient demotion.
-    try {
-      // Get Termux's main PID from the app process
-      const pidResult = spawnSync(ADB_BIN, this.adbShellArgs(
-        "sh", "-c", "pidof com.termux | head -1",
-      ), { encoding: "utf-8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
-      const termuxPid = pidResult.stdout?.trim();
-      if (termuxPid && /^\d+$/.test(termuxPid)) {
-        spawnSync(ADB_BIN, this.adbShellArgs(
-          "sh", "-c", `echo -200 > /proc/${termuxPid}/oom_score_adj`,
-        ), { timeout: 10_000, stdio: "ignore" });
-        this.ctx.log.info(`Set oom_score_adj=-200 for Termux PID ${termuxPid}`);
-      }
-    } catch (err) {
-      this.ctx.log.debug(`oom_score_adj failed (non-critical): ${err}`);
+    // 4. Background execution
+    for (const pkg of protectedPkgs) {
+      runAdbVerified(`appops ${pkg} RUN_ANY_IN_BACKGROUND`,
+        ["cmd", "appops", "set", pkg, "RUN_ANY_IN_BACKGROUND", "allow"]);
     }
 
-    // 6. Prevent Android from classifying Termux as idle (which triggers restrictions)
-    for (const pkg of ["com.termux", "com.microsoft.emmx.canary"]) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("cmd", "activity", "set-inactive", pkg, "false"), {
-          timeout: 10_000, stdio: "ignore",
-        });
-      } catch {
-        // Non-critical — command may not exist on all Android versions
-      }
+    // 5. OOM score adjustment. On Android 14+ the adb-shell uid usually can't
+    // write another app's /proc/<pid>/oom_score_adj — this WILL fail there
+    // with "Permission denied". That's a meaningful protection gap, so warn
+    // (don't bury at debug) and let `operad doctor` surface it.
+    //
+    // Avoid `sh -c "pidof X | head -1"` — adb-shell's pipe handling is flaky
+    // and returns empty stdout intermittently. Call `pidof` directly and pick
+    // the first PID client-side (multiple PIDs would mean two app processes,
+    // which Termux generally doesn't have).
+    const pidResult = runAdbVerified("oom_score_adj: pidof com.termux",
+      ["pidof", "com.termux"], "debug");
+    const termuxPid = pidResult.stdout.trim().split(/\s+/)[0];
+    if (termuxPid && /^\d+$/.test(termuxPid)) {
+      runAdbVerified(`oom_score_adj: write -200 to /proc/${termuxPid}/oom_score_adj`,
+        ["sh", "-c", `echo -200 > /proc/${termuxPid}/oom_score_adj`]);
+    } else {
+      failures.push("oom_score_adj: could not resolve com.termux PID");
     }
 
-    // 7. Lower LMK trigger level to reduce aggressive kills under memory pressure
-    try {
-      spawnSync(ADB_BIN, this.adbShellArgs("settings", "put", "global", "low_power_trigger_level", "1"), {
-        timeout: 10_000, stdio: "ignore",
-      });
-    } catch {
-      // Non-critical
+    // 6. Set-inactive false
+    for (const pkg of protectedPkgs) {
+      runAdbVerified(`set-inactive ${pkg}=false`,
+        ["cmd", "activity", "set-inactive", pkg, "false"]);
     }
 
-    // Re-enable Samsung sensor packages
+    // 7. Lower LMK trigger level
+    runAdbVerified("lmk: low_power_trigger_level=1",
+      ["settings", "put", "global", "low_power_trigger_level", "1"]);
+
+    // Re-enable Samsung sensor packages (best-effort; non-Samsung devices skip silently)
     const samsungPkgs = [
       "com.samsung.android.ssco",
       "com.samsung.android.mocca",
       "com.samsung.android.camerasdkservice",
     ];
     for (const pkg of samsungPkgs) {
-      try {
-        spawnSync(ADB_BIN, this.adbShellArgs("pm", "enable", pkg), { timeout: 10_000, stdio: "ignore" });
-      } catch {
-        // Non-critical
-      }
+      // debug severity — these only exist on Samsung; fail on Pixel/etc. is expected
+      runAdbVerified(`pm enable ${pkg}`, ["pm", "enable", pkg], "debug");
     }
 
-    this.ctx.log.info("Android process protection fixes applied (phantom + doze + standby + background + oom_adj + idle + lmk)");
+    if (failures.length === 0) {
+      this.ctx.log.info("Android process protection: all 7 layers applied successfully");
+    } else {
+      this.ctx.log.warn(
+        `Android process protection: ${failures.length} command(s) failed — see warnings above. Run 'operad doctor' to verify which protections are actually in effect.`,
+      );
+    }
   }
 
   // -- ADB retry timer --------------------------------------------------------

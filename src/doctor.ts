@@ -261,6 +261,14 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
 
     // Patched Edge Canary — used for opening the dashboard from the status notification
     results.push(checkEdgeCanary());
+
+    // Termux:Boot symlink — only this path produces a daemon in com.termux.boot's
+    // cgroup (the property that lets sessions survive Termux app death). See
+    // docs/persistence.md.
+    results.push(checkBootHook());
+
+    // Process protections — read live state vs what applyPhantomFix tries to set.
+    results.push(...checkAndroidProtections());
   }
 
   // Claude for Chrome extension — desktop equivalent of the Android CFC bridge.
@@ -446,4 +454,180 @@ function checkEdgeCanary(): CheckResult {
     };
   }
   return { name: "edge-canary", status: "ok", message: "com.microsoft.emmx.canary installed" };
+}
+
+/**
+ * Termux:Boot hook — `~/.termux/boot/startup.sh` is the only path that places
+ * the daemon in com.termux.boot's cgroup (separate from com.termux's). Without
+ * a working hook, sessions can't survive Termux app death; manual `tmx stream`
+ * spawns the daemon as a child of com.termux. See docs/persistence.md.
+ *
+ * Reports info-level state — does not fail the doctor run, since users may
+ * intentionally avoid the boot hook (per project history, the user does).
+ */
+function checkBootHook(): CheckResult {
+  const hookPath = join(homedir(), ".termux", "boot", "startup.sh");
+  if (!existsSync(hookPath)) {
+    return {
+      name: "termux-boot-hook",
+      status: "warn",
+      message: "~/.termux/boot/startup.sh not present — sessions will not survive Termux app death",
+      fix:
+        "Install Termux:Boot APK from F-Droid, then create the hook:\n" +
+        "  ln -sf ~/git/operad/watchdog.sh ~/.termux/boot/startup.sh\n" +
+        "  (effective on next phone reboot — the daemon must be spawned by\n" +
+        "   com.termux.boot to land in its own cgroup; see docs/persistence.md)",
+    };
+  }
+  try {
+    const resolved = realpathSync(hookPath);
+    if (!existsSync(resolved)) {
+      return {
+        name: "termux-boot-hook",
+        status: "fail",
+        message: `~/.termux/boot/startup.sh is a broken symlink (target does not exist: ${resolved})`,
+        fix: "ln -sfn ~/git/operad/watchdog.sh ~/.termux/boot/startup.sh",
+      };
+    }
+    try {
+      accessSync(resolved, constants.X_OK);
+    } catch {
+      return {
+        name: "termux-boot-hook",
+        status: "warn",
+        message: `Boot hook target ${resolved} is not executable`,
+        fix: `chmod +x ${resolved}`,
+      };
+    }
+    return {
+      name: "termux-boot-hook",
+      status: "ok",
+      message: `${hookPath} → ${resolved}`,
+    };
+  } catch (err) {
+    return {
+      name: "termux-boot-hook",
+      status: "warn",
+      message: `Could not resolve ~/.termux/boot/startup.sh: ${(err as Error).message}`,
+    };
+  }
+}
+
+/**
+ * Read the live state of the 7 ADB-driven Android process protections that
+ * `applyPhantomFix` is supposed to apply. Reports actual vs. expected per
+ * layer so the user knows which ones are silently no-op on this device.
+ *
+ * The most common reason for silent no-op on modern Android: writing
+ * /proc/<termux_pid>/oom_score_adj from `adb shell` requires the calling uid
+ * to own the target process, which is no longer granted to the shell uid on
+ * Android 14+. Operad logs this at warn but only via the daemon log; doctor
+ * surfaces it interactively.
+ */
+function checkAndroidProtections(): CheckResult[] {
+  const results: CheckResult[] = [];
+  const adbCheck = spawnSync("adb", ["get-state"], { encoding: "utf8", timeout: 5000 });
+  const adbReady = !adbCheck.error && adbCheck.status === 0 && /device/.test(adbCheck.stdout);
+  if (!adbReady) {
+    results.push({
+      name: "android-protections",
+      status: "warn",
+      message: "ADB not connected — cannot verify protection state",
+      fix: "Connect ADB (wireless debugging or USB) and re-run; operad's applyPhantomFix runs on boot via fixAdb",
+    });
+    return results;
+  }
+
+  // 1. Phantom process limit
+  {
+    const r = spawnSync("adb", ["shell", "device_config", "get", "activity_manager", "max_phantom_processes"], {
+      encoding: "utf8", timeout: 5000,
+    });
+    const value = (r.stdout ?? "").trim();
+    if (value === "2147483647") {
+      results.push({ name: "phantom-limit", status: "ok", message: `max_phantom_processes=${value}` });
+    } else {
+      results.push({
+        name: "phantom-limit",
+        status: "warn",
+        message: `max_phantom_processes=${value || "unset"} (expected 2147483647)`,
+        fix: "Run `tmx boot` to reapply, or: adb shell device_config put activity_manager max_phantom_processes 2147483647",
+      });
+    }
+  }
+
+  // 2. Doze whitelist
+  {
+    const r = spawnSync("adb", ["shell", "cmd", "deviceidle", "whitelist"], {
+      encoding: "utf8", timeout: 5000,
+    });
+    const whitelisted = (r.stdout ?? "").includes(",com.termux,") ||
+      /,com\.termux,/.test(r.stdout ?? "") ||
+      /\bcom\.termux\b,\d+/.test(r.stdout ?? "");
+    if (whitelisted) {
+      results.push({ name: "doze-whitelist", status: "ok", message: "com.termux is doze-whitelisted" });
+    } else {
+      results.push({
+        name: "doze-whitelist",
+        status: "warn",
+        message: "com.termux NOT in doze whitelist",
+        fix: "adb shell cmd deviceidle whitelist +com.termux",
+      });
+    }
+  }
+
+  // 3. com.termux oom_score_adj. Avoid `sh -c "...|..."` because adb-shell's
+  // sh doesn't always pipe cleanly across the wire — call pidof directly and
+  // pick the first whitespace-separated token client-side.
+  {
+    const pidR = spawnSync("adb", ["shell", "pidof", "com.termux"], {
+      encoding: "utf8", timeout: 5000,
+    });
+    const pid = (pidR.stdout ?? "").trim().split(/\s+/)[0];
+    if (!/^\d+$/.test(pid)) {
+      results.push({
+        name: "oom-score-adj",
+        status: "warn",
+        message: "com.termux not running — cannot read oom_score_adj",
+      });
+    } else {
+      const adjR = spawnSync("adb", ["shell", "cat", `/proc/${pid}/oom_score_adj`], {
+        encoding: "utf8", timeout: 5000,
+      });
+      const adj = parseInt((adjR.stdout ?? "").trim(), 10);
+      if (Number.isFinite(adj) && adj <= -100) {
+        results.push({ name: "oom-score-adj", status: "ok", message: `com.termux/${pid} oom_score_adj=${adj}` });
+      } else {
+        results.push({
+          name: "oom-score-adj",
+          status: "warn",
+          message: `com.termux/${pid} oom_score_adj=${Number.isFinite(adj) ? adj : "unreadable"} (expected ≤ -100)`,
+          fix:
+            "On Android 14+ the adb-shell uid usually can't write another app's oom_score_adj.\n" +
+            "  Try: adb shell \"echo -200 > /proc/" + pid + "/oom_score_adj\"\n" +
+            "  If it returns 'Permission denied', this protection layer is non-functional on this device.",
+        });
+      }
+    }
+  }
+
+  // 4. RUN_ANY_IN_BACKGROUND appop
+  {
+    const r = spawnSync("adb", ["shell", "cmd", "appops", "get", "com.termux", "RUN_ANY_IN_BACKGROUND"], {
+      encoding: "utf8", timeout: 5000,
+    });
+    const out = (r.stdout ?? "").trim();
+    if (/allow/i.test(out)) {
+      results.push({ name: "run-in-bg", status: "ok", message: "com.termux RUN_ANY_IN_BACKGROUND=allow" });
+    } else {
+      results.push({
+        name: "run-in-bg",
+        status: "warn",
+        message: `com.termux RUN_ANY_IN_BACKGROUND=${out || "unknown"}`,
+        fix: "adb shell cmd appops set com.termux RUN_ANY_IN_BACKGROUND allow",
+      });
+    }
+  }
+
+  return results;
 }
