@@ -229,6 +229,7 @@ export class RestHandler {
             const bridgeCandidates = [
               join(home, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
               join(home, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
+              join(prefix, "lib/node_modules/claude-chrome-android/dist/cli.js"),
             ];
             const bridgeScript = bridgeCandidates.find(p => existsSync(p));
             if (!bridgeScript) {
@@ -300,9 +301,11 @@ export class RestHandler {
             } catch { /* bridge is down — proceed to start */ }
 
             const home2 = homedir();
+            const prefix2a = process.env.PREFIX ?? "/usr";
             const bridgeCandidates2 = [
               join(home2, ".bun/install/global/node_modules/claude-chrome-android/dist/cli.js"),
               join(home2, ".npm/lib/node_modules/claude-chrome-android/dist/cli.js"),
+              join(prefix2a, "lib/node_modules/claude-chrome-android/dist/cli.js"),
             ];
             const bridgeScript2 = bridgeCandidates2.find(p => existsSync(p));
             if (!bridgeScript2) {
@@ -862,6 +865,13 @@ export class RestHandler {
 
           if (subCmd === "runs") {
             if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            // /api/agents/runs/<id> — fetch one run with full prompt/response/thinking text.
+            const detailId = segments[2] ? Number(decodeURIComponent(segments[2])) : NaN;
+            if (Number.isFinite(detailId)) {
+              const run = memoryDb.getAgentRun(detailId);
+              if (!run) return { status: 404, data: { error: `Run not found: ${detailId}` } };
+              return { status: 200, data: run };
+            }
             const agentFilter = queryParams.get("agent") ?? undefined;
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
             return { status: 200, data: memoryDb.getAgentRuns(limit, agentFilter) };

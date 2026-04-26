@@ -49,13 +49,45 @@
     return allSessions.filter((s) => s.name.toLowerCase().includes(q));
   });
 
-  /** Sorted: active sessions first (by name), then inactive (by name) */
+  /** Inactive sort mode — chronological keeps recent activity first; alphabetical sorts by name. */
+  type InactiveSort = "chrono" | "alpha";
+  let inactiveSort: InactiveSort = $state("chrono");
+
+  /** Active sessions sorted alphabetically (small set; chronological isn't useful here). */
   const activeSessions = $derived(
     filteredSessions.filter((s) => ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
   );
-  const inactiveSessions = $derived(
-    filteredSessions.filter((s) => !ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
-  );
+
+  /**
+   * Inactive sort key — chronological prefers uptime_start (last running window)
+   * then last_health_check. Newer first. Sessions with no timestamps fall to the
+   * bottom of the chronological view but stay sorted by name within that bucket.
+   */
+  function chronoKey(s: SessionState): number {
+    const t = s.uptime_start ?? s.last_health_check;
+    return t ? Date.parse(t) : 0;
+  }
+
+  function sortInactive(arr: SessionState[]): SessionState[] {
+    if (inactiveSort === "alpha") {
+      return [...arr].sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return [...arr].sort((a, b) => {
+      const diff = chronoKey(b) - chronoKey(a);
+      return diff !== 0 ? diff : a.name.localeCompare(b.name);
+    });
+  }
+
+  /**
+   * Inactive sessions split into Registered (config-defined) and Ad-hoc
+   * (discovered or transient). Registered always renders first. The wire
+   * field `from_config` is added by session-commands.ts; older daemons may
+   * omit it, in which case everything falls into the Ad-hoc bucket.
+   */
+  const inactiveAll = $derived(filteredSessions.filter((s) => !ACTIVE_STATUSES.has(s.status)));
+  const registeredInactive = $derived(sortInactive(inactiveAll.filter((s) => s.from_config === true)));
+  const adhocInactive = $derived(sortInactive(inactiveAll.filter((s) => s.from_config !== true)));
+  const inactiveTotal = $derived(registeredInactive.length + adhocInactive.length);
 
   /** Only show search when there are enough sessions to warrant filtering */
   const showSearch = $derived(allSessions.length > 5);
@@ -251,19 +283,56 @@
         {@render sessionRow(session)}
       {/each}
 
-      <!-- Collapsed inactive group -->
-      {#if inactiveSessions.length > 0}
+      <!-- Collapsed inactive group, split into Registered / Ad-hoc subsections -->
+      {#if inactiveTotal > 0}
         <tr class="inactive-divider" onclick={() => (showInactive = !showInactive)}>
           <td colspan="3">
             <span class="inactive-toggle">{showInactive ? "\u25BC" : "\u25B6"}</span>
             <span class="inactive-label">Inactive</span>
-            <span class="inactive-count">{inactiveSessions.length}</span>
+            <span class="inactive-count">{inactiveTotal}</span>
+            {#if showInactive}
+              <span class="sort-controls" onclick={(e) => e.stopPropagation()} role="group" aria-label="Inactive sort">
+                <button
+                  class="sort-btn"
+                  class:sort-active={inactiveSort === "chrono"}
+                  onclick={() => (inactiveSort = "chrono")}
+                  title="Sort by recent activity (uptime_start desc)"
+                >recent</button>
+                <button
+                  class="sort-btn"
+                  class:sort-active={inactiveSort === "alpha"}
+                  onclick={() => (inactiveSort = "alpha")}
+                  title="Sort alphabetically"
+                >a–z</button>
+              </span>
+            {/if}
           </td>
         </tr>
         {#if showInactive}
-          {#each inactiveSessions as session (session.name)}
-            {@render sessionRow(session)}
-          {/each}
+          {#if registeredInactive.length > 0}
+            <tr class="subgroup-divider">
+              <td colspan="3">
+                <span class="subgroup-label">Registered</span>
+                <span class="subgroup-count">{registeredInactive.length}</span>
+                <span class="subgroup-hint">defined in operad.toml</span>
+              </td>
+            </tr>
+            {#each registeredInactive as session (session.name)}
+              {@render sessionRow(session)}
+            {/each}
+          {/if}
+          {#if adhocInactive.length > 0}
+            <tr class="subgroup-divider">
+              <td colspan="3">
+                <span class="subgroup-label">Ad-hoc</span>
+                <span class="subgroup-count">{adhocInactive.length}</span>
+                <span class="subgroup-hint">discovered / transient</span>
+              </td>
+            </tr>
+            {#each adhocInactive as session (session.name)}
+              {@render sessionRow(session)}
+            {/each}
+          {/if}
         {/if}
       {/if}
     </tbody>
@@ -345,6 +414,56 @@
     border-radius: 9999px;
     padding: 0.0625rem 0.375rem;
     font-size: 0.625rem;
+  }
+  .sort-controls {
+    margin-left: 0.5rem;
+    display: inline-flex;
+    gap: 2px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .sort-btn {
+    background: var(--bg-secondary);
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.625rem;
+    padding: 0.125rem 0.4375rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    transition: background 0.15s, color 0.15s;
+  }
+  .sort-btn:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+  .sort-btn.sort-active {
+    background: var(--accent-blue);
+    color: #fff;
+  }
+
+  .subgroup-divider td {
+    padding: 0.25rem 0.375rem 0.25rem 1.625rem;
+    border-top: 1px dashed var(--border);
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    background: var(--bg-secondary);
+  }
+  .subgroup-label {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .subgroup-count {
+    margin-left: 0.25rem;
+    background: var(--bg-tertiary);
+    border-radius: 9999px;
+    padding: 0.0625rem 0.375rem;
+  }
+  .subgroup-hint {
+    margin-left: 0.5rem;
+    color: var(--text-muted);
+    font-style: italic;
   }
   .session-row td {
     padding: 0.5rem 0.375rem;

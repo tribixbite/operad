@@ -1,10 +1,10 @@
 <script lang="ts">
   import {
     fetchAgents, toggleAgent, runAgent, deleteAgent, createAgent,
-    fetchAgentRuns, fetchAgentCosts,
+    fetchAgentRuns, fetchAgentRunDetail, fetchAgentCosts,
   } from "$lib/api";
   import { connect, on } from "$lib/ws.svelte";
-  import type { AgentInfo, AgentRunRecord, AgentCostSummary } from "$lib/types";
+  import type { AgentInfo, AgentRunRecord, AgentRunDetail, AgentCostSummary } from "$lib/types";
   import AgentChatDrawer from "./AgentChatDrawer.svelte";
 
   // -- State ------------------------------------------------------------------
@@ -39,6 +39,37 @@
 
   /** Chat drawer state */
   let chatAgent: AgentInfo | null = $state(null);
+
+  /** Run detail view: id of the run currently expanded for full text inspection. */
+  let expandedRunId: number | null = $state(null);
+  let expandedRunDetail: AgentRunDetail | null = $state(null);
+  let expandedRunLoading = $state(false);
+  let expandedRunError: string | null = $state(null);
+  /** Toggle whether the thinking_text is shown alongside the response text. */
+  let showThinking = $state(false);
+
+  async function toggleRunExpand(run: AgentRunRecord): Promise<void> {
+    if (expandedRunId === run.id) {
+      // Collapse
+      expandedRunId = null;
+      expandedRunDetail = null;
+      expandedRunError = null;
+      showThinking = false;
+      return;
+    }
+    expandedRunId = run.id;
+    expandedRunDetail = null;
+    expandedRunError = null;
+    expandedRunLoading = true;
+    showThinking = false;
+    try {
+      expandedRunDetail = await fetchAgentRunDetail(run.id);
+    } catch (e: unknown) {
+      expandedRunError = e instanceof Error ? e.message : String(e);
+    } finally {
+      expandedRunLoading = false;
+    }
+  }
 
   // -- Loading ----------------------------------------------------------------
 
@@ -280,15 +311,25 @@
     {:else}
       <div class="run-list">
         {#each runs as run (run.id)}
-          <div class="run-card">
-            <div class="run-header">
+          {@const expanded = expandedRunId === run.id}
+          {@const hasOutput = !!run.response_preview || run.has_more_response === 1 || !!run.error}
+          <div class="run-card" class:run-card-expanded={expanded}>
+            <button
+              type="button"
+              class="run-header"
+              class:expandable={hasOutput}
+              onclick={() => hasOutput && toggleRunExpand(run)}
+              title={hasOutput ? (expanded ? "Hide output" : "Show full output") : "No output captured"}
+            >
+              <span class="chevron">{expanded ? "\u25BE" : "\u25B8"}</span>
               <span class="agent-name">{run.agent_name}</span>
               <span class="badge" class:badge-green={run.status === "completed"} class:badge-red={run.status === "failed"} class:badge-yellow={run.status === "running"}>
                 {run.status}
               </span>
+              <span class="muted small trigger-pill" title="trigger / session">{run.trigger}</span>
               <span class="spacer"></span>
               <span class="muted">{formatTime(run.started_at)}</span>
-            </div>
+            </button>
             <div class="run-stats">
               <span>{formatCost(run.cost_usd)}</span>
               <span class="muted">{run.turns} turns</span>
@@ -296,9 +337,55 @@
               {#if run.finished_at}
                 <span class="muted">{Math.round((run.finished_at - run.started_at))}s</span>
               {/if}
+              {#if run.has_thinking === 1}
+                <span class="muted small thinking-pill">thinking</span>
+              {/if}
             </div>
-            {#if run.error}
+            {#if run.error && !expanded}
               <p class="error-text">{run.error}</p>
+            {/if}
+
+            {#if expanded}
+              <div class="run-detail">
+                {#if expandedRunLoading}
+                  <p class="muted">Loading…</p>
+                {:else if expandedRunError}
+                  <p class="error-text">Failed to load: {expandedRunError}</p>
+                {:else if expandedRunDetail}
+                  {#if expandedRunDetail.prompt}
+                    <details class="run-section">
+                      <summary>Prompt</summary>
+                      <pre class="run-text">{expandedRunDetail.prompt}</pre>
+                    </details>
+                  {/if}
+                  {#if expandedRunDetail.response_text}
+                    <div class="run-section">
+                      <div class="section-title">Response</div>
+                      <pre class="run-text">{expandedRunDetail.response_text}</pre>
+                    </div>
+                  {:else if !expandedRunDetail.error}
+                    <p class="muted">No response text captured (run may pre-date v0.4.8).</p>
+                  {/if}
+                  {#if expandedRunDetail.thinking_text}
+                    <div class="run-section">
+                      <button class="thinking-toggle" onclick={() => (showThinking = !showThinking)}>
+                        {showThinking ? "Hide" : "Show"} thinking ({expandedRunDetail.thinking_text.length} chars)
+                      </button>
+                      {#if showThinking}
+                        <pre class="run-text run-thinking">{expandedRunDetail.thinking_text}</pre>
+                      {/if}
+                    </div>
+                  {/if}
+                  {#if expandedRunDetail.error}
+                    <div class="run-section">
+                      <div class="section-title error-title">Error</div>
+                      <pre class="run-text error-text">{expandedRunDetail.error}</pre>
+                    </div>
+                  {/if}
+                {/if}
+              </div>
+            {:else if run.response_preview}
+              <pre class="run-preview">{run.response_preview}{run.has_more_response === 1 ? "…" : ""}</pre>
             {/if}
           </div>
         {/each}
@@ -554,13 +641,105 @@
     border-radius: 6px;
     padding: 0.5rem 0.625rem;
   }
-  .run-header { display: flex; align-items: center; gap: 0.375rem; }
+  .run-card-expanded { border-color: var(--accent-blue); }
+  .run-header {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    text-align: left;
+    font: inherit;
+    cursor: default;
+  }
+  .run-header.expandable { cursor: pointer; }
+  .run-header.expandable:hover { color: var(--text-primary); }
   .run-stats {
     display: flex;
     gap: 0.75rem;
     font-size: 0.6875rem;
     margin-top: 0.25rem;
     padding-left: 0.25rem;
+  }
+  .run-preview {
+    margin: 0.375rem 0 0;
+    padding: 0.375rem 0.5rem;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 4.5em;
+    overflow: hidden;
+    line-height: 1.35;
+  }
+  .run-detail {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .run-section { display: flex; flex-direction: column; gap: 0.25rem; }
+  .section-title {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .section-title.error-title { color: var(--accent-red, #f87171); }
+  .run-text {
+    margin: 0;
+    padding: 0.5rem 0.625rem;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    font-size: 0.7rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 22em;
+    overflow-y: auto;
+    font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+    color: var(--text-primary);
+  }
+  .run-text.run-thinking { background: rgba(168, 85, 247, 0.08); }
+  .thinking-toggle {
+    align-self: flex-start;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    padding: 0.1875rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .thinking-toggle:hover { color: var(--text-primary); border-color: var(--accent-blue); }
+  details.run-section summary {
+    cursor: pointer;
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  details.run-section[open] summary { color: var(--text-primary); }
+  .small { font-size: 0.625rem; }
+  .trigger-pill {
+    background: var(--bg-tertiary);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 9999px;
+  }
+  .thinking-pill {
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    padding: 0.0625rem 0.375rem;
+    border-radius: 9999px;
   }
 
   .cost-card {

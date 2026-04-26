@@ -143,6 +143,10 @@ export class SessionCommands {
               ? existsSync(join(cfg.path, "build-on-termux.sh"))
               : false,
             uptime: s.uptime_start ? formatUptime(new Date(s.uptime_start)) : null,
+            // True when this session is defined in operad.toml. Lets the
+            // dashboard group "registered" (config-defined) sessions above
+            // ad-hoc/discovered ones in the inactive list.
+            from_config: !!cfg,
           };
         }),
       },

@@ -24,6 +24,8 @@ export interface SessionState {
   path: string | null;
   has_build_script: boolean;
   uptime: string | null;
+  /** True when this session is defined in the user's operad.toml [[session]]. */
+  from_config?: boolean;
 }
 
 /** Phantom process count (informational — killer is disabled) */
@@ -622,7 +624,7 @@ export interface AgentInfo {
   source: "builtin" | "toml" | "project" | "user";
 }
 
-/** Agent run record from /api/agents/runs */
+/** Agent run record from /api/agents/runs (list view — text is preview only). */
 export interface AgentRunRecord {
   id: number;
   agent_name: string;
@@ -637,6 +639,20 @@ export interface AgentRunRecord {
   turns: number;
   error: string | null;
   trigger: string;
+  /** User-supplied prompt that triggered the run (may be null for older runs). */
+  prompt: string | null;
+  /** First ~280 chars of response_text (null when run produced no text). */
+  response_preview: string | null;
+  /** True when full response is longer than the preview — fetch detail to expand. */
+  has_more_response: 0 | 1;
+  /** True when the run captured extended thinking output. */
+  has_thinking: 0 | 1;
+}
+
+/** Full agent run record from /api/agents/runs/<id> — includes complete bodies. */
+export interface AgentRunDetail extends Omit<AgentRunRecord, "response_preview" | "has_more_response" | "has_thinking"> {
+  response_text: string | null;
+  thinking_text: string | null;
 }
 
 /** Per-agent cost summary from /api/agents/costs */

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Plans aggregation panel** (`PlansPanel.svelte`) — User / Current Project / All Projects tabs with JSON download, mirroring the existing Skills/Hooks/Commands/Subagents/Memories layout. Closes the gap where project-scoped plans were not visible across projects.
+- **CLAUDE.md aggregation panel** (`ClaudeMdPanel.svelte`) — same three-tab structure. Memory snapshots (under `~/.claude/projects/{mangled}/memory/*.md`) keep the existing `memory` badge.
+- **Agent run output persistence** — `agent_runs` table extended with `prompt`, `response_text`, `thinking_text` columns (idempotent migration via `PRAGMA table_info` introspection). Standalone runs, chat, OODA cycles, roundtables, and scheduled runs all now persist what the agent actually said. New `GET /api/agents/runs/{id}` endpoint returns the full body; the list endpoint serves a 280-char `response_preview` plus `has_more_response` / `has_thinking` flags to keep payloads bounded.
+- **Agent panel runs tab** — clicking a run reveals the full prompt (collapsed by default), response text, optional thinking text behind a toggle, and any error. Existing runs from before the migration show as "No response text captured (run may pre-date v0.4.8)".
+- **Inactive-session sort + grouping** (`SessionTable.svelte`) — inactive sessions split into **Registered** (defined in `operad.toml`) and **Ad-hoc** subsections, with Registered always on top. New chronological/alphabetical sort toggle (chronological default — recently-active sessions float to the top via `uptime_start` desc, `last_health_check` fallback). Backend now emits `from_config: boolean` per session; older daemons that omit it fall through to the Ad-hoc bucket.
+
 ## [0.4.7] — 2026-04-20
 
 Customization aggregation extended beyond hooks and skills. Adds slash commands, subagent definitions, memories, and the cross-tool `AGENTS.md` file (Claude Code + Codex + OpenCode compat). Every type supports User / Current Project / All Projects tabs with JSON download.

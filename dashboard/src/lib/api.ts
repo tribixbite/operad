@@ -762,13 +762,19 @@ export async function runAgent(name: string, prompt?: string): Promise<{ ok: boo
   return checkedJson(res);
 }
 
-/** Fetch agent run history */
+/** Fetch agent run history (list view — response_preview only). */
 export async function fetchAgentRuns(opts?: { agent?: string; limit?: number }): Promise<import("./types").AgentRunRecord[]> {
   const params = new URLSearchParams();
   if (opts?.agent) params.set("agent", opts.agent);
   if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   const res = await fetch(`/api/agents/runs${qs ? `?${qs}` : ""}`);
+  return checkedJson(res);
+}
+
+/** Fetch one agent run by ID with full prompt / response_text / thinking_text. */
+export async function fetchAgentRunDetail(id: number): Promise<import("./types").AgentRunDetail> {
+  const res = await fetch(`/api/agents/runs/${id}`);
   return checkedJson(res);
 }
 

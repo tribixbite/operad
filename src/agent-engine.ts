@@ -216,7 +216,7 @@ export class AgentEngine {
       const sdkDef = toSdkAgentMap([masterAgent])["master-controller"];
       const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
 
-      const runId = memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone");
+      const runId = memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone", oodaPrompt);
 
       const result = await sdkBridge.runStandaloneAgent(
         "master-controller", sdkDef, cwd, oodaPrompt, masterAgent.max_budget_usd,
@@ -228,6 +228,8 @@ export class AgentEngine {
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         turns: result.turns,
+        responseText: result.responseText,
+        thinkingText: result.thinkingText || undefined,
       });
 
       // Parse and execute structured OODA actions from response text
@@ -603,8 +605,9 @@ export class AgentEngine {
     const contextPrefix = this.buildAgentContext(agentName);
     const enrichedPrompt = contextPrefix ? `${contextPrefix}\n\n---\n\n${prompt}` : prompt;
 
-    // Track the run in DB
-    const runId = memoryDb?.startAgentRun(agentName, "standalone", "standalone") ?? 0;
+    // Track the run in DB — store the user-supplied prompt (not the enriched
+    // version) so the dashboard shows what was requested, not the framing.
+    const runId = memoryDb?.startAgentRun(agentName, "standalone", "standalone", prompt) ?? 0;
 
     log.info(`Starting standalone agent run: ${agentName} (runId=${runId})`);
     this.ctx.broadcast("agent_run_update", { agentName, runId, status: "running" });
@@ -621,6 +624,8 @@ export class AgentEngine {
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
           turns: result.turns,
+          responseText: result.responseText,
+          thinkingText: result.thinkingText || undefined,
         });
       }
 
@@ -682,7 +687,9 @@ export class AgentEngine {
     // Resolve cwd and run
     const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
     const sdkDef = toSdkAgentMap([agent])[agentName];
-    const runId = memoryDb.startAgentRun(agentName, "chat", "manual");
+    // Persist the raw user prompt (without history/context framing) so the
+    // dashboard can show "what the user said" without leaking system context.
+    const runId = memoryDb.startAgentRun(agentName, "chat", "manual", userPrompt);
 
     ws.send(JSON.stringify({ type: "agent_chat_start", agentName }));
     this.ctx.broadcast("agent_run_update", { agentName, runId, status: "running" });
@@ -711,13 +718,16 @@ export class AgentEngine {
       // Extract learnings and personality updates from response
       this.extractAgentActions(agentName, result.responseText);
 
-      // Complete run tracking
+      // Complete run tracking — also stash response/thinking text so the dashboard
+      // Runs tab can show what the agent actually said (not just metadata).
       memoryDb.completeAgentRun(runId, "completed", {
         sessionId: result.sessionId,
         costUsd: result.costUsd,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         turns: result.turns,
+        responseText: result.responseText,
+        thinkingText: result.thinkingText || undefined,
       });
 
       try {
@@ -817,7 +827,8 @@ export class AgentEngine {
 
       const fullPrompt = promptParts.join("\n");
       const sdkDef = toSdkAgentMap([agent])[agentName];
-      const runId = memoryDb.startAgentRun(agentName, `roundtable:${topic.slice(0, 50)}`, "standalone");
+      // Save the topic (not the full constructed prompt) — keeps the runs view scannable.
+      const runId = memoryDb.startAgentRun(agentName, `roundtable:${topic.slice(0, 50)}`, "standalone", topic);
 
       try {
         const result = await sdkBridge.runStandaloneAgent(
@@ -830,6 +841,8 @@ export class AgentEngine {
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
           turns: result.turns,
+          responseText: result.responseText,
+          thinkingText: result.thinkingText || undefined,
         });
 
         // Extract learnings from roundtable response
@@ -913,7 +926,9 @@ export class AgentEngine {
     const sdkDef = toSdkAgentMap([agent])[schedule.agent_name];
     const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
     const budget = schedule.max_budget_usd ?? agent.max_budget_usd;
-    const runId = memoryDb.startAgentRun(schedule.agent_name, `schedule:${schedule.schedule_name}`, "standalone");
+    const runId = memoryDb.startAgentRun(
+      schedule.agent_name, `schedule:${schedule.schedule_name}`, "standalone", schedule.prompt,
+    );
 
     try {
       const result = await sdkBridge.runStandaloneAgent(
@@ -926,6 +941,8 @@ export class AgentEngine {
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         turns: result.turns,
+        responseText: result.responseText,
+        thinkingText: result.thinkingText || undefined,
       });
 
       // Parse and execute any actions from the response

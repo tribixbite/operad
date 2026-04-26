@@ -278,7 +278,10 @@ const SCHEMA_STATEMENTS: string[] = [
     output_tokens INTEGER DEFAULT 0,
     turns INTEGER DEFAULT 0,
     error TEXT,
-    trigger TEXT NOT NULL DEFAULT 'standalone'
+    trigger TEXT NOT NULL DEFAULT 'standalone',
+    prompt TEXT,
+    response_text TEXT,
+    thinking_text TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_runs_agent ON agent_runs(agent_name)`,
   `CREATE INDEX IF NOT EXISTS idx_runs_started ON agent_runs(started_at DESC)`,
@@ -610,7 +613,31 @@ export class MemoryDb {
     for (const stmt of SCHEMA_STATEMENTS) {
       this.db.exec(stmt);
     }
+    this.applyMigrations();
     this.log.info(`Memory database initialized at ${this.dbPath}`);
+  }
+
+  /**
+   * Apply idempotent ALTER TABLE migrations for upgrading existing databases.
+   * SQLite lacks `ADD COLUMN IF NOT EXISTS`, so we introspect with PRAGMA
+   * table_info() and only ALTER when the column is missing.
+   */
+  private applyMigrations(): void {
+    if (!this.db) return;
+    const ensureColumn = (table: string, column: string, defSql: string) => {
+      const cols = (this.db!.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>);
+      if (cols.some(c => c.name === column)) return;
+      try {
+        this.db!.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${defSql}`);
+        this.log.info(`Migrated: added ${table}.${column}`);
+      } catch (err) {
+        this.log.warn(`Migration failed for ${table}.${column}: ${err}`);
+      }
+    };
+    // 0.4.8 — capture agent run input/output text for dashboard inspection
+    ensureColumn("agent_runs", "prompt", "TEXT");
+    ensureColumn("agent_runs", "response_text", "TEXT");
+    ensureColumn("agent_runs", "thinking_text", "TEXT");
   }
 
   /** Close the database */
@@ -955,11 +982,12 @@ export class MemoryDb {
     agentName: string,
     sessionName: string,
     trigger: "standalone" | "manual" = "standalone",
+    prompt?: string,
   ): number {
     const db = this.requireDb();
     const result = db.prepare(
-      `INSERT INTO agent_runs (agent_name, session_name, trigger) VALUES (?, ?, ?)`,
-    ).run(agentName, sessionName, trigger);
+      `INSERT INTO agent_runs (agent_name, session_name, trigger, prompt) VALUES (?, ?, ?, ?)`,
+    ).run(agentName, sessionName, trigger, prompt ?? null);
     return Number(result.lastInsertRowid);
   }
 
@@ -967,33 +995,63 @@ export class MemoryDb {
   completeAgentRun(
     runId: number,
     status: "completed" | "failed" | "cancelled",
-    result: { sessionId?: string; costUsd?: number; inputTokens?: number; outputTokens?: number; turns?: number; error?: string },
+    result: {
+      sessionId?: string;
+      costUsd?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      turns?: number;
+      error?: string;
+      responseText?: string;
+      thinkingText?: string;
+    },
   ): void {
     const db = this.requireDb();
     db.prepare(
       `UPDATE agent_runs SET
         status = ?, finished_at = unixepoch(), session_id = ?,
         cost_usd = ?, input_tokens = ?, output_tokens = ?,
-        turns = ?, error = ?
+        turns = ?, error = ?,
+        response_text = ?, thinking_text = ?
       WHERE id = ?`,
     ).run(
       status, result.sessionId ?? null,
       result.costUsd ?? 0, result.inputTokens ?? 0, result.outputTokens ?? 0,
-      result.turns ?? 0, result.error ?? null, runId,
+      result.turns ?? 0, result.error ?? null,
+      result.responseText ?? null, result.thinkingText ?? null,
+      runId,
     );
   }
 
-  /** Get recent agent runs */
+  /**
+   * Get recent agent runs — returns metadata + a truncated response_preview
+   * (first 280 chars of response_text). Use getAgentRun(id) for the full body.
+   * This keeps the runs list payload bounded even when individual runs produced
+   * tens of KB of output.
+   */
   getAgentRuns(limit = 50, agentName?: string): Record<string, unknown>[] {
     const db = this.requireDb();
+    const cols = `id, agent_name, session_name, session_id, status, started_at,
+      finished_at, cost_usd, input_tokens, output_tokens, turns, error, trigger,
+      prompt,
+      substr(response_text, 1, 280) AS response_preview,
+      (response_text IS NOT NULL AND length(response_text) > 280) AS has_more_response,
+      (thinking_text IS NOT NULL AND length(thinking_text) > 0) AS has_thinking`;
     if (agentName) {
       return db.prepare(
-        `SELECT * FROM agent_runs WHERE agent_name = ? ORDER BY started_at DESC LIMIT ?`,
+        `SELECT ${cols} FROM agent_runs WHERE agent_name = ? ORDER BY started_at DESC LIMIT ?`,
       ).all(agentName, limit);
     }
     return db.prepare(
-      `SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT ?`,
+      `SELECT ${cols} FROM agent_runs ORDER BY started_at DESC LIMIT ?`,
     ).all(limit);
+  }
+
+  /** Fetch a single agent run by id with full prompt/response/thinking text. */
+  getAgentRun(id: number): Record<string, unknown> | null {
+    const db = this.requireDb();
+    const row = db.prepare(`SELECT * FROM agent_runs WHERE id = ?`).get(id);
+    return (row as Record<string, unknown> | undefined) ?? null;
   }
 
   /** Get per-agent cost summary */

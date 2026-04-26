@@ -16,6 +16,8 @@
   import SubagentsPanel from "./SubagentsPanel.svelte";
   import MemoriesPanel from "./MemoriesPanel.svelte";
   import AgentsMdPanel from "./AgentsMdPanel.svelte";
+  import PlansPanel from "./PlansPanel.svelte";
+  import ClaudeMdPanel from "./ClaudeMdPanel.svelte";
 
   // -- Constants --------------------------------------------------------------
 
@@ -744,48 +746,39 @@ Example usage or output
       </div>
       {#if sections.plans}
         <div class="section-body">
-          {#if (data.plans ?? []).length === 0}
-            <p class="muted">No plan files found</p>
-          {:else}
-            <div class="item-list">
-              {#each data.plans ?? [] as plan (plan.path)}
-                <div class="item-row">
-                  <button class="item-header" onclick={() => toggleExpand(plan.path)}>
-                    <span class="chevron">{expandedItem === plan.path ? "▾" : "▸"}</span>
-                    <span class="item-name">{plan.name}</span>
-                    <span class="badge" class:badge-blue={plan.scope === "user"} class:badge-dim={plan.scope === "project"}>
-                      {plan.scope}
-                    </span>
-                    <span class="item-path" title={plan.path}>{shortenPath(plan.path)}</span>
+          <PlansPanel
+            plans={data.plans ?? []}
+            selectedProject={selectedProject}
+            projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
+            onExpand={toggleExpand}
+          />
+          {#if expandedItem && (data.plans ?? []).some(p => p.path === expandedItem)}
+            <hr class="section-divider" />
+            {@const plan = (data.plans ?? []).find(p => p.path === expandedItem)!}
+            <div class="item-content">
+              {#if loadingFile === plan.path}
+                <p class="muted">Loading...</p>
+              {:else if editingItem === plan.path}
+                <textarea
+                  class="edit-area"
+                  bind:value={editBuffer}
+                  rows="20"
+                ></textarea>
+                <div class="edit-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => saveEdit(plan.path)} disabled={savingFile}>
+                    {savingFile ? "Saving..." : "Save"}
                   </button>
-                  {#if expandedItem === plan.path}
-                    <div class="item-content">
-                      {#if loadingFile === plan.path}
-                        <p class="muted">Loading...</p>
-                      {:else if editingItem === plan.path}
-                        <textarea
-                          class="edit-area"
-                          bind:value={editBuffer}
-                          rows="20"
-                        ></textarea>
-                        <div class="edit-actions">
-                          <button class="btn btn-primary btn-sm" onclick={() => saveEdit(plan.path)} disabled={savingFile}>
-                            {savingFile ? "Saving..." : "Save"}
-                          </button>
-                          <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
-                        </div>
-                      {:else}
-                        <div class="file-actions">
-                          <button class="btn btn-sm" onclick={() => startEdit(plan.path)}>Edit</button>
-                          <button class="btn btn-sm" onclick={() => handleDownload(plan.path)}>Download</button>
-                          <button class="btn btn-sm" onclick={() => handleShare(plan.path)}>Share</button>
-                        </div>
-                        <pre class="file-preview">{fileContents[plan.path] ?? ""}</pre>
-                      {/if}
-                    </div>
-                  {/if}
+                  <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
                 </div>
-              {/each}
+              {:else}
+                <div class="file-actions">
+                  <span class="muted small">{plan.name}</span>
+                  <button class="btn btn-sm" onclick={() => startEdit(plan.path)}>Edit</button>
+                  <button class="btn btn-sm" onclick={() => handleDownload(plan.path)}>Download</button>
+                  <button class="btn btn-sm" onclick={() => handleShare(plan.path)}>Share</button>
+                </div>
+                <pre class="file-preview">{fileContents[plan.path] ?? ""}</pre>
+              {/if}
             </div>
           {/if}
         </div>
@@ -809,48 +802,39 @@ Example usage or output
       </div>
       {#if sections.claudeMd}
         <div class="section-body">
-          {#if data.claudeMds.length === 0}
-            <p class="muted">No CLAUDE.md files found</p>
-          {:else}
-            <div class="item-list">
-              {#each data.claudeMds as md (md.path)}
-                <div class="item-row">
-                  <button class="item-header" onclick={() => toggleExpand(md.path)}>
-                    <span class="chevron">{expandedItem === md.path ? "▾" : "▸"}</span>
-                    <span class="item-name">{md.label}</span>
-                    <span class="badge" class:badge-blue={md.scope === "user"} class:badge-dim={md.scope === "project"} class:badge-yellow={md.scope === "memory"}>
-                      {md.scope}
-                    </span>
-                    <span class="item-path" title={md.path}>{shortenPath(md.path)}</span>
+          <ClaudeMdPanel
+            claudeMds={data.claudeMds}
+            selectedProject={selectedProject}
+            projectName={selectedProject ? (selectedProject.split("/").pop() ?? "") : ""}
+            onExpand={toggleExpand}
+          />
+          {#if expandedItem && data.claudeMds.some(m => m.path === expandedItem)}
+            <hr class="section-divider" />
+            {@const md = data.claudeMds.find(m => m.path === expandedItem)!}
+            <div class="item-content">
+              {#if loadingFile === md.path}
+                <p class="muted">Loading...</p>
+              {:else if editingItem === md.path}
+                <textarea
+                  class="edit-area"
+                  bind:value={editBuffer}
+                  rows="20"
+                ></textarea>
+                <div class="edit-actions">
+                  <button class="btn btn-primary btn-sm" onclick={() => saveEdit(md.path)} disabled={savingFile}>
+                    {savingFile ? "Saving..." : "Save"}
                   </button>
-                  {#if expandedItem === md.path}
-                    <div class="item-content">
-                      {#if loadingFile === md.path}
-                        <p class="muted">Loading...</p>
-                      {:else if editingItem === md.path}
-                        <textarea
-                          class="edit-area"
-                          bind:value={editBuffer}
-                          rows="20"
-                        ></textarea>
-                        <div class="edit-actions">
-                          <button class="btn btn-primary btn-sm" onclick={() => saveEdit(md.path)} disabled={savingFile}>
-                            {savingFile ? "Saving..." : "Save"}
-                          </button>
-                          <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
-                        </div>
-                      {:else}
-                        <div class="file-actions">
-                          <button class="btn btn-sm" onclick={() => startEdit(md.path)}>Edit</button>
-                          <button class="btn btn-sm" onclick={() => handleDownload(md.path)}>Download</button>
-                          <button class="btn btn-sm" onclick={() => handleShare(md.path)}>Share</button>
-                        </div>
-                        <pre class="file-preview">{fileContents[md.path] ?? ""}</pre>
-                      {/if}
-                    </div>
-                  {/if}
+                  <button class="btn btn-sm" onclick={cancelEdit}>Cancel</button>
                 </div>
-              {/each}
+              {:else}
+                <div class="file-actions">
+                  <span class="muted small">{md.label}</span>
+                  <button class="btn btn-sm" onclick={() => startEdit(md.path)}>Edit</button>
+                  <button class="btn btn-sm" onclick={() => handleDownload(md.path)}>Download</button>
+                  <button class="btn btn-sm" onclick={() => handleShare(md.path)}>Share</button>
+                </div>
+                <pre class="file-preview">{fileContents[md.path] ?? ""}</pre>
+              {/if}
             </div>
           {/if}
         </div>
