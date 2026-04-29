@@ -77,6 +77,26 @@
     }
   }
 
+  /**
+   * Spawn an additional instance of an already-tracked project.
+   *
+   * The default Open button reuses an existing session for the same path; this
+   * handler explicitly opts into multi-instance creation (daemon registers a
+   * fresh `<name>-N` entry alongside the running one).
+   */
+  async function handleOpenNew(e: Event, project: RecentProject) {
+    e.stopPropagation();
+    actionMsg = null;
+    try {
+      await openSession(project.path, { forceNew: true });
+      actionMsg = `Spawning new instance of ${project.name}...`;
+      await refreshStatus();
+      await loadRecent();
+    } catch (err) {
+      actionMsg = `Failed: ${(err as Error).message}`;
+    }
+  }
+
   async function handleScan() {
     actionMsg = null;
     formBusy = true;
@@ -210,10 +230,18 @@
                   <button
                     class="btn-icon primary"
                     onclick={(e) => handleOpen(e, project)}
-                    title="Open session"
+                    title="Open session (reuses existing entry for this path)"
                   ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
                 {:else}
                   <span class="dot dot-green"></span>
+                {/if}
+                {#if project.status === "running" || project.status === "registered" || project.status === "config"}
+                  <button
+                    class="btn-icon"
+                    onclick={(e) => handleOpenNew(e, project)}
+                    title="Open another instance (registers a parallel session)"
+                    aria-label="Open another instance"
+                  ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8.5 1.5h-1V7H2v1h5.5v5.5h1V8H14V7H8.5z"/></svg></button>
                 {/if}
               </div>
             </div>
@@ -331,6 +359,7 @@
     grid-row: 1 / 3;
     display: flex;
     align-items: center;
+    gap: 0.25rem;
   }
 
   .badge {

@@ -251,9 +251,20 @@ export async function fetchRecent(): Promise<RecentProject[]> {
   return checkedJson<RecentProject[]>(res);
 }
 
-/** Open/start a session by name or path (fuzzy matched) */
-export async function openSession(nameOrPath: string): Promise<void> {
-  await checkedPost(`/api/open/${encodeURIComponent(nameOrPath)}`);
+/**
+ * Open/start a session by name or path (fuzzy matched).
+ *
+ * Default reuses any existing session registered for the path (no duplicate
+ * `foo-2` is created). Pass `{ forceNew: true }` to opt into the multi-instance
+ * flow — the daemon will register a fresh suffixed entry alongside any
+ * existing one.
+ */
+export async function openSession(
+  nameOrPath: string,
+  opts?: { forceNew?: boolean },
+): Promise<void> {
+  const qs = opts?.forceNew ? "?new=1" : "";
+  await checkedPost(`/api/open/${encodeURIComponent(nameOrPath)}${qs}`);
 }
 
 /** Close/remove a session from registry */
