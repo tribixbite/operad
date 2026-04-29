@@ -123,6 +123,7 @@ async function main(): Promise<void> {
     case "tabs":
     case "open":
     case "close":
+    case "dedupe":
     case "suspend":
     case "resume":
     case "suspend-others":
@@ -888,7 +889,7 @@ async function runIpcCommand(): Promise<void> {
       break;
     case "open":
       if (!subArgs[0]) {
-        console.error(`Usage: operad open <path> [--name <n>] [--auto-go] [--priority N]`);
+        console.error(`Usage: operad open <path> [--name <n>] [--auto-go] [--priority N] [--new]`);
         process.exit(1);
       }
       cmd = {
@@ -897,6 +898,9 @@ async function runIpcCommand(): Promise<void> {
         name: getFlag(subArgs, "--name"),
         auto_go: subArgs.includes("--auto-go"),
         priority: getFlag(subArgs, "--priority") ? parseInt(getFlag(subArgs, "--priority")!, 10) : undefined,
+        // Without --new, an existing session for the same path is reused/started
+        // instead of creating a `<name>-2` duplicate. --new forces multi-instance.
+        force_new: subArgs.includes("--new"),
       };
       break;
     case "close":
@@ -905,6 +909,14 @@ async function runIpcCommand(): Promise<void> {
         process.exit(1);
       }
       cmd = { cmd: "close", name: subArgs[0] };
+      break;
+    case "dedupe":
+      // Drop suffixed duplicate registry/config entries for paths where multiple
+      // names map to the same project. Use --dry-run to preview.
+      cmd = {
+        cmd: "dedupe",
+        dry_run: subArgs.includes("--dry-run") || subArgs.includes("-n"),
+      };
       break;
     case "recent":
       cmd = { cmd: "recent", count: subArgs[0] ? parseInt(subArgs[0], 10) : undefined };

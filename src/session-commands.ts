@@ -310,15 +310,28 @@ export class SessionCommands {
   // -- Dynamic session management (open/close/register/clone/create) -----------
 
   /**
-   * Open command — register and start a new dynamic Claude session (supports multi-instance).
-   * Fuzzy-matches path input against config sessions and recent history if the
-   * literal path doesn't exist on disk.
+   * Open command — start a Claude session for `path`.
+   *
+   * Default behaviour is **reuse-existing**: if any config session is already
+   * registered at `path`, this method starts the most appropriate existing
+   * entry instead of registering a new suffixed copy. The dashboard's
+   * Recent/Inactive "Open" button calls this with no `name`, so the user
+   * never accidentally accumulates `foo`, `foo-2`, `foo-3` for the same
+   * project.
+   *
+   * Multi-instance creation is opt-in via `forceNew = true` (CLI `--new`,
+   * REST `?new=1`). Explicitly providing a unique `name` also implies
+   * "create new".
+   *
+   * Fuzzy-matches path input against config sessions and recent history if
+   * the literal path doesn't exist on disk.
    */
   async cmdOpen(
     path: string,
     name?: string,
     autoGo = false,
     priority = 50,
+    forceNew = false,
   ): Promise<IpcResponse> {
     let resolvedPath: string;
 
@@ -348,10 +361,70 @@ export class SessionCommands {
       };
     }
 
-    // Check if any session already exists for this path — create a suffixed instance if so
+    // Find any existing config sessions registered for this path.
     const existingByPath = this.ctx.config.sessions.filter(
       (s) => s.path && resolve(s.path) === resolvedPath,
     );
+
+    // Reuse path: caller didn't ask for a new instance and didn't supply an
+    // explicit name → start (or no-op) the existing session for this path.
+    // This is the dashboard "Open" button behaviour.
+    if (existingByPath.length > 0 && !forceNew && !name) {
+      // Prefer a session that's already running so we don't disturb live state.
+      const runningExisting = existingByPath.find((s) => {
+        const st = this.ctx.state.getSession(s.name);
+        return !!st && (st.status === "running" || st.status === "starting" || st.status === "degraded");
+      });
+      // Otherwise prefer the canonical (un-suffixed) name if present.
+      const canonical = existingByPath.find((s) => s.name === baseName);
+      // Otherwise fall back to whichever entry the registry recorded most recently.
+      const fallback = (() => {
+        const entries = existingByPath
+          .map((s) => ({ s, reg: this.ctx.registry.find(s.name) }))
+          .sort((a, b) => {
+            const at = a.reg?.last_active ? new Date(a.reg.last_active).getTime() : 0;
+            const bt = b.reg?.last_active ? new Date(b.reg.last_active).getTime() : 0;
+            return bt - at;
+          });
+        return entries[0]?.s ?? existingByPath[0];
+      })();
+      const target = (runningExisting ?? canonical ?? fallback).name;
+
+      const targetState = this.ctx.state.getSession(target);
+      if (
+        targetState &&
+        (targetState.status === "running" ||
+          targetState.status === "degraded" ||
+          targetState.status === "starting")
+      ) {
+        this.ctx.log.info(
+          `Open '${resolvedPath}' → reusing already-running session '${target}'`,
+          { session: target },
+        );
+        return {
+          ok: true,
+          data: `Reusing existing session '${target}' (${resolvedPath}) — already running`,
+        };
+      }
+
+      // Re-enable disabled sessions before starting (mirrors cmdStart's behaviour).
+      const cfg = this.ctx.config.sessions.find((s) => s.name === target);
+      if (cfg && !cfg.enabled) {
+        cfg.enabled = true;
+        this.ctx.log.info(`Re-enabled session '${target}' for on-demand open`, { session: target });
+      }
+      const started = await this.ctx.startSession(target);
+      this.ctx.log.info(
+        `Open '${resolvedPath}' → starting existing session '${target}' (${started ? "ok" : "failed"})`,
+        { session: target },
+      );
+      return {
+        ok: started,
+        data: started
+          ? `Started existing session '${target}' (${resolvedPath})`
+          : `Failed to start existing session '${target}'`,
+      };
+    }
 
     let sessionName: string;
     if (existingByPath.length === 0) {
@@ -364,8 +437,11 @@ export class SessionCommands {
         };
       }
       sessionName = baseName;
+    } else if (name && !this.ctx.config.sessions.some((s) => s.name === name)) {
+      // Caller supplied an explicit name that isn't taken — honour it as-is.
+      sessionName = name;
     } else {
-      // Multi-instance — find next available suffix
+      // Explicit multi-instance create — find next available suffix.
       const pattern = new RegExp(
         `^${baseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:-\\d+)?$`,
       );
@@ -416,6 +492,139 @@ export class SessionCommands {
       ok: true,
       data: `Opened '${sessionName}' (${entry.path})${started ? " — started" : " — registered but not started"}`,
     };
+  }
+
+  /**
+   * Dedupe command — collapse duplicate registry/config entries that share a path.
+   *
+   * Older versions of cmdOpen unconditionally suffixed when a path already had
+   * a registered session, so clicking "Open" in the dashboard repeatedly grew
+   * `foo`, `foo-2`, `foo-3` … all bound to the same project (and sometimes the
+   * same Claude session_id). This command cleans up that accumulation:
+   *
+   * For each path with multiple registry entries we keep one "winner":
+   *   1. The unique entry whose tmux session is live (if any), else
+   *   2. The entry whose state is currently running, else
+   *   3. The canonical (un-suffixed) name, else
+   *   4. The most-recently-active registry entry.
+   *
+   * All other entries for the same path are removed from the registry, the
+   * live session config list, and persistent state — but only when the entry
+   * has no live tmux session (we never tear down a running session as part of
+   * dedupe; if two entries both still have live tmux, neither is dropped and
+   * we report the conflict).
+   *
+   * `dryRun = true` returns the plan without mutating anything.
+   */
+  async cmdDedupe(dryRun = false): Promise<IpcResponse> {
+    type Plan = {
+      path: string;
+      kept: string;
+      removed: string[];
+      kept_reason: string;
+      conflicts: string[];
+    };
+
+    // Group config sessions by canonical path.
+    const byPath = new Map<string, SessionConfig[]>();
+    for (const s of this.ctx.config.sessions) {
+      if (!s.path) continue;
+      const key = resolve(s.path);
+      const arr = byPath.get(key) ?? [];
+      arr.push(s);
+      byPath.set(key, arr);
+    }
+
+    const plans: Plan[] = [];
+
+    for (const [pathKey, entries] of byPath) {
+      if (entries.length < 2) continue; // unique — nothing to dedupe
+
+      // Classify each candidate.
+      const annotated = entries.map((s) => {
+        const st = this.ctx.state.getSession(s.name);
+        const tmuxAlive = sessionExists(s.name);
+        const stateRunning =
+          !!st && (st.status === "running" || st.status === "starting" || st.status === "degraded");
+        const reg = this.ctx.registry.find(s.name);
+        const lastActive = reg?.last_active ? new Date(reg.last_active).getTime() : 0;
+        return { s, st, tmuxAlive, stateRunning, lastActive };
+      });
+
+      const liveTmux = annotated.filter((a) => a.tmuxAlive);
+
+      // Pick winner.
+      let winner: typeof annotated[number];
+      let reason: string;
+      const conflicts: string[] = [];
+
+      if (liveTmux.length === 1) {
+        winner = liveTmux[0];
+        reason = "only entry with live tmux";
+      } else if (liveTmux.length > 1) {
+        // Multiple live tmux sessions for the same path — these are real
+        // separate instances the user spawned with --new. Don't tear any down,
+        // just report.
+        winner = liveTmux.sort((a, b) => b.lastActive - a.lastActive)[0];
+        reason = "multiple live tmux instances — keeping all running, only dropping dead duplicates";
+        for (const c of liveTmux) {
+          if (c !== winner) conflicts.push(c.s.name);
+        }
+      } else {
+        // No live tmux — pick by running-state, then canonical name, then recency.
+        const baseName = deriveName(pathKey);
+        winner =
+          annotated.find((a) => a.stateRunning) ??
+          annotated.find((a) => a.s.name === baseName) ??
+          annotated.sort((a, b) => b.lastActive - a.lastActive)[0];
+        reason = annotated.some((a) => a.stateRunning)
+          ? "state marked running"
+          : annotated.some((a) => a.s.name === baseName)
+            ? "canonical (un-suffixed) name"
+            : "most recently active";
+      }
+
+      // Drop everything else that has no live tmux.
+      const droppable = annotated.filter(
+        (a) => a !== winner && !a.tmuxAlive && !conflicts.includes(a.s.name),
+      );
+      if (droppable.length === 0 && conflicts.length === 0) continue;
+
+      plans.push({
+        path: pathKey,
+        kept: winner.s.name,
+        kept_reason: reason,
+        removed: droppable.map((d) => d.s.name),
+        conflicts,
+      });
+    }
+
+    if (!dryRun) {
+      for (const plan of plans) {
+        for (const dropName of plan.removed) {
+          // Stop in case a stale state lingers (no-op if not running).
+          await this.ctx.stopSessionByName(dropName);
+          this.ctx.registry.remove(dropName);
+          this.ctx.config.sessions = this.ctx.config.sessions.filter(
+            (s) => s.name !== dropName,
+          );
+          this.ctx.state.removeSession(dropName);
+          this.ctx.log.info(`Dedupe: removed '${dropName}' (kept '${plan.kept}' for ${plan.path})`, {
+            session: dropName,
+          });
+        }
+      }
+      this.ctx.registry.flush();
+    }
+
+    const summary = {
+      dry_run: dryRun,
+      groups_with_duplicates: plans.length,
+      removed_total: plans.reduce((n, p) => n + p.removed.length, 0),
+      conflict_total: plans.reduce((n, p) => n + p.conflicts.length, 0),
+      plans,
+    };
+    return { ok: true, data: summary };
   }
 
   /** Close command — stop and unregister a dynamic session */

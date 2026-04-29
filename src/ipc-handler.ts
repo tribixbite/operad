@@ -76,10 +76,13 @@ export class IpcHandler {
         return this.ctx.cmdMemory();
 
       case "open":
-        return this.ctx.cmdOpen(cmd.path, cmd.name, cmd.auto_go, cmd.priority);
+        return this.ctx.cmdOpen(cmd.path, cmd.name, cmd.auto_go, cmd.priority, cmd.force_new);
 
       case "close":
         return this.ctx.cmdClose(cmd.name);
+
+      case "dedupe":
+        return this.ctx.cmdDedupe(cmd.dry_run);
 
       case "recent":
         return this.ctx.cmdRecent(cmd.count);

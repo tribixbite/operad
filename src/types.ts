@@ -382,7 +382,8 @@ export type IpcCommand =
   | { cmd: "tabs"; names?: string[] }
   | { cmd: "config" }
   | { cmd: "memory" }
-  | { cmd: "open"; path: string; name?: string; auto_go?: boolean; priority?: number }
+  | { cmd: "open"; path: string; name?: string; auto_go?: boolean; priority?: number; force_new?: boolean }
+  | { cmd: "dedupe"; dry_run?: boolean }
   | { cmd: "close"; name: string }
   | { cmd: "recent"; count?: number }
   | { cmd: "suspend"; name: string }

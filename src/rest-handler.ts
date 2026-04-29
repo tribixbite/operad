@@ -454,16 +454,37 @@ export class RestHandler {
         case "recent":
           resp = this.ctx.cmdRecent(20);
           break;
-        case "open":
+        case "open": {
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Path or name required" } };
-          resp = await this.ctx.cmdOpen(name);
+          // ?new=1 (or body.force_new=true) opts in to multi-instance creation;
+          // by default cmdOpen reuses any existing session for the path.
+          const forceNew = (() => {
+            if (queryParams.get("new") === "1" || queryParams.get("new") === "true") return true;
+            if (body) {
+              try {
+                const parsed = JSON.parse(body) as { force_new?: boolean; new?: boolean };
+                return !!(parsed.force_new ?? parsed.new);
+              } catch { /* ignore non-JSON body */ }
+            }
+            return false;
+          })();
+          resp = await this.ctx.cmdOpen(name, undefined, false, 50, forceNew);
           break;
+        }
         case "close":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Session name required" } };
           resp = await this.ctx.cmdClose(name);
           break;
+        case "dedupe": {
+          if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          // ?dry=1 reports what would be removed without mutating state.
+          const dryRun =
+            queryParams.get("dry") === "1" || queryParams.get("dry") === "true";
+          resp = await this.ctx.cmdDedupe(dryRun);
+          break;
+        }
         case "fix-socket":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           await this.ctx.ensureSocket();
