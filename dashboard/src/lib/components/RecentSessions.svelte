@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fetchRecent, openSession, registerProjects, cloneRepo, createProject } from "$lib/api";
   import { refreshStatus } from "$lib/store.svelte";
+  import { copyToClipboard } from "$lib/format";
   import type { RecentProject } from "$lib/types";
 
   let expanded = $state(false);
@@ -24,6 +25,19 @@
     if (hrs < 24) return `${hrs}h ago`;
     const days = Math.floor(hrs / 24);
     return `${days}d ago`;
+  }
+
+  /**
+   * Absolute calendar date — "May 2", "Apr 26", "2025-12-04" if last year.
+   * Pairs with the relative timeAgo so every row shows both at a glance.
+   */
+  function shortDate(iso: string): string {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    const now = new Date();
+    if (d.getFullYear() !== now.getFullYear()) return d.toISOString().slice(0, 10);
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
   /** Truncate path for display */
@@ -75,6 +89,22 @@
     } catch (err) {
       actionMsg = `Failed: ${(err as Error).message}`;
     }
+  }
+
+  /**
+   * Copy the Claude session_id to the clipboard so the user can resume the
+   * conversation manually with `claude --resume <id>`. Falls back to showing
+   * the id inline when the project has no session_id recorded yet.
+   */
+  async function handleCopyId(e: Event, project: RecentProject) {
+    e.stopPropagation();
+    const id = project.session_id;
+    if (!id) {
+      actionMsg = `${project.name}: no session_id recorded yet`;
+      return;
+    }
+    const ok = await copyToClipboard(id);
+    actionMsg = ok ? `Copied session_id ${id.slice(0, 8)}…` : `Copy failed (${id})`;
   }
 
   /**
@@ -222,10 +252,21 @@
               <div class="recent-info">
                 <span class="recent-name">{project.name}</span>
                 <span class="badge {statusCls(project.status)}">{project.status}</span>
-                <span class="recent-time">{timeAgo(project.last_active)}</span>
+                <span
+                  class="recent-date"
+                  title={new Date(project.last_active).toISOString()}
+                >{shortDate(project.last_active)}</span>
+                <span class="recent-time">· {timeAgo(project.last_active)}</span>
               </div>
               <div class="recent-path">{shortPath(project.path)}</div>
               <div class="recent-actions">
+                <button
+                  class="btn-icon muted"
+                  onclick={(e) => handleCopyId(e, project)}
+                  title={project.session_id ? `Copy session_id (${project.session_id})` : "No session_id yet"}
+                  aria-label="Copy session_id"
+                  disabled={!project.session_id}
+                ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M4.75 1A1.75 1.75 0 0 0 3 2.75v8.5A1.75 1.75 0 0 0 4.75 13H6v1.25A1.75 1.75 0 0 0 7.75 16h6A1.75 1.75 0 0 0 15.5 14.25v-8.5A1.75 1.75 0 0 0 13.75 4H12.5V2.75A1.75 1.75 0 0 0 10.75 1zM4.5 2.75A.25.25 0 0 1 4.75 2.5h6A.25.25 0 0 1 11 2.75v8.5a.25.25 0 0 1-.25.25H4.75a.25.25 0 0 1-.25-.25zM12.5 5.5h1.25a.25.25 0 0 1 .25.25v8.5a.25.25 0 0 1-.25.25h-6a.25.25 0 0 1-.25-.25V13h3A1.75 1.75 0 0 0 12.5 11.25z"/></svg></button>
                 {#if project.status !== "running"}
                   <button
                     class="btn-icon primary"
@@ -342,6 +383,19 @@
     font-size: 0.6875rem;
     color: var(--text-muted);
     white-space: nowrap;
+  }
+  .recent-date {
+    font-size: 0.6875rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .btn-icon.muted {
+    color: var(--text-muted);
+  }
+  .btn-icon.muted:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
   .recent-path {
     /* Bumped from 0.625rem; mono for paths */

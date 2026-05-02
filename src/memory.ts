@@ -154,7 +154,9 @@ export class MemoryMonitor {
   getSessionPid(sessionName: string): number | null {
     try {
       // Use spawnSync to avoid shell injection via session names
-      const result = spawnSync("tmux", ["list-panes", "-t", sessionName, "-F", "#{pane_pid}"], {
+      // `=name` is tmux's exact-match target sigil — without it `-t foo`
+      // prefix-matches and `foo-2` would be returned for `foo`.
+      const result = spawnSync("tmux", ["list-panes", "-t", `=${sessionName}`, "-F", "#{pane_pid}"], {
         encoding: "utf-8",
         timeout: 5000,
       });

@@ -202,9 +202,17 @@ export function listTmuxSessions(): string[] {
     .filter(Boolean);
 }
 
-/** Check if a specific tmux session exists */
+/**
+ * Check if a specific tmux session exists.
+ *
+ * Uses tmux's `=name` exact-match target sigil so `has-session -t foo` does
+ * NOT match a longer-named session like `foo-2`. Without the `=`, tmux falls
+ * back to prefix-matching session names, which would silently report `foo`
+ * exists whenever any `foo-*` session is alive. Names pass `isValidName`
+ * ([a-z0-9-]+) so prefixing `=` is always safe.
+ */
 export function sessionExists(name: string): boolean {
-  const result = spawnSync(TMUX_BIN(),["has-session", "-t", name], {
+  const result = spawnSync(TMUX_BIN(),["has-session", "-t", `=${name}`], {
     timeout: 5000,
     stdio: "ignore",
     env: getCleanEnv(),
@@ -215,7 +223,7 @@ export function sessionExists(name: string): boolean {
 /** Capture the current pane content for a session */
 export function capturePane(sessionName: string, _lines = 5): string {
   // Note: tmux 3.5a doesn't support -l flag for capture-pane
-  const output = tmux("capture-pane", "-t", sessionName, "-p");
+  const output = tmux("capture-pane", "-t", `=${sessionName}`, "-p");
   return output ?? "";
 }
 
@@ -223,10 +231,10 @@ export function capturePane(sessionName: string, _lines = 5): string {
 export function sendKeys(sessionName: string, text: string, pressEnter = true): boolean {
   // Send text and Enter as separate calls — Claude Code's TUI can miss
   // Enter when combined in a single send-keys invocation with text.
-  const textOk = tmux("send-keys", "-t", sessionName, text) !== null;
+  const textOk = tmux("send-keys", "-t", `=${sessionName}`, text) !== null;
   if (!textOk) return false;
   if (pressEnter) {
-    return tmux("send-keys", "-t", sessionName, "Enter") !== null;
+    return tmux("send-keys", "-t", `=${sessionName}`, "Enter") !== null;
   }
   return true;
 }
@@ -411,7 +419,7 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
   }
 
   // Try sending Ctrl-C first for a graceful exit
-  tmux("send-keys", "-t", name, "C-c");
+  tmux("send-keys", "-t", `=${name}`, "C-c");
   await sleep(1000);
 
   // Send "exit" command
@@ -421,7 +429,7 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
   // If still alive, kill it
   if (sessionExists(name)) {
     log.info(`Force-killing session '${name}'`, { session: name });
-    tmux("kill-session", "-t", name);
+    tmux("kill-session", "-t", `=${name}`);
     await sleep(500);
   }
 
@@ -436,12 +444,12 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
 
 /** Kill a tmux session immediately */
 export function killSession(name: string): boolean {
-  return tmux("kill-session", "-t", name) !== null;
+  return tmux("kill-session", "-t", `=${name}`) !== null;
 }
 
 /** Get the number of attached clients for a session */
 export function getAttachedClients(name: string): number {
-  const output = tmux("list-clients", "-t", name);
+  const output = tmux("list-clients", "-t", `=${name}`);
   if (!output) return 0;
   return output.split("\n").filter(Boolean).length;
 }
@@ -468,7 +476,7 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
   tmux("set-option", "-g", "set-titles-string", "#S");
 
   // If there's already a client on this session, nothing to do
-  const targetClients = tmux("list-clients", "-t", sessionName, "-F", "#{client_tty}");
+  const targetClients = tmux("list-clients", "-t", `=${sessionName}`, "-F", "#{client_tty}");
   if (targetClients && targetClients.trim().length > 0) {
     log.info(`Session '${sessionName}' already has a tab`, { session: sessionName });
     const clientTty = targetClients.trim().split("\n")[0];
@@ -490,7 +498,7 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
     const clientName = firstClient.substring(0, colonIdx);
     const clientTty = firstClient.substring(colonIdx + 1);
 
-    const switched = tmux("switch-client", "-c", clientName, "-t", sessionName);
+    const switched = tmux("switch-client", "-c", clientName, "-t", `=${sessionName}`);
     if (switched !== null) {
       log.info(`Switched client '${clientName}' to session '${sessionName}'`, { session: sessionName });
       tmux("refresh-client", "-c", clientName);
@@ -509,7 +517,7 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
  * running inside each tmux pane — their process groups contain the actual work.
  */
 export function getSessionPanePids(sessionName: string): number[] {
-  const output = tmux("list-panes", "-t", sessionName, "-F", "#{pane_pid}");
+  const output = tmux("list-panes", "-t", `=${sessionName}`, "-F", "#{pane_pid}");
   if (!output) return [];
   return output
     .split("\n")

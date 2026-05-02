@@ -619,7 +619,7 @@ export class AndroidPlatform implements Platform {
 
     // If there's already a client on this session, nothing to do
     const targetClientsResult = spawnSync(tmuxBin, [
-      "list-clients", "-t", sessionName, "-F", "#{client_tty}",
+      "list-clients", "-t", `=${sessionName}`, "-F", "#{client_tty}",
     ], {
       encoding: "utf-8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
     });
@@ -639,7 +639,9 @@ export class AndroidPlatform implements Platform {
       writeFileSync(scriptPath, [
         `#!/data/data/com.termux/files/usr/bin/bash`,
         `printf '\\033]0;%s\\007' "$1"`,
-        `exec tmux attach -t "$1"`,
+        // `=name` forces tmux to exact-match the session — without it `attach -t foo`
+        // prefix-matches and could attach to `foo-2` when only the suffixed exists.
+        `exec tmux attach -t "=$1"`,
         "",
       ].join("\n"), { mode: 0o755 });
     } catch { /* best effort — may already exist */ }
@@ -683,7 +685,7 @@ export class AndroidPlatform implements Platform {
       const clientName = firstClient.substring(0, colonIdx);
       const clientTty = firstClient.substring(colonIdx + 1);
 
-      spawnSync(tmuxBin, ["switch-client", "-c", clientName, "-t", sessionName], {
+      spawnSync(tmuxBin, ["switch-client", "-c", clientName, "-t", `=${sessionName}`], {
         timeout: 10_000, stdio: "ignore",
       });
       spawnSync(tmuxBin, ["refresh-client", "-c", clientName], {
