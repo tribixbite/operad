@@ -272,6 +272,25 @@ export async function closeSession(name: string): Promise<void> {
   await checkedPost(`/api/close/${encodeURIComponent(name)}`);
 }
 
+/**
+ * Collapse duplicate registry entries that share a path.
+ *
+ * Pass `{ dryRun: true }` to fetch the plan without mutating state — the
+ * dashboard's Dedupe button uses this for the preview step before asking the
+ * user to apply.
+ */
+export async function dedupeSessions(
+  opts?: { dryRun?: boolean },
+): Promise<import("./types").DedupeResult> {
+  const qs = opts?.dryRun ? "?dry=1" : "";
+  const res = await fetch(`/api/dedupe${qs}`, { method: "POST" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+  }
+  return (await res.json()) as import("./types").DedupeResult;
+}
+
 /** Register projects by scanning a directory (default ~/git) */
 export async function registerProjects(path?: string): Promise<{ registered: string[]; skipped: number; total: number }> {
   const res = await fetch("/api/register", {

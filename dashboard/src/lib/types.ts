@@ -823,6 +823,35 @@ export interface AgentSpecialization {
   updated_at: number;
 }
 
+// -- Dedupe -------------------------------------------------------------------
+
+/** One path's worth of cleanup plan from `tmx dedupe`. */
+export interface DedupePlan {
+  /** Canonical project path that has multiple registered names. */
+  path: string;
+  /** Name of the entry the daemon will keep. */
+  kept: string;
+  /** Why this winner was picked (live tmux, canonical name, recency, …). */
+  kept_reason: string;
+  /** Names dropped from the registry/config when committed. */
+  removed: string[];
+  /**
+   * Names left in place because they have a live tmux session — the user
+   * spawned them deliberately. Reported so the UI can flag the situation
+   * without auto-deleting running work.
+   */
+  conflicts: string[];
+}
+
+/** Daemon response to `cmd: "dedupe"` (or POST /api/dedupe[?dry=1]). */
+export interface DedupeResult {
+  dry_run: boolean;
+  groups_with_duplicates: number;
+  removed_total: number;
+  conflict_total: number;
+  plans: DedupePlan[];
+}
+
 // -- Switchboard --------------------------------------------------------------
 
 /** Switchboard — master control for enabling/disabling subsystems */

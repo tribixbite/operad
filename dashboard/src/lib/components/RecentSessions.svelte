@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { fetchRecent, openSession, registerProjects, cloneRepo, createProject } from "$lib/api";
+  import { fetchRecent, openSession, registerProjects, cloneRepo, createProject, dedupeSessions } from "$lib/api";
   import { refreshStatus } from "$lib/store.svelte";
   import { copyToClipboard } from "$lib/format";
-  import type { RecentProject } from "$lib/types";
+  import type { RecentProject, DedupeResult } from "$lib/types";
 
   let expanded = $state(false);
   let projects = $state<RecentProject[]>([]);
@@ -15,6 +15,13 @@
   let activeForm = $state<"clone" | "create" | null>(null);
   let formValue = $state("");
   let formBusy = $state(false);
+
+  /**
+   * Two-step dedupe state: clicking the button runs a dry-run and stashes the
+   * preview here; the user then either Apply (commit) or dismisses.
+   */
+  let dedupePlan = $state<DedupeResult | null>(null);
+  let dedupeBusy = $state(false);
 
   /** Relative time string (e.g. "2h ago", "3d ago") */
   function timeAgo(iso: string): string {
@@ -127,6 +134,51 @@
     }
   }
 
+  /**
+   * Step 1 of dedupe: ask the daemon for a dry-run plan and stash it for
+   * preview. Showing the plan before mutating state lets the user spot
+   * unexpected removals (e.g. a project they actually wanted under a
+   * non-canonical name).
+   */
+  async function handleDedupePreview() {
+    actionMsg = null;
+    dedupeBusy = true;
+    try {
+      const plan = await dedupeSessions({ dryRun: true });
+      dedupePlan = plan;
+      if (plan.groups_with_duplicates === 0) {
+        actionMsg = "No duplicates found";
+        dedupePlan = null;
+      }
+    } catch (err) {
+      actionMsg = `Dedupe preview failed: ${(err as Error).message}`;
+    } finally {
+      dedupeBusy = false;
+    }
+  }
+
+  /** Step 2 of dedupe: commit the previewed plan. */
+  async function handleDedupeApply() {
+    if (!dedupePlan) return;
+    dedupeBusy = true;
+    try {
+      const applied = await dedupeSessions();
+      actionMsg = `Removed ${applied.removed_total} duplicate entr${applied.removed_total === 1 ? "y" : "ies"}` +
+        (applied.conflict_total > 0 ? ` (${applied.conflict_total} live conflict${applied.conflict_total === 1 ? "" : "s"} preserved)` : "");
+      dedupePlan = null;
+      await refreshStatus();
+      await loadRecent();
+    } catch (err) {
+      actionMsg = `Dedupe failed: ${(err as Error).message}`;
+    } finally {
+      dedupeBusy = false;
+    }
+  }
+
+  function dismissDedupe() {
+    dedupePlan = null;
+  }
+
   async function handleScan() {
     actionMsg = null;
     formBusy = true;
@@ -199,7 +251,7 @@
 
   {#if expanded}
     <div class="panel-body">
-      <!-- Action bar: Scan / Clone / New -->
+      <!-- Action bar: Scan / Clone / New / Dedupe -->
       <div class="action-bar">
         <button class="btn btn-sm" onclick={handleScan} disabled={formBusy} title="Scan ~/git and register all projects">
           Scan
@@ -210,6 +262,12 @@
         <button class="btn btn-sm" class:active={activeForm === "create"} onclick={() => toggleForm("create")} title="Create new project">
           New
         </button>
+        <button
+          class="btn btn-sm"
+          onclick={handleDedupePreview}
+          disabled={dedupeBusy || !!dedupePlan}
+          title="Preview cleanup of duplicate registry entries that share a path"
+        >Dedupe</button>
       </div>
 
       <!-- Inline form for clone/create -->
@@ -226,6 +284,54 @@
             {activeForm === "clone" ? "Clone" : "Create"}
           </button>
         </form>
+      {/if}
+
+      {#if dedupePlan}
+        <div class="dedupe-preview">
+          <div class="dedupe-summary">
+            <strong>Dedupe preview:</strong>
+            {dedupePlan.removed_total} entr{dedupePlan.removed_total === 1 ? "y" : "ies"} to remove
+            {#if dedupePlan.conflict_total > 0}
+              · {dedupePlan.conflict_total} live conflict{dedupePlan.conflict_total === 1 ? "" : "s"} (kept)
+            {/if}
+            across {dedupePlan.groups_with_duplicates} project{dedupePlan.groups_with_duplicates === 1 ? "" : "s"}
+          </div>
+          <ul class="dedupe-list">
+            {#each dedupePlan.plans as plan (plan.path)}
+              <li>
+                <div class="dedupe-path">{shortPath(plan.path)}</div>
+                <div class="dedupe-detail">
+                  <span class="dedupe-keep">keep <code>{plan.kept}</code></span>
+                  <span class="dedupe-reason">— {plan.kept_reason}</span>
+                </div>
+                {#if plan.removed.length > 0}
+                  <div class="dedupe-detail">
+                    <span class="dedupe-remove">remove</span>
+                    {#each plan.removed as r (r)}
+                      <code class="dedupe-name">{r}</code>
+                    {/each}
+                  </div>
+                {/if}
+                {#if plan.conflicts.length > 0}
+                  <div class="dedupe-detail">
+                    <span class="dedupe-conflict">live (kept)</span>
+                    {#each plan.conflicts as c (c)}
+                      <code class="dedupe-name dedupe-name-conflict">{c}</code>
+                    {/each}
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+          <div class="dedupe-actions">
+            <button class="btn btn-sm" onclick={dismissDedupe} disabled={dedupeBusy}>Cancel</button>
+            <button
+              class="btn btn-sm btn-primary"
+              onclick={handleDedupeApply}
+              disabled={dedupeBusy || dedupePlan.removed_total === 0}
+            >Apply</button>
+          </div>
+        </div>
       {/if}
 
       {#if actionMsg}
@@ -344,6 +450,65 @@
   }
   .search-input::placeholder { color: var(--text-muted); }
   .search-input:focus { border-color: var(--accent-blue); }
+
+  .dedupe-preview {
+    margin: 0.5rem 0;
+    padding: 0.625rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    font-size: 0.6875rem;
+  }
+  .dedupe-summary {
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+  }
+  .dedupe-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 18rem;
+    overflow-y: auto;
+  }
+  .dedupe-list li {
+    border-left: 2px solid var(--border);
+    padding-left: 0.5rem;
+  }
+  .dedupe-path {
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+    color: var(--text-secondary);
+    margin-bottom: 0.125rem;
+  }
+  .dedupe-detail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: baseline;
+    margin-top: 0.125rem;
+    color: var(--text-muted);
+  }
+  .dedupe-keep { color: var(--accent-green); font-weight: 600; }
+  .dedupe-remove { color: var(--accent-red); font-weight: 600; }
+  .dedupe-conflict { color: var(--accent-amber, #d29922); font-weight: 600; }
+  .dedupe-reason { font-style: italic; }
+  .dedupe-name {
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    color: var(--text-primary);
+  }
+  .dedupe-name-conflict { border-color: var(--accent-amber, #d29922); }
+  .dedupe-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.375rem;
+    margin-top: 0.5rem;
+  }
 
   .recent-list {
     margin-top: 0.5rem;
