@@ -484,11 +484,29 @@ export class AgentEngine {
       }
     }
 
-    // Accumulated learnings — what you know
+    // Core knowledge — learnings that have graduated via repeated reinforcement.
+    // These are pinned: separate from the rotating Accumulated Knowledge list
+    // so heavily-validated facts don't fight for slot space with newer entries.
+    // Borrowed from Kai's MemoryStore.getPromotionCandidates pattern — once a
+    // memory crosses the reinforcement threshold it stops competing in the
+    // confidence-DESC ordering and gets its own header.
+    const core = memoryDb.getCoreAgentLearnings(agentName, 5);
+    const corePinnedIds = new Set(core.map((c) => c.id));
+    if (core.length > 0) {
+      parts.push("## Core Knowledge (promoted via reinforcement)");
+      for (const c of core) {
+        const conf = c.confidence.toFixed(2);
+        parts.push(`- [${c.category}] ${c.content} (confidence: ${conf}, reinforced ${c.reinforcement_count}x)`);
+      }
+    }
+
+    // Accumulated learnings — what you know. Skip ids already pinned above so
+    // the agent doesn't see the same fact twice.
     const learnings = memoryDb.getAgentLearnings(agentName, 10);
-    if (learnings.length > 0) {
+    const fresh = learnings.filter((l) => !corePinnedIds.has(l.id as number));
+    if (fresh.length > 0) {
       parts.push("## Your Accumulated Knowledge");
-      for (const l of learnings) {
+      for (const l of fresh) {
         const conf = (l.confidence as number).toFixed(2);
         const reinforced = (l.reinforcement_count as number) > 1 ? ` (reinforced ${l.reinforcement_count}x)` : "";
         parts.push(`- [${l.category}] ${l.content} (confidence: ${conf}${reinforced})`);

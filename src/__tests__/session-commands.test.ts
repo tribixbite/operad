@@ -27,7 +27,8 @@ import { SessionCommands } from "../session-commands.js";
 import { Registry } from "../registry.js";
 import { StateManager } from "../state.js";
 import type { OrchestratorContext } from "../orchestrator-context.js";
-import type { TmxConfig, SessionConfig, Logger } from "../types.js";
+import type { TmxConfig, SessionConfig } from "../types.js";
+import type { Logger } from "../log.js";
 
 function silentLog(): Logger {
   const noop = () => {};

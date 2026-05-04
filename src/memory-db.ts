@@ -1488,6 +1488,48 @@ export class MemoryDb {
     ).all(agentName, limit);
   }
 
+  /**
+   * Get an agent's "core" learnings — the ones reinforced enough times that
+   * they should be pinned in every agent prompt rather than rotating with
+   * the recent-confidence list. Mirrors Kai's MemoryStore.getPromotionCandidates:
+   * once a fact has graduated through repeated reinforcement, it stops
+   * competing for slot space with newer, less-reinforced material.
+   *
+   * Sorted by `reinforcement_count * confidence` (a graduation score), with
+   * hard floors so a single-shot high-confidence note never gets promoted.
+   * Floors are deliberately conservative — we'd rather under-pin than have
+   * the prompt repeat the agent's whole long-term memory.
+   */
+  getCoreAgentLearnings(
+    agentName: string,
+    limit = 5,
+    minReinforcement = 3,
+    minConfidence = 0.7,
+  ): Array<{
+    id: number;
+    category: string;
+    content: string;
+    confidence: number;
+    reinforcement_count: number;
+  }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT id, category, content, confidence, reinforcement_count
+         FROM agent_learnings
+        WHERE agent_name = ?
+          AND reinforcement_count >= ?
+          AND confidence >= ?
+        ORDER BY (reinforcement_count * confidence) DESC, last_reinforced_at DESC
+        LIMIT ?`,
+    ).all(agentName, minReinforcement, minConfidence, limit) as Array<{
+      id: number;
+      category: string;
+      content: string;
+      confidence: number;
+      reinforcement_count: number;
+    }>;
+  }
+
   /** Decay old learnings with low reinforcement */
   decayLearnings(agentName: string, olderThanDays = 30): number {
     const db = this.requireDb();

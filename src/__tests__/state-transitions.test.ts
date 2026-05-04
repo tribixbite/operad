@@ -15,7 +15,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 
 import { StateManager } from "../state.js";
 import { VALID_TRANSITIONS } from "../types.js";
-import type { SessionStatus, SessionConfig, Logger } from "../types.js";
+import type { SessionStatus, SessionConfig } from "../types.js";
+import type { Logger } from "../log.js";
 
 function silentLog(): Logger {
   const noop = () => {};
