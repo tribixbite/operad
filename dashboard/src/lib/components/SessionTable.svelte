@@ -511,16 +511,46 @@
   .unit { color: var(--text-muted); margin-left: 1px; }
   .td-actions {
     text-align: right;
-    white-space: nowrap;
+    /*
+     * Display the action buttons as a flex row that wraps when too
+     * many icons crowd the cell — crucial on phone viewports where 6
+     * 44 px tap targets exceed the column's 8.5 rem column hint and
+     * used to clip past the table's right edge. Wrapping below the
+     * primary actions keeps every tap target reachable without
+     * forcing horizontal scroll.
+     */
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.25rem;
+    align-items: center;
   }
-  .td-actions :global(.btn-icon) {
-    margin-left: 0.25rem;
-  }
+  /* Drop the legacy margin-left now that gap handles spacing. */
+  .td-actions :global(.btn-icon) { margin-left: 0; }
   .td-expand {
     padding: 0.25rem 0.375rem 0.75rem;
     border-top: none;
     max-height: 70vh;
     overflow-y: auto;
+    /*
+     * Hard-cap horizontal overflow. Without this, a long pane-output
+     * line, file-explorer entry, or unwrapped error string forces the
+     * whole table into horizontal scroll on phone viewports — which
+     * makes the header-row action buttons look clipped at the right.
+     * Children that genuinely need scroll (FileExplorer's grid) declare
+     * their own overflow-x:auto, which still works under the parent cap.
+     */
+    max-width: 100%;
+    overflow-x: hidden;
+    box-sizing: border-box;
+  }
+  /* Force every direct child of the expand cell to stay inside the cell
+   * width. Scoped via :global() because Svelte component CSS is scoped
+   * to the component by default and these are children rendered by
+   * other components (ScriptRunner, FileExplorer, etc). */
+  .td-expand :global(> *) {
+    max-width: 100%;
+    box-sizing: border-box;
   }
   .session-name {
     font-weight: 600;
@@ -600,7 +630,14 @@
   @media (max-width: 768px) {
     .session-table { font-size: 0.6875rem; }
     thead th { font-size: 0.5625rem; padding: 0 0.25rem 0.375rem; }
-    .th-actions { width: 6rem; }
+    /*
+     * Drop the fixed actions-column width on phone viewports — the
+     * desktop hint (8.5 rem) was sized for 28 px buttons. With 44 px
+     * touch targets and 6+ icons per running-claude row, capping the
+     * column forced overflow. `auto` lets the column take whatever
+     * width its (now wrap-capable) flex content needs.
+     */
+    .th-actions { width: auto; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }
