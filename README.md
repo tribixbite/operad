@@ -77,16 +77,19 @@ Session types: `claude` (Claude Code with readiness detection), `daemon` (long-r
 | `operad stop <name>` | Stop a specific session |
 | `operad restart <name>` | Restart a specific session |
 | `operad go <name>` | Send "go" to a Claude session |
-| `operad open <path>` | Register and start a dynamic session |
+| `operad open <path>` | Register and start a session for `<path>`. Reuses an existing entry if one is already registered for the same path; pass `--new` to deliberately spawn a parallel suffixed instance. |
 | `operad close <name>` | Stop and unregister a dynamic session |
+| `operad dedupe [--dry-run]` | Collapse duplicate registry entries that share a path. Live tmux sessions are never torn down — only stale duplicates are removed. |
 | `operad recent` | Recent Claude projects from history |
 | `operad tabs` | Open terminal tabs for running sessions |
 | `operad memory` | System memory + per-session RSS |
 | `operad suspend <name>` | SIGSTOP a session |
 | `operad resume <name>` | SIGCONT a session |
+| `operad watch` | Tail the daemon log for state-machine transitions, health checks, and IPC events. |
 | `operad logs` | Stream daemon logs |
 | `operad doctor` | Diagnose install issues |
-| `operad upgrade` | Rebuild and hot-swap daemon |
+| `operad install-tmux` | Install tmux + recommended plugins for first-time setup. |
+| `operad upgrade` | Rebuild from a git checkout and hot-swap the daemon. (npm/bun installs: `bun add -g operadic@latest` or `npm i -g operadic@latest`.) |
 | `operad shutdown` | Stop daemon (sessions persist in tmux) |
 
 ## Dashboard

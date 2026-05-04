@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { IpcClient } from "./ipc.js";
 import { Daemon } from "./daemon.js";
 import { loadConfig, findConfigPath, validateConfigFile } from "./config.js";
@@ -290,12 +290,28 @@ async function runUpgrade(): Promise<void> {
   const orcDir = join(dirname(realpathSync(__filename)), "..");
   // Refuse on npm-installed copies — they have no build.cjs.
   if (!existsSync(join(orcDir, "build.cjs"))) {
+    // Detect the package manager from the install path so we can show ONE
+    // matching command instead of a generic dump. bun's global root looks
+    // like `…/.bun/install/global/node_modules/operadic`; npm's default is
+    // `…/lib/node_modules/operadic` (both POSIX and `/usr/local/lib/...`).
+    let recommended: string;
+    if (orcDir.includes(`${sep}.bun${sep}install${sep}global${sep}`)) {
+      recommended = `${CYAN}bun add -g operadic@latest${RESET}`;
+    } else if (orcDir.includes(`${sep}lib${sep}node_modules${sep}`)) {
+      recommended = `${CYAN}npm install -g operadic@latest${RESET}`;
+    } else {
+      recommended =
+        `${CYAN}bun add -g operadic@latest${RESET}    ${DIM}# if installed via bun${RESET}\n` +
+        `  ${CYAN}npm install -g operadic@latest${RESET}  ${DIM}# if installed via npm${RESET}`;
+    }
     console.error(
       `${RED}'operad upgrade' is for git checkouts only.${RESET}\n` +
-      `Detected install at: ${orcDir}\n\n` +
-      `For npm/bun installs, upgrade with:\n` +
-      `  ${CYAN}bun add -g operadic@latest${RESET}\n` +
-      `  ${CYAN}npm install -g operadic@latest${RESET}\n`
+      `${DIM}Detected install at: ${orcDir}${RESET}\n\n` +
+      `Run instead:\n` +
+      `  ${recommended}\n\n` +
+      `${DIM}Then either restart your shell or re-run the watchdog. The new${RESET}\n` +
+      `${DIM}binary takes over on next daemon shutdown — running sessions${RESET}\n` +
+      `${DIM}stay live in tmux throughout.${RESET}\n`
     );
     process.exit(1);
   }

@@ -44,6 +44,27 @@ jobs:
       - name: Smoke test (--version)
         run: node dist/tmx.js --version
 
+      # Build the dashboard on every matrix OS so a Svelte syntax error,
+      # Tailwind theme regression, or types-vs-types drift between CLI and
+      # dashboard fails the build instead of slipping through to the
+      # ubuntu-only e2e job. fix-android-binaries.mjs is a no-op off Android.
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: bun install
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: bun run build
+
+      - name: Verify dashboard bundle exists (POSIX)
+        if: runner.os != 'Windows'
+        run: test -f dashboard/dist/index.html
+
+      - name: Verify dashboard bundle exists (Windows)
+        if: runner.os == 'Windows'
+        run: Test-Path dashboard/dist/index.html
+        shell: pwsh
+
       - name: Check API docs updated if API source changed
         if: github.event_name == 'pull_request' && runner.os != 'Windows'
         run: |
