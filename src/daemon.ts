@@ -429,6 +429,20 @@ export class Daemon {
     // (bun's glibc-runner strips it; without it /usr/bin/env fails)
     ensureTmuxLdPreload(this.log);
 
+    // Wire the Android Termux:API circuit breaker into our structured
+    // logger so its open/close events surface in `tmx watch` and the
+    // dashboard log stream instead of vanishing into stderr. No-op on
+    // non-Android platforms (the import resolves to a stub).
+    if (process.env.TERMUX_VERSION || process.env.PREFIX?.includes("com.termux")) {
+      try {
+        const { setAndroidLogger } = await import("./platform/android.js");
+        setAndroidLogger((level, msg) => {
+          if (level === "warn") this.log.warn(msg);
+          else this.log.info(msg);
+        });
+      } catch { /* non-Android — ignore */ }
+    }
+
     // Adopt existing tmux sessions
     this.adoptExistingSessions();
 

@@ -92,8 +92,25 @@ const allApiPids = new Set<number>();
  */
 let circuitBreakerFailCount = 0;
 let circuitBreakerOpenUntil = 0;
+let circuitBreakerWarnedAt = 0; // throttle so we don't spam every reopen
 const CIRCUIT_BREAKER_THRESHOLD = 3;  // trip after 3 consecutive timeouts
 const CIRCUIT_BREAKER_COOLDOWN = 30_000; // 30s cooldown before retrying
+
+/**
+ * Optional structured-log sink wired up by the daemon so the circuit
+ * breaker's open/close events appear in `tmx watch` / `tmx logs` instead
+ * of disappearing into stderr. Set via setAndroidLogger() at boot.
+ */
+type CbLog = (level: "warn" | "info", msg: string) => void;
+let cbLog: CbLog = (level, msg) => {
+  // Default sink: write to stderr so the message lands in the daemon's
+  // captured stderr log even before setAndroidLogger() runs.
+  process.stderr.write(`[android] ${level.toUpperCase()} ${msg}\n`);
+};
+/** Wire up a structured logger for the Termux:API circuit breaker. */
+export function setAndroidLogger(log: CbLog): void {
+  cbLog = log;
+}
 /**
  * Hard cap on concurrent termux-api processes to prevent boot-time burst.
  * Covers ALL termux-api calls (notifications, removes, battery, toast).
@@ -189,6 +206,17 @@ function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
       circuitBreakerFailCount++;
       if (circuitBreakerFailCount >= CIRCUIT_BREAKER_THRESHOLD) {
         circuitBreakerOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN;
+        // Throttle the warn line so a sustained outage doesn't spam logs
+        // every cooldown cycle. Re-warn no more than once per minute.
+        if (Date.now() - circuitBreakerWarnedAt > 60_000) {
+          cbLog(
+            "warn",
+            `Termux:API circuit breaker opened — dropping all termux-api calls ` +
+            `for ${CIRCUIT_BREAKER_COOLDOWN / 1000}s after ${CIRCUIT_BREAKER_THRESHOLD} ` +
+            `consecutive timeouts. Notifications/battery/etc disabled until service recovers.`,
+          );
+          circuitBreakerWarnedAt = Date.now();
+        }
         // Kill all tracked process groups — they're all stuck
         for (const p of allApiPids) {
           try { process.kill(-p, "SIGKILL"); } catch { /* already dead */ }
@@ -205,7 +233,14 @@ function spawnTermuxApi(bin: string, args: string[], timeoutMs = 8000): void {
       // Only reset circuit breaker for processes that exited naturally —
       // NOT for processes we killed via timeout (they'd undo the breaker trip)
       if (!killedByTimeout) {
+        const wasOpen = circuitBreakerOpenUntil > 0 && circuitBreakerFailCount > 0;
         circuitBreakerFailCount = 0;
+        if (wasOpen && circuitBreakerOpenUntil <= Date.now()) {
+          // Cooldown elapsed and a real call succeeded — service is back.
+          cbLog("info", "Termux:API circuit breaker closed — service responsive again.");
+          circuitBreakerOpenUntil = 0;
+          circuitBreakerWarnedAt = 0;
+        }
       }
     });
     child.on("error", () => {

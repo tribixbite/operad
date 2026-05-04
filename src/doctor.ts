@@ -29,6 +29,9 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResul
   results.push(checkConfig(opts.configPath));
   results.push(checkStateDir(platformId));
   results.push(checkDashboard());
+  results.push(checkGit());
+  results.push(checkAdbBinary(opts.configPath));
+  results.push(await checkSqliteDriver());
 
   if (!opts.skipSlowChecks) {
     results.push(await checkPort());
@@ -38,6 +41,150 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResul
   results.push(await checkDatabase(platformId));
 
   return results;
+}
+
+/**
+ * Probe `git --version`. Operad's session paths are usually inside git
+ * repos, and `src/git-info.ts` shells out to `git` for the dashboard's
+ * branch/commit display. Missing git doesn't break the daemon outright,
+ * so this is a `warn`, not `fail`.
+ */
+function checkGit(): CheckResult {
+  const result = spawnSync("git", ["--version"], { encoding: "utf8", timeout: 3000 });
+  if (result.error || result.status !== 0) {
+    let fix: string;
+    if (process.platform === "win32") {
+      fix = "winget install --id Git.Git -e";
+    } else if (process.platform === "darwin") {
+      fix = "brew install git    # or: xcode-select --install";
+    } else if (process.env.TERMUX_VERSION || process.env.PREFIX?.includes("com.termux")) {
+      fix = "pkg install git";
+    } else {
+      fix = "sudo apt install git    # or: sudo dnf install git / sudo pacman -S git";
+    }
+    return {
+      name: "git",
+      status: "warn",
+      message: "git not on PATH — branch/commit display will be empty",
+      fix,
+    };
+  }
+  return { name: "git", status: "ok", message: result.stdout.trim().split("\n")[0] };
+}
+
+/**
+ * Probe the `adb` binary if the user has `[adb] enabled = true` in their
+ * config. Without this check, missing adb at boot causes a 50 s connect
+ * timeout (configured by `connect_timeout_s`) before the daemon gives
+ * up and continues — long enough that users assume the daemon hung.
+ *
+ * Reads the config file directly (avoids the full TOML loader) since
+ * doctor is meant to run before boot.
+ */
+function checkAdbBinary(configPath?: string): CheckResult {
+  const defaultPath =
+    process.platform === "win32"
+      ? join(
+          process.env.APPDATA ??
+            join(process.env.USERPROFILE ?? homedir(), "AppData", "Roaming"),
+          "operad",
+          "operad.toml",
+        )
+      : join(process.env.HOME ?? homedir(), ".config", "operad", "operad.toml");
+  const path = configPath ?? defaultPath;
+  // If config doesn't exist yet, [adb] enabled defaults to false on
+  // non-Android — skip the probe with an OK so doctor doesn't false-fail.
+  let adbEnabled = false;
+  if (existsSync(path)) {
+    try {
+      const text = readFileSync(path, "utf8");
+      // Match `enabled = true` inside the [adb] section. Tolerant: allows
+      // whitespace / tabs / quoted booleans. Doctor is best-effort here —
+      // the real source of truth is config.ts at boot.
+      const adbBlock = text.match(/\[adb\][^[]*?enabled\s*=\s*(true|false)/i);
+      if (adbBlock) adbEnabled = adbBlock[1].toLowerCase() === "true";
+    } catch { /* ignore — defaults to disabled */ }
+  }
+  if (!adbEnabled) {
+    return { name: "adb", status: "ok", message: "[adb] not enabled — skipped" };
+  }
+  const result = spawnSync("adb", ["version"], { encoding: "utf8", timeout: 3000 });
+  if (result.error || result.status !== 0) {
+    let fix: string;
+    if (process.env.TERMUX_VERSION || process.env.PREFIX?.includes("com.termux")) {
+      fix = "pkg install android-tools    # or disable: set adb.enabled = false in operad.toml";
+    } else if (process.platform === "darwin") {
+      fix = "brew install android-platform-tools    # or disable: set adb.enabled = false";
+    } else if (process.platform === "win32") {
+      fix = "winget install -e --id Google.PlatformTools    # or disable: set adb.enabled = false";
+    } else {
+      fix = "sudo apt install adb    # or: sudo dnf install android-tools / disable in operad.toml";
+    }
+    return {
+      name: "adb",
+      status: "fail",
+      message: "[adb] enabled in config but `adb` not on PATH — boot will hang for connect_timeout_s",
+      fix,
+    };
+  }
+  return { name: "adb", status: "ok", message: result.stdout.trim().split("\n")[0] };
+}
+
+/**
+ * Probe the SQLite driver before the agent subsystem tries to use it.
+ * memory-db.ts prefers `bun:sqlite` (zero-dep, built into bun) and
+ * falls back to `better-sqlite3` on node. better-sqlite3 is a native
+ * module that needs a C toolchain; on Termux+node specifically it's a
+ * common first-run wall.
+ */
+async function checkSqliteDriver(): Promise<CheckResult> {
+  // The daemon launches under bun whenever a bun binary is resolvable
+  // (see resolveBunPath in tmx.ts). bun:sqlite is built-in there, so we
+  // only have to verify a SQLite driver exists when the daemon will run
+  // under node. Doctor itself uses the npm shebang `#!/usr/bin/env node`,
+  // so checking globalThis.Bun in doctor lies on the common case where
+  // node runs doctor but bun runs the daemon.
+  // 1) Running under bun → bun:sqlite is built-in.
+  if (typeof (globalThis as { Bun?: unknown }).Bun !== "undefined") {
+    try {
+      await import("bun:sqlite");
+      return { name: "sqlite", status: "ok", message: "bun:sqlite (built-in)" };
+    } catch {
+      /* extremely unusual; fall through to fallback probe */
+    }
+  }
+  // 2) Doctor under node, but bun is on PATH → daemon will spawn under
+  //    bun and use bun:sqlite. Treat as OK.
+  const bunCheck = spawnSync("bun", ["--version"], { encoding: "utf8", timeout: 3000 });
+  if (!bunCheck.error && bunCheck.status === 0) {
+    return {
+      name: "sqlite",
+      status: "ok",
+      message: `bun ${bunCheck.stdout.trim()} on PATH — daemon will use bun:sqlite`,
+    };
+  }
+  // 3) No bun → daemon will run under node and needs better-sqlite3.
+  try {
+    // @ts-expect-error — optional dependency, may not be installed.
+    await import("better-sqlite3");
+    return { name: "sqlite", status: "ok", message: "better-sqlite3 native module loaded" };
+  } catch (err) {
+    const onTermux = process.env.TERMUX_VERSION || process.env.PREFIX?.includes("com.termux");
+    let fix: string;
+    if (onTermux) {
+      fix =
+        "On Termux the supported runtime is bun (bun:sqlite is built-in). Install: pkg install bun\n" +
+        "  Or, to stay on node: pkg install build-essential && bun install   (compiles better-sqlite3)";
+    } else {
+      fix = "bun install    # operad ships better-sqlite3 as an optional dep — re-run install in repo root";
+    }
+    return {
+      name: "sqlite",
+      status: "fail",
+      message: `No SQLite driver loadable — agent subsystem will crash on first use (${(err as Error).message})`,
+      fix,
+    };
+  }
 }
 
 function checkTmux(): CheckResult {
