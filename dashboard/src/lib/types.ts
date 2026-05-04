@@ -95,6 +95,13 @@ export interface BridgeHealth {
   lastTool?: string;
   lastToolTime?: string;
   error?: string;
+  /**
+   * Optional remediation hint. Populated when the daemon returns 501
+   * because operad is running off-Android — the CFC bridge is Termux-only,
+   * but the dashboard can still point users at the Claude-for-Chrome
+   * extension that fills the same niche on desktop.
+   */
+  fix?: string;
 }
 
 /** ADB device info */

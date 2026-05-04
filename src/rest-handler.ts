@@ -210,6 +210,27 @@ export class RestHandler {
           }
           break;
         case "bridge": {
+          // CFC bridge is the Termux/Android-only WebSocket relay that lets
+          // Claude Code drive Chrome via CDP. On other platforms the user-
+          // facing browser-control flow is the Claude for Chrome extension
+          // (see doctor.ts:checkChromeForClaude). Off-Android, fail fast
+          // with that pointer instead of fumbling through Termux-shaped
+          // path searches and TermuxService intents.
+          const onAndroid =
+            !!process.env.TERMUX_VERSION || !!process.env.PREFIX?.includes("com.termux");
+          if (!onAndroid) {
+            return {
+              status: 501,
+              data: {
+                error: "CFC bridge is Termux/Android-only",
+                explanation:
+                  "On desktop the equivalent is the Claude for Chrome extension. " +
+                  "Operad's `/api/bridge/*` endpoints assume Termux paths and the TermuxService intent.",
+                fix: "Install the Claude for Chrome extension from the Chrome Web Store: " +
+                  "https://chromewebstore.google.com/detail/claude-for-chrome/mhlfhmbeohhnidmkdpjmaflpcnhfchck",
+              },
+            };
+          }
           // POST /api/bridge/termux-service — launch bridge via TermuxService intent
           if (method === "POST" && name === "termux-service") {
             try {

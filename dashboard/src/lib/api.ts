@@ -141,9 +141,19 @@ export async function fetchBridgeHealth(): Promise<BridgeHealth> {
     clearTimeout(timeout);
     return checkedJson(res);
   } catch {
-    // Fallback to proxy endpoint
+    // Fallback to proxy endpoint. Off-Android the daemon now returns 501
+    // with a useful "use the Claude for Chrome extension" explanation —
+    // surface that to the user rather than the generic "Unreachable".
     try {
       const res = await fetch("/api/bridge");
+      if (res.status === 501) {
+        const body = (await res.json().catch(() => ({}))) as { explanation?: string; fix?: string };
+        return {
+          status: "unavailable",
+          error: body.explanation ?? "CFC bridge is Termux/Android-only",
+          fix: body.fix,
+        };
+      }
       return checkedJson(res);
     } catch {
       return { status: "offline", error: "Unreachable" };

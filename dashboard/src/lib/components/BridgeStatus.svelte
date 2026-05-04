@@ -118,6 +118,9 @@
         </div>
       {:else}
         <p class="offline-msg">{health.error ?? "Not running"}</p>
+        {#if health.fix}
+          <p class="fix-hint">{health.fix}</p>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -201,6 +204,16 @@
     font-size: 0.6875rem;
     color: var(--text-muted);
     margin: 0;
+  }
+  .fix-hint {
+    margin: 0.375rem 0 0;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.6875rem;
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    border-left: 2px solid var(--accent-blue);
+    border-radius: 3px;
+    word-break: break-word;
   }
 
   @media (max-width: 768px) {
