@@ -2,7 +2,7 @@
   import {
     startSession, stopSession, restartSession, goSession,
     openTab, closeSession, suspendSession, resumeSession,
-    fetchSdkStatus,
+    fetchSdkStatus, launchApp,
   } from "$lib/api";
   import { store, refreshStatus } from "$lib/store.svelte";
   import type { DaemonStatus, SessionState, SdkBridgeStatus } from "$lib/types";
@@ -136,6 +136,22 @@
     }
   }
 
+  /**
+   * Launch the Android app associated with a session (e.g. termux-x11
+   * viewer). The package comes from the session's TOML `launch_package`
+   * — backend resolves it to an actual launcher activity via ADB monkey
+   * with a fallback to `am start -n <pkg>/.MainActivity`.
+   */
+  async function handleLaunchApp(e: Event, name: string, target: string) {
+    e.stopPropagation();
+    actionError = null;
+    try {
+      await launchApp(target);
+    } catch (err) {
+      actionError = `Launch ${target} failed for ${name}: ${(err as Error).message}`;
+    }
+  }
+
   async function handleSuspend(e: Event, name: string) {
     e.stopPropagation();
     actionError = null;
@@ -206,6 +222,14 @@
       {/if}
     </td>
     <td class="td-actions" onclick={(e) => e.stopPropagation()}>
+      {#if session.launch_package}
+        <button
+          class="btn-icon launch"
+          onclick={(e) => handleLaunchApp(e, session.name, session.launch_package!)}
+          title={`Launch app (${session.launch_package})`}
+          aria-label="Launch associated Android app"
+        ><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H14V7"/><path d="M14 2L8 8"/><path d="M13 9V13.5C13 13.78 12.78 14 12.5 14H2.5C2.22 14 2 13.78 2 13.5V3.5C2 3.22 2.22 3 2.5 3H7"/></svg></button>
+      {/if}
       {#if session.type === "claude"}
         {#if sdkStatus?.attached && sdkStatus.sessionName === session.name}
           <span class="live-badge" title="SDK stream active"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg></span>
@@ -565,6 +589,9 @@
   /* Chat button */
   .td-actions :global(.btn-icon.chat) { color: var(--accent-blue); opacity: 0.6; }
   .td-actions :global(.btn-icon.chat:hover) { opacity: 1; background: rgba(88, 166, 255, 0.1); }
+  /* Launch-app button — shown for sessions with a launch_package */
+  .td-actions :global(.btn-icon.launch) { color: var(--accent-cyan, #58a6ff); opacity: 0.75; }
+  .td-actions :global(.btn-icon.launch:hover) { opacity: 1; background: rgba(88, 166, 255, 0.12); }
   /* Muted button for pause */
   .td-actions :global(.btn-icon.muted) { color: var(--text-muted); }
   .td-actions :global(.btn-icon.muted:hover) { background: rgba(255, 255, 255, 0.08); }

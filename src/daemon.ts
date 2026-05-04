@@ -320,6 +320,7 @@ export class Daemon {
       resolveName: (input) => this.resolveName(input),
       getAndroidApps: () => this.androidEngine.getAndroidApps(),
       forceStopApp: (pkg) => this.androidEngine.forceStopApp(pkg),
+      launchApp: (target) => this.androidEngine.launchApp(target),
       getAutoStopList: () => this.androidEngine.getAutoStopList(),
       toggleAutoStop: (pkg) => this.androidEngine.toggleAutoStop(pkg),
       invalidateAdbSerial: () => this.androidEngine.invalidateAdbSerial(),

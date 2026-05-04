@@ -91,6 +91,16 @@ export interface SessionConfig {
   bare: boolean;
   /** Claude session ID for --resume (multi-instance support) */
   session_id?: string;
+  /**
+   * Android package whose launcher activity should be shown when the user
+   * clicks the "Launch app" button in the dashboard.
+   *
+   * Set on services that run a backend daemon (termux-x11 server, syncthing,
+   * etc.) but rely on a separate user-facing Android app for the UI. The
+   * dashboard surfaces this as a button on the session's row that runs
+   * `monkey -p <pkg> -c android.intent.category.LAUNCHER 1` server-side.
+   */
+  launch_package?: string;
 }
 
 /** ADB configuration block */

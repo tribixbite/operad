@@ -147,6 +147,10 @@ export class SessionCommands {
             // dashboard group "registered" (config-defined) sessions above
             // ad-hoc/discovered ones in the inactive list.
             from_config: !!cfg,
+            // Android package whose launcher activity the dashboard's "Launch
+            // app" button should fire. Surfaces here so the UI can decide
+            // whether to render the icon without re-fetching config.
+            launch_package: cfg?.launch_package ?? null,
           };
         }),
       },

@@ -273,6 +273,15 @@ export async function closeSession(name: string): Promise<void> {
 }
 
 /**
+ * Launch an Android app's launcher activity by package name (or full
+ * `pkg/activity` component spec). Used by the "Launch app" button on
+ * session rows whose config declares a `launch_package`.
+ */
+export async function launchApp(target: string): Promise<void> {
+  await checkedPost(`/api/launch/${encodeURIComponent(target)}`);
+}
+
+/**
  * Collapse duplicate registry entries that share a path.
  *
  * Pass `{ dryRun: true }` to fetch the plan without mutating state — the

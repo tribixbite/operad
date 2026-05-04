@@ -622,6 +622,78 @@ export class AndroidEngine {
   }
 
   /** Force-stop an Android app via ADB */
+  /**
+   * Launch the user-facing activity of an Android app.
+   *
+   * Accepts either a package name (`com.termux.x11`) or a fully-qualified
+   * component (`com.termux.x11/.MainActivity`). For package-only inputs we
+   * prefer ADB's `monkey ... LAUNCHER 1` because it correctly resolves the
+   * launcher activity, and fall back to `am start -n <pkg>/.MainActivity`
+   * (the most common pattern, works directly from the Termux uid) if ADB
+   * isn't connected or monkey returns non-zero.
+   *
+   * Used by the dashboard "Launch app" button on session rows whose config
+   * declares a `launch_package`.
+   */
+  launchApp(target: string): { status: number; data: unknown } {
+    if (!target || !target.includes(".")) {
+      return { status: 400, data: { error: "Invalid package or component" } };
+    }
+    const slash = target.indexOf("/");
+    if (slash !== -1) {
+      // Caller provided an explicit component spec.
+      const result = spawnSync("am", ["start", "-n", target], {
+        encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (result.status === 0) {
+        this.ctx.log.info(`Launched ${target} via am start`);
+        return { status: 200, data: { ok: true, target, via: "am" } };
+      }
+      return { status: 500, data: { error: result.stderr?.trim() || "am start failed", target } };
+    }
+
+    const pkg = target;
+    if (AndroidEngine.SYSTEM_PACKAGES.has(pkg)) {
+      return { status: 403, data: { error: `Cannot launch system package: ${pkg}` } };
+    }
+
+    // Preferred path: monkey via ADB resolves the launcher activity and
+    // delivers the intent as the shell user, which works for apps that
+    // reject intents from the Termux uid.
+    if (this.resolveAdbSerial()) {
+      try {
+        const result = spawnSync(ADB_BIN, this.adbShellArgs(
+          "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1",
+        ), { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+        if (result.status === 0 && !(result.stderr ?? "").includes("Error")) {
+          this.ctx.log.info(`Launched ${pkg} via adb monkey`);
+          return { status: 200, data: { ok: true, target: pkg, via: "monkey" } };
+        }
+      } catch (err) {
+        this.ctx.log.debug(`monkey launch threw: ${err}`);
+        /* fall through to am fallback */
+      }
+    }
+
+    // Fallback: assume <pkg>/.MainActivity. Works for the common case where
+    // the launcher activity follows the standard naming convention.
+    const fallback = `${pkg}/.MainActivity`;
+    const result = spawnSync("am", ["start", "-n", fallback], {
+      encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.status === 0) {
+      this.ctx.log.info(`Launched ${pkg} via am ${fallback} fallback`);
+      return { status: 200, data: { ok: true, target: pkg, via: "am-fallback" } };
+    }
+    return {
+      status: 500,
+      data: {
+        error: result.stderr?.trim() || "monkey + am fallback both failed",
+        target: pkg,
+      },
+    };
+  }
+
   forceStopApp(pkg: string): { status: number; data: unknown } {
     if (!pkg || !pkg.includes(".")) {
       return { status: 400, data: { error: "Invalid package name" } };

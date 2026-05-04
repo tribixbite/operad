@@ -205,6 +205,8 @@ export interface AndroidCallbacks {
   getAndroidApps: () => { pkg: string; label: string; rss_mb: number; system: boolean; autostop: boolean }[];
   /** Force-stop an Android app by package name via ADB */
   forceStopApp: (pkg: string) => { status: number; data: unknown };
+  /** Launch an Android app's launcher activity (package or pkg/activity) */
+  launchApp: (target: string) => { status: number; data: unknown };
   /** Get the current auto-stop package list */
   getAutoStopList: () => { packages: string[] };
   /** Toggle auto-stop for a package, persisting to disk */

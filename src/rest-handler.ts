@@ -432,6 +432,13 @@ export class RestHandler {
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Package name required" } };
           return this.ctx.forceStopApp(name);
+        case "launch":
+          // Launch an Android app by package name (or pkg/activity component).
+          // Used by the per-session "Launch app" button — the dashboard
+          // surfaces it when a session config declares `launch_package`.
+          if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          if (!name) return { status: 400, data: { error: "Package or component required" } };
+          return this.ctx.launchApp(name);
         case "autostop":
           if (!name) return { status: 200, data: this.ctx.getAutoStopList() };
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };

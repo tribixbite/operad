@@ -26,6 +26,12 @@ export interface SessionState {
   uptime: string | null;
   /** True when this session is defined in the user's operad.toml [[session]]. */
   from_config?: boolean;
+  /**
+   * Android package whose launcher activity the dashboard's "Launch app"
+   * button should fire. Set in TOML via `launch_package = "..."`. Null when
+   * the session has no associated user-facing Android app.
+   */
+  launch_package?: string | null;
 }
 
 /** Phantom process count (informational — killer is disabled) */
