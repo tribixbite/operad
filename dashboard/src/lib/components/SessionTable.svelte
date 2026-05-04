@@ -646,11 +646,15 @@
     /*
      * On phones, allocate columns proportionally: name takes the rest,
      * RSS gets a tight right-aligned slot, actions get just enough room
-     * for two 44 px buttons abreast — the rest wrap to additional rows.
+     * for two 44 px buttons abreast (44 + 4 gap + 44 + cell padding ≈
+     * 100 px). 7 rem (98 px) fell 1 px short and forced a single-column
+     * stack 5 rows tall; 7.5 rem fits two buttons abreast and wraps the
+     * rest, which keeps the row height much shorter on running-claude
+     * sessions that have 5–6 actions.
      */
     .th-name { width: auto; }
-    .th-rss { width: 4rem; }
-    .th-actions { width: 7rem; }
+    .th-rss { width: 3.5rem; }
+    .th-actions { width: 7.5rem; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }
