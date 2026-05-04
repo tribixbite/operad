@@ -12,7 +12,8 @@ import { join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
 import { detectPlatform } from "./platform/platform.js";
-import { isValidSessionId } from "./registry.js";
+import { getRuntime } from "./runtimes/index.js";
+import type { SessionRuntime } from "./runtimes/index.js";
 
 /** Lazy-resolved tmux binary path via platform abstraction.
  *  Module-load-time resolution would freeze a wrong path on systems where
@@ -26,18 +27,11 @@ function TMUX_BIN(): string {
   return _tmuxBin;
 }
 
-/** Timeout for Claude Code readiness polling (ms) */
-const CLAUDE_READY_TIMEOUT = 60_000;
-/** Interval between readiness polls (ms) */
-const CLAUDE_POLL_INTERVAL = 500;
-/** Patterns that indicate Claude Code is ready for input */
-const CLAUDE_READY_PATTERNS = [
-  />\s*$/,           // prompt indicator
-  /\$\s*$/,          // shell prompt (fallback)
-  /claude\s*>/i,     // claude prompt
-  /\?\s*$/,          // question mark prompt (e.g., "What would you like to do?")
-];
-/** Delay before sending "go" after readiness detection (ms) */
+/** Default readiness polling timeout if a runtime adapter doesn't override (ms). */
+const DEFAULT_READY_TIMEOUT = 60_000;
+/** Default interval between readiness polls if a runtime adapter doesn't override (ms). */
+const DEFAULT_POLL_INTERVAL = 500;
+/** Delay before sending "go" after readiness detection (ms). */
 const GO_SEND_DELAY = 500;
 
 /** Cached clean env — recomputed once per process via platform abstraction */
@@ -325,91 +319,123 @@ export function createSession(config: SessionConfig, log: Logger): boolean {
   tmux("set-option", "-g", "set-titles", "on");
   tmux("set-option", "-g", "set-titles-string", "#S");
 
-  // Start the appropriate process inside the session
-  switch (type) {
-    case "claude":
-      if (config.session_id) {
-        // Multi-instance: resume a specific Claude session by ID. Defence in
-        // depth — registry already filters non-UUID session_ids on load, but
-        // any future caller that builds a SessionConfig in memory still has
-        // to round-trip through this guard before we shell-out. Without it
-        // a tampered registry could smuggle extra commands via tmux send-keys.
-        if (!isValidSessionId(config.session_id)) {
-          log.error(
-            `Refusing to resume session '${name}' — session_id is not a valid UUID: ${JSON.stringify(config.session_id)}`,
-            { session: name },
-          );
-          // Fall through to a fresh start rather than send a malformed command.
-          sendKeys(name, "cc", true);
-        } else {
-          sendKeys(name, `claude --resume ${config.session_id} --dangerously-skip-permissions`, true);
-        }
-      } else {
-        // Default: --continue resumes the last conversation in the project directory
-        sendKeys(name, "cc", true);
-      }
-      break;
-
-    case "daemon":
-      if (command) {
-        const fullCmd = envPrefix ? `${envPrefix} ${command}` : command;
-        sendKeys(name, fullCmd, true);
-      }
-      break;
-
-    case "service":
-      if (command) {
-        const fullCmd = envPrefix ? `${envPrefix} ${command}` : command;
-        sendKeys(name, fullCmd, true);
-      }
-      break;
+  // Start the appropriate process inside the session.
+  //
+  // Coding-agent runtimes (claude/opencode/codex) dispatch through the
+  // SessionRuntime registry — each adapter knows how to assemble its own
+  // startup command (resume flags, auth flags, etc). daemon/service stay
+  // verbatim because they're the catch-all for arbitrary commands with
+  // no readiness contract.
+  const runtime = getRuntime(type);
+  if (runtime) {
+    const cmd = runtime.startupCommand(config);
+    if (cmd !== null) {
+      sendKeys(name, cmd, true);
+    }
+  } else if (type === "daemon" || type === "service") {
+    if (command) {
+      const fullCmd = envPrefix ? `${envPrefix} ${command}` : command;
+      sendKeys(name, fullCmd, true);
+    }
   }
 
   return true;
 }
 
-/** Result of Claude readiness check */
+/**
+ * Look up the runtime adapter for a session, falling back to the Claude
+ * adapter so existing callers that pass a `SessionConfig` keep working
+ * even if `getRuntime()` returns null (e.g. when type is "daemon").
+ *
+ * Returns null only when a config has an unknown type AND we need
+ * runtime-only behaviour (readiness detection); the `case` branches in
+ * session.ts handle that case explicitly.
+ */
+function runtimeOrNull(type: SessionType): SessionRuntime | null {
+  return getRuntime(type);
+}
+
+/** Result of a runtime readiness check. */
 export type ReadinessResult = "ready" | "timeout" | "disappeared";
 
 /**
- * Wait for a Claude-type session to become ready for input.
- * Polls tmux capture-pane looking for a prompt indicator.
- * Returns "ready" if a prompt was detected, "timeout" if the deadline passed,
- * or "disappeared" if the tmux session was killed.
+ * Wait for an agent session to become ready for input by polling tmux's
+ * pane capture against the runtime's `readyPatterns`. Each adapter can
+ * override the polling timeout / interval; missing overrides fall back
+ * to operad's defaults (60 s / 500 ms).
+ *
+ * Returns "ready" on first matched pattern, "disappeared" if the tmux
+ * session was killed mid-wait, or "timeout" if the deadline elapsed.
  */
-export async function waitForClaudeReady(name: string, log: Logger): Promise<ReadinessResult> {
+export async function waitForRuntimeReady(
+  name: string,
+  runtime: SessionRuntime,
+  log: Logger,
+): Promise<ReadinessResult> {
   const start = Date.now();
+  const timeoutMs = runtime.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT;
+  const pollMs = runtime.readyPollIntervalMs ?? DEFAULT_POLL_INTERVAL;
 
-  while (Date.now() - start < CLAUDE_READY_TIMEOUT) {
+  while (Date.now() - start < timeoutMs) {
     if (!sessionExists(name)) {
-      log.warn(`Session '${name}' disappeared while waiting for readiness`, { session: name });
+      log.warn(`Session '${name}' disappeared while waiting for ${runtime.label} readiness`, { session: name });
       return "disappeared";
     }
 
     const pane = capturePane(name, 10);
-    // Check for any ready pattern
-    for (const pattern of CLAUDE_READY_PATTERNS) {
+    for (const pattern of runtime.readyPatterns) {
       if (pattern.test(pane)) {
         const elapsed = Date.now() - start;
-        log.debug(`Session '${name}' ready in ${elapsed}ms`, { session: name, elapsed });
+        log.debug(`Session '${name}' (${runtime.label}) ready in ${elapsed}ms`, { session: name, elapsed });
         return "ready";
       }
     }
 
-    await sleep(CLAUDE_POLL_INTERVAL);
+    await sleep(pollMs);
   }
 
-  log.warn(`Session '${name}' readiness timeout after ${CLAUDE_READY_TIMEOUT}ms`, { session: name });
+  log.warn(`Session '${name}' (${runtime.label}) readiness timeout after ${timeoutMs}ms`, { session: name });
   return "timeout";
 }
 
 /**
- * Send "go" to a Claude session after waiting for readiness.
- * Returns the readiness result: "ready" if go was sent successfully,
- * "timeout" or "disappeared" if the session wasn't ready.
+ * Backwards-compatible alias for callers that still expect the
+ * Claude-specific name. New code should call `waitForRuntimeReady`
+ * directly with an explicit adapter so non-Claude sessions get the
+ * right patterns/timeouts.
+ *
+ * Looks up the runtime via the registry and falls back to a no-op
+ * "ready" if the session type isn't a known agent (daemon/service).
  */
-export async function sendGoToSession(name: string, log: Logger): Promise<ReadinessResult> {
-  const result = await waitForClaudeReady(name, log);
+export async function waitForClaudeReady(
+  name: string,
+  log: Logger,
+  type: SessionType = "claude",
+): Promise<ReadinessResult> {
+  const runtime = runtimeOrNull(type);
+  if (!runtime) {
+    // Non-agent type — no readiness contract, treat as ready immediately.
+    return "ready";
+  }
+  return waitForRuntimeReady(name, runtime, log);
+}
+
+/**
+ * Send "go" to an agent session after waiting for readiness. The
+ * runtime is inferred from the SessionType so OpenCode and Codex use
+ * their adapter's patterns instead of Claude's.
+ */
+export async function sendGoToSession(
+  name: string,
+  log: Logger,
+  type: SessionType = "claude",
+): Promise<ReadinessResult> {
+  const runtime = runtimeOrNull(type);
+  // Non-agent sessions don't accept a "go" — bail with "ready" so callers
+  // don't treat it as an error.
+  if (!runtime) return "ready";
+
+  const result = await waitForRuntimeReady(name, runtime, log);
   if (result !== "ready") {
     log.warn(`Skipping 'go' for '${name}' — ${result}`, { session: name });
     return result;

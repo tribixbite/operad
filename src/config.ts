@@ -183,7 +183,7 @@ class ConfigParseError extends Error {
   }
 }
 
-const VALID_SESSION_TYPES: SessionType[] = ["claude", "daemon", "service"];
+const VALID_SESSION_TYPES: SessionType[] = ["claude", "opencode", "codex", "daemon", "service"];
 const VALID_WAKE_POLICIES: WakeLockPolicy[] = ["always", "active_sessions", "boot_only", "never"];
 const VALID_HEALTH_CHECKS: HealthCheckType[] = ["tmux_alive", "http", "process", "custom"];
 const NAME_PATTERN = /^[a-z0-9-]+$/;
@@ -291,9 +291,11 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
 
     const type = asEnum(s.type, VALID_SESSION_TYPES, `${prefix}.type`, "claude") as SessionType;
 
-    // Path required for claude/daemon types
+    // Path required for any agent runtime (claude/opencode/codex are all
+    // project-cwd-scoped) and for daemons (no implicit fallback dir).
     const path = s.path != null ? asString(s.path, `${prefix}.path`, "") : undefined;
-    if ((type === "claude" || type === "daemon") && !path) {
+    const isAgentRuntime = type === "claude" || type === "opencode" || type === "codex";
+    if ((isAgentRuntime || type === "daemon") && !path) {
       errors.push(`${prefix}: 'path' is required for type '${type}'`);
     }
 

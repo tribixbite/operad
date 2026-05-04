@@ -85,6 +85,7 @@ import {
   runScriptInTab,
   capturePane,
 } from "./session.js";
+import { getRuntime } from "./runtimes/index.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
 import { PersistenceEngine } from "./persistence.js";
@@ -828,15 +829,17 @@ export class Daemon {
       return false;
     }
 
-    // For Claude sessions, wait for readiness and optionally send "go"
-    if (sessionConfig.type === "claude") {
+    // Coding-agent runtimes need readiness polling + optional auto-go.
+    // Daemon/service types have no readiness contract — mark running
+    // immediately. The runtime registry is authoritative: whatever
+    // SessionType maps to an adapter gets the agent path.
+    if (getRuntime(sessionConfig.type)) {
       // Don't block the startup for readiness — handle in background
-      this.handleClaudeStartup(name, sessionConfig).catch((err) => {
-        this.log.error(`Claude startup failed for '${name}': ${(err as Error).message}`, { session: name });
+      this.handleAgentStartup(name, sessionConfig).catch((err) => {
+        this.log.error(`Agent startup failed for '${name}' (${sessionConfig.type}): ${(err as Error).message}`, { session: name });
         this.state.transition(name, "failed", `Startup error: ${(err as Error).message}`);
       });
     } else {
-      // For non-Claude sessions, assume running after creation
       this.state.transition(name, "running");
     }
 
@@ -846,21 +849,28 @@ export class Daemon {
     return true;
   }
 
-  /** Handle Claude session startup: wait for readiness, send "go" if configured */
-  private async handleClaudeStartup(name: string, config: SessionConfig): Promise<void> {
-    // Give Claude Code a moment to initialize
+  /**
+   * Handle agent-runtime session startup: wait for readiness, send "go"
+   * if `auto_go = true`. Dispatches per-runtime via the SessionRuntime
+   * registry — Claude/OpenCode/Codex all share the same wait-then-go
+   * shape, with adapter-specific patterns and timeouts.
+   */
+  private async handleAgentStartup(name: string, config: SessionConfig): Promise<void> {
+    // Give the agent process a moment to initialize before we start polling.
+    // Claude/OpenCode/Codex all spend the first second or two drawing
+    // splash text that would false-match a generic prompt regex.
     await sleep(2000);
 
     let readinessResult: "ready" | "timeout" | "disappeared" = "timeout";
 
     if (config.auto_go) {
-      readinessResult = await sendGoToSession(name, this.log);
+      readinessResult = await sendGoToSession(name, this.log, config.type);
       if (readinessResult !== "ready") {
         this.log.warn(`Failed to send 'go' to '${name}' — ${readinessResult}`, { session: name });
       }
     } else {
       // Still poll for readiness even without auto_go, to set correct state
-      readinessResult = await waitForClaudeReady(name, this.log);
+      readinessResult = await waitForClaudeReady(name, this.log, config.type);
     }
 
     const s = this.state.getSession(name);
@@ -1164,8 +1174,8 @@ export class Daemon {
         await stopSession(session.name, this.log);
         const created = createSession(session, this.log);
         if (created) {
-          if (session.type === "claude") {
-            await this.handleClaudeStartup(session.name, session);
+          if (getRuntime(session.type)) {
+            await this.handleAgentStartup(session.name, session);
           } else {
             this.state.transition(session.name, "running");
           }

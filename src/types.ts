@@ -32,8 +32,24 @@ export const VALID_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
 /** Supported platform identifiers */
 export type { PlatformId } from "./platform/platform.js";
 
-/** Session type determines startup and health check behavior */
-export type SessionType = "claude" | "daemon" | "service";
+/**
+ * Session type determines startup and health check behavior.
+ *
+ * Coding agents ("claude", "opencode", "codex") share the same lifecycle —
+ * spawn a TUI in tmux, wait for an idle prompt, optionally send "go".
+ * The differences live in `src/runtimes/<id>.ts` adapters; new agents
+ * can be added by registering an adapter and extending this union.
+ *
+ * "daemon" and "service" remain the catch-alls for arbitrary commands
+ * with no readiness contract — the difference between them is mostly
+ * historical (priority ordering and health-check defaults).
+ */
+export type SessionType =
+  | "claude"
+  | "opencode"
+  | "codex"
+  | "daemon"
+  | "service";
 
 /** Wake lock acquisition policy */
 export type WakeLockPolicy = "always" | "active_sessions" | "boot_only" | "never";

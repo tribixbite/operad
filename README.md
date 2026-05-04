@@ -53,6 +53,16 @@ path = "$HOME/git/my-project"
 auto_go = true
 
 [[session]]
+name = "spike"
+type = "opencode"          # OpenCode (https://opencode.ai)
+path = "$HOME/git/spike"
+
+[[session]]
+name = "research"
+type = "codex"             # OpenAI Codex CLI
+path = "$HOME/git/research"
+
+[[session]]
 name = "api-server"
 type = "service"
 command = "bun run dev"
@@ -64,7 +74,17 @@ check = "http"
 url = "http://localhost:3000/health"
 ```
 
-Session types: `claude` (Claude Code with readiness detection), `daemon` (long-running command), `service` (headless).
+Session types:
+
+| Type | Behaviour |
+|---|---|
+| `claude` | Claude Code with readiness detection. Supports UUID resume via `session_id` (set automatically when opening from Recent Projects). |
+| `opencode` | [OpenCode](https://opencode.ai) TUI — project-cwd-scoped, resumes implicitly. |
+| `codex` | [OpenAI Codex CLI](https://developers.openai.com/codex/cli) — same shape as OpenCode; first run pauses on the browser auth flow. |
+| `daemon` | Long-running background command — no readiness contract, marked running on tmux create. |
+| `service` | Headless service — same as daemon but conventionally for things with health checks. |
+
+Adding a new agent runtime is a five-step adapter pattern — see `src/runtimes/runtime.ts` for the interface and the existing claude/opencode/codex adapters for examples.
 
 ## CLI Commands
 
