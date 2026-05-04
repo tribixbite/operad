@@ -177,6 +177,16 @@ export class Registry {
         const content = readFileSync(this.filePath, "utf-8");
         const parsed = JSON.parse(content) as RegistryData;
         if (parsed.version === CURRENT_VERSION && Array.isArray(parsed.sessions)) {
+          // Sanitise session_id values that don't look like UUIDs — the field
+          // gets interpolated into `claude --resume <id>` later, so a tampered
+          // registry could otherwise smuggle shell commands. Names get the
+          // same gate via isValidName when they're added at runtime; the
+          // load path is the only entry that bypasses runtime validation.
+          for (const entry of parsed.sessions) {
+            if (entry.session_id && !isValidSessionId(entry.session_id)) {
+              entry.session_id = undefined;
+            }
+          }
           return parsed;
         }
       }
@@ -265,6 +275,18 @@ export function deriveName(path: string): string {
 /** Validate a session name */
 export function isValidName(name: string): boolean {
   return NAME_PATTERN.test(name);
+}
+
+/**
+ * Strict UUID validator (any version) used to gate Claude `--resume <id>`
+ * arguments. The session_id ends up as a token in a shell command sent via
+ * `tmux send-keys`, so a malicious or corrupted registry could otherwise
+ * inject extra commands. Rejecting anything that isn't a canonical UUID
+ * gives us a hard wall before that interpolation.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isValidSessionId(id: string): boolean {
+  return UUID_PATTERN.test(id);
 }
 
 /** A named Claude session discovered from session JSONL custom-title entries */

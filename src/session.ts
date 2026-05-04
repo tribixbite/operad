@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
 import { detectPlatform } from "./platform/platform.js";
+import { isValidSessionId } from "./registry.js";
 
 /** Lazy-resolved tmux binary path via platform abstraction.
  *  Module-load-time resolution would freeze a wrong path on systems where
@@ -328,8 +329,21 @@ export function createSession(config: SessionConfig, log: Logger): boolean {
   switch (type) {
     case "claude":
       if (config.session_id) {
-        // Multi-instance: resume a specific Claude session by ID
-        sendKeys(name, `claude --resume ${config.session_id} --dangerously-skip-permissions`, true);
+        // Multi-instance: resume a specific Claude session by ID. Defence in
+        // depth — registry already filters non-UUID session_ids on load, but
+        // any future caller that builds a SessionConfig in memory still has
+        // to round-trip through this guard before we shell-out. Without it
+        // a tampered registry could smuggle extra commands via tmux send-keys.
+        if (!isValidSessionId(config.session_id)) {
+          log.error(
+            `Refusing to resume session '${name}' — session_id is not a valid UUID: ${JSON.stringify(config.session_id)}`,
+            { session: name },
+          );
+          // Fall through to a fresh start rather than send a malformed command.
+          sendKeys(name, "cc", true);
+        } else {
+          sendKeys(name, `claude --resume ${config.session_id} --dangerously-skip-permissions`, true);
+        }
       } else {
         // Default: --continue resumes the last conversation in the project directory
         sendKeys(name, "cc", true);

@@ -9,6 +9,7 @@
  */
 
 import { execSync, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { HealthCheckConfig, HealthResult, SessionConfig, TmxConfig } from "./types.js";
 import { detectPlatform } from "./platform/platform.js";
 import type { Logger } from "./log.js";
@@ -137,15 +138,87 @@ function customCheck(sessionName: string, command: string, startMs: number): Hea
   }
 }
 
-/** PID-based health check — verify process is alive via platform abstraction */
-function pidAliveCheck(sessionName: string, pid: number, startMs: number): HealthResult {
+/**
+ * PID-based health check for adopted (bare/non-tmux) sessions.
+ *
+ * Plain `kill(pid, 0)` checks "some process with this PID exists" — but PIDs
+ * are recycled on busy systems, so an exited bare process whose PID was
+ * picked up by an unrelated daemon would silently look "healthy". We
+ * therefore also peek at `/proc/<pid>/cmdline` (when available) and require
+ * a marker token to match. The marker is derived from the original
+ * SessionConfig.command; we use a distinctive substring (the first word of
+ * the command, falling back to the session name) so cmdline drift across
+ * shell wrappers (`sh -c "termux-x11 :1 …"` → child `termux-x11 :1 …`)
+ * still matches.
+ *
+ * `expectedCmdline` is empty/null when we have no config to compare against
+ * — in that case we fall back to liveness-only, preserving prior behaviour.
+ */
+function pidAliveCheck(
+  sessionName: string,
+  pid: number,
+  startMs: number,
+  expectedCmdline?: string | null,
+): HealthResult {
   const alive = detectPlatform().isProcessAlive(pid);
+  if (!alive) {
+    return {
+      session: sessionName,
+      healthy: false,
+      message: `Process PID ${pid} not found`,
+      duration_ms: Date.now() - startMs,
+    };
+  }
+
+  if (expectedCmdline) {
+    try {
+      const raw = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+      // /proc cmdline uses NUL separators; flatten to single string for substring match.
+      const flat = raw.replace(/\0/g, " ").trim();
+      if (flat && !flat.includes(expectedCmdline)) {
+        return {
+          session: sessionName,
+          healthy: false,
+          message:
+            `Process PID ${pid} alive but cmdline doesn't match — ` +
+            `expected '${expectedCmdline}', got '${flat.slice(0, 80)}'`,
+          duration_ms: Date.now() - startMs,
+        };
+      }
+    } catch {
+      // /proc unavailable (non-Linux) — fall back to liveness-only.
+    }
+  }
+
   return {
     session: sessionName,
-    healthy: alive,
-    message: alive ? `Process PID ${pid} alive` : `Process PID ${pid} not found`,
+    healthy: true,
+    message: `Process PID ${pid} alive`,
     duration_ms: Date.now() - startMs,
   };
+}
+
+/**
+ * Pick a distinctive substring from a session's command for cmdline matching.
+ * Strips leading shell prefixes and env assignments so we match the actual
+ * binary the session was meant to spawn. Returns null when the input doesn't
+ * yield a usefully-specific token (very short / generic words).
+ */
+function deriveCmdlineMarker(sessionName: string, command?: string | null): string | null {
+  const fallback = sessionName.length >= 4 ? sessionName : null;
+  if (!command) return fallback;
+  // Strip env-var assignments and leading `sh -c` so we look at what the
+  // shell actually executes. Then take the first token.
+  let stripped = command.replace(/^\s*sh\s+-c\s+['"]?/, "");
+  stripped = stripped.replace(/^(?:[A-Z_][A-Z0-9_]*=\S+\s+)+/g, "");
+  // Skip obvious leading no-op preambles like `rm -f … ;` / `sleep 3 &&`.
+  const preambleMatch = stripped.match(/^(?:rm\s+-f[^;&]*[;&]+|sleep\s+\d+\s*&&\s*)+/);
+  if (preambleMatch) stripped = stripped.slice(preambleMatch[0].length);
+  const firstToken = stripped.trim().split(/\s+/)[0] ?? "";
+  if (firstToken.length >= 4 && !/^(bash|sh|exec)$/.test(firstToken)) {
+    return firstToken;
+  }
+  return fallback;
 }
 
 /**
@@ -216,7 +289,10 @@ export function runHealthSweep(
     const healthConfig = getHealthConfig(session, config.health_defaults);
     let result: HealthResult;
     if (adoptedPid !== undefined) {
-      result = pidAliveCheck(session.name, adoptedPid, Date.now());
+      // Match cmdline as well as liveness so PID reuse can't keep a
+      // dead bare service looking healthy.
+      const marker = deriveCmdlineMarker(session.name, session.command);
+      result = pidAliveCheck(session.name, adoptedPid, Date.now(), marker);
     } else if (!tmuxAlive) {
       continue; // Already handled above
     } else {
