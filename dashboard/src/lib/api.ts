@@ -281,6 +281,85 @@ export async function launchApp(target: string): Promise<void> {
   await checkedPost(`/api/launch/${encodeURIComponent(target)}`);
 }
 
+// -- Schedules / consolidation / leases / trust -------------------------------
+
+/** List all persisted agent schedules (cron + interval). */
+export async function fetchSchedules(): Promise<import("./types").ScheduleRecord[]> {
+  const res = await fetch("/api/schedules");
+  return checkedJson(res);
+}
+
+/** Create or upsert an agent schedule. Returns the new row id. */
+export async function createSchedule(input: import("./types").ScheduleInput): Promise<number> {
+  const res = await fetch("/api/schedules", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+  }
+  const body = (await res.json()) as { id: number };
+  return body.id;
+}
+
+/** Toggle a schedule on/off (PATCH /api/schedules/<id>). */
+export async function setScheduleEnabled(id: number, enabled: boolean): Promise<void> {
+  const res = await fetch(`/api/schedules/${id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+}
+
+/** Delete a schedule by name (within a given agent). */
+export async function deleteSchedule(scheduleName: string, agent: string): Promise<void> {
+  const url = `/api/schedules/${encodeURIComponent(scheduleName)}?agent=${encodeURIComponent(agent)}`;
+  const res = await fetch(url, { method: "DELETE" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+}
+
+/** Recent consolidation runs + last-run timestamp. */
+export async function fetchConsolidation(limit = 10): Promise<import("./types").ConsolidationSummary> {
+  const res = await fetch(`/api/consolidation?limit=${limit}`);
+  return checkedJson(res);
+}
+
+/** Trigger a consolidation pass NOW (POST /api/consolidation). */
+export async function runConsolidation(): Promise<import("./types").ConsolidationResult> {
+  const res = await fetch("/api/consolidation", { method: "POST" });
+  return checkedJson(res);
+}
+
+/** Active tool leases for one agent. */
+export async function fetchLeases(agent: string): Promise<import("./types").AgentLease[]> {
+  const res = await fetch(`/api/leases/${encodeURIComponent(agent)}`);
+  return checkedJson(res);
+}
+
+/** Revoke all leases for an agent (optionally scoped to a goal). */
+export async function revokeLeases(agent: string, goalId?: number): Promise<number> {
+  const qs = goalId !== undefined ? `?goal_id=${goalId}` : "";
+  const res = await fetch(`/api/leases/${encodeURIComponent(agent)}${qs}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  const body = (await res.json()) as { revoked: number };
+  return body.revoked;
+}
+
+/** Trust scores + recommended autonomy for every agent. */
+export async function fetchTrustSummary(): Promise<import("./types").TrustSummary[]> {
+  const res = await fetch("/api/trust");
+  return checkedJson(res);
+}
+
+/** Trust history for one agent (the score deltas + reasons). */
+export async function fetchTrustDetail(agent: string): Promise<import("./types").TrustSummary> {
+  const res = await fetch(`/api/trust/${encodeURIComponent(agent)}`);
+  return checkedJson(res);
+}
+
 /**
  * Collapse duplicate registry entries that share a path.
  *

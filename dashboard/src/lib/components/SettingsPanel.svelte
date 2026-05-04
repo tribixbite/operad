@@ -18,6 +18,7 @@
   import AgentsMdPanel from "./AgentsMdPanel.svelte";
   import PlansPanel from "./PlansPanel.svelte";
   import ClaudeMdPanel from "./ClaudeMdPanel.svelte";
+  import GovernancePanel from "./GovernancePanel.svelte";
 
   // -- Constants --------------------------------------------------------------
 
@@ -60,6 +61,7 @@
     agents: false,
     mindMeld: false,
     cognitive: false,
+    governance: false,
     switchboard: true,
     commands: false,
     subagents: false,
@@ -1173,6 +1175,20 @@ Example usage or output
       {#if sections.cognitive}
         <div class="section-body">
           <CognitivePanel />
+        </div>
+      {/if}
+    </div>
+
+    <!-- Section 11: Governance — schedules, leases, trust, consolidation -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("governance")}>
+        <span class="chevron">{sections.governance ? "▾" : "▸"}</span>
+        <span class="section-title">Governance</span>
+        <span class="badge badge-blue">Trust · Schedules · Leases · Consolidation</span>
+      </button>
+      {#if sections.governance}
+        <div class="section-body">
+          <GovernancePanel />
         </div>
       {/if}
     </div>

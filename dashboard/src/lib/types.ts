@@ -829,6 +829,89 @@ export interface AgentSpecialization {
   updated_at: number;
 }
 
+// -- Schedules ----------------------------------------------------------------
+
+/** One persisted agent schedule (cron or interval). Mirrors ScheduleRecord. */
+export interface ScheduleRecord {
+  id: number;
+  agent_name: string;
+  schedule_name: string;
+  cron_expr: string | null;
+  interval_minutes: number | null;
+  prompt: string;
+  enabled: number; // 0 / 1 — SQLite stores booleans as integers
+  max_budget_usd: number | null;
+  last_run_at: number | null;
+  next_run_at: number | null;
+  total_cost_usd: number;
+  run_count: number;
+  consecutive_failures: number;
+  created_by: string;
+  created_at: number;
+}
+
+/** Body sent to POST /api/schedules to create a new schedule. */
+export interface ScheduleInput {
+  agent_name: string;
+  schedule_name: string;
+  prompt: string;
+  cron_expr?: string;
+  interval_minutes?: number;
+  max_budget_usd?: number;
+}
+
+// -- Leases -------------------------------------------------------------------
+
+/** Active tool lease — token granting an agent to use a tool until expiry. */
+export interface AgentLease {
+  id: number;
+  tool_name: string;
+  goal_id: number | null;
+  max_executions: number | null;
+  executions_used: number;
+  expires_at: number | null;
+  created_at: number;
+}
+
+// -- Trust --------------------------------------------------------------------
+
+/** One delta in the trust ledger for an agent. */
+export interface TrustHistoryEntry {
+  id: number;
+  score_delta: number;
+  reason: string;
+  context_goal_id: number | null;
+  created_at: number;
+}
+
+/** Per-agent trust snapshot from GET /api/trust. */
+export interface TrustSummary {
+  agent: string;
+  score: number;
+  recommended: string;
+  current?: string;
+  history?: TrustHistoryEntry[];
+}
+
+// -- Consolidation ------------------------------------------------------------
+
+/** Stats from a single consolidation pass. */
+export interface ConsolidationResult {
+  started_at: number;
+  completed_at: number;
+  learnings_decayed: number;
+  learnings_pruned: number;
+  learnings_merged: number;
+  cross_pollinated: number;
+  duration_ms: number;
+}
+
+/** Daemon's consolidation summary: last run timestamp + recent history. */
+export interface ConsolidationSummary {
+  last_run_at: number | null;
+  history: ConsolidationResult[];
+}
+
 // -- Dedupe -------------------------------------------------------------------
 
 /** One path's worth of cleanup plan from `tmx dedupe`. */
