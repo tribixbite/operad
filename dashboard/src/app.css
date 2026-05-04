@@ -238,6 +238,34 @@ body.drawer-open {
     font-size: 14px;
     border-radius: 6px;
   }
+  /*
+   * Compact-card summary rows (Memory / Procs / Tokens / CFC / ADB /
+   * Services at the top of the home page) are glance chrome, not
+   * primary tap targets. Most of these cards have NO inner button —
+   * the whole row IS a button — so they render at ~30–36 px tall.
+   * ADB has an inner refresh button; under the global 36 px touch
+   * rule it inflated the card to 55 px and broke the visual rhythm.
+   *
+   * Two pieces:
+   *   - Inner btn-icon shrinks to 22 px (still finger-tappable; the
+   *     whole .card-header area is a tap zone too).
+   *   - Card-header vertical padding trimmed from 0.625rem to
+   *     0.375rem so a 22 px button + padding ≈ 34 px, matching the
+   *     text-only cards at 33–36 px. This applies uniformly so
+   *     button-as-row cards (Memory etc) drop 4 px to ~30 px and
+   *     button-inside cards (ADB) drop to ~34 px — within 4 px of
+   *     each other instead of 20+ px.
+   */
+  .compact-card .btn-icon {
+    width: 22px;
+    height: 22px;
+    font-size: 0.75rem;
+    border-radius: 4px;
+  }
+  .compact-card .card-header {
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+  }
   .btn, .btn-sm {
     min-height: 36px;
     padding-inline: 12px;

@@ -138,7 +138,15 @@
     align-items: center;
     gap: 0.5rem;
     width: 100%;
-    padding: 0.625rem 0.75rem;
+    /*
+     * Trim vertical padding so the row containing the 22 px refresh
+     * button matches the surrounding text-only compact cards (Memory,
+     * Procs, CFC, Services) which sit at ~30–36 px tall. With 0.625rem
+     * (8.75 px each side) + a 22 px button, ADB rendered at 41 px,
+     * 5–10 px taller than its neighbours and visibly out of rhythm.
+     * 0.375rem (5.25 px) brings it down to ~32 px, in line with the rest.
+     */
+    padding: 0.375rem 0.75rem;
   }
   .header-left {
     display: flex;
