@@ -246,13 +246,50 @@ export function getLastConsolidationTime(db: MemoryDb): number | null {
   }
 }
 
-/** Get recent consolidation run history */
+/**
+ * Get recent consolidation run history.
+ *
+ * The persisted schema (memory-db.ts:497) was named when "decayed" was
+ * called "reviewed" and "cross-pollinated" was "syntheses_created" — the
+ * INSERT path (line 328 above) maps the modern TS field names onto those
+ * legacy columns. We do the inverse mapping on read so the dashboard,
+ * tests, and anything else consuming `ConsolidationResult` sees the
+ * documented field names instead of `undefined`.
+ *
+ * Without this, `SELECT * FROM consolidation_runs` returns rows with
+ * `learnings_reviewed` / `syntheses_created` and the cast was silently
+ * lying — every history-table cell in the dashboard's Governance panel
+ * showed "undefined".
+ */
 export function getConsolidationHistory(db: MemoryDb, limit = 10): ConsolidationResult[] {
   try {
     const dbHandle = db.requireDb();
-    return dbHandle.prepare(
-      `SELECT * FROM consolidation_runs ORDER BY completed_at DESC LIMIT ?`,
-    ).all(limit) as unknown as ConsolidationResult[];
+    const rows = dbHandle.prepare(
+      `SELECT id, started_at, completed_at,
+              learnings_reviewed, learnings_merged, learnings_pruned,
+              syntheses_created, duration_ms
+         FROM consolidation_runs ORDER BY completed_at DESC LIMIT ?`,
+    ).all(limit) as Array<{
+      id: number;
+      started_at: number;
+      completed_at: number;
+      learnings_reviewed: number;
+      learnings_merged: number;
+      learnings_pruned: number;
+      syntheses_created: number;
+      duration_ms: number;
+    }>;
+    return rows.map((r) => ({
+      started_at: r.started_at,
+      completed_at: r.completed_at,
+      // Legacy column names → modern TS field names. INSERT does the
+      // reverse mapping in runConsolidation()'s persistence call.
+      learnings_decayed: r.learnings_reviewed,
+      learnings_pruned: r.learnings_pruned,
+      learnings_merged: r.learnings_merged,
+      cross_pollinated: r.syntheses_created,
+      duration_ms: r.duration_ms,
+    }));
   } catch {
     return [];
   }

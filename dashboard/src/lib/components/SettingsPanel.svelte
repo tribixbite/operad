@@ -552,7 +552,7 @@ Example usage or output
             title="Download JSON config of all MCP servers (re-importable on a new device)"
             onclick={() => downloadJsonPayload("operad-mcp-config", { mcpServers: data.mcpServers })}
             disabled={data.mcpServers.length === 0}
-          >\u2913</button>
+          >⤓</button>
         </span>
       </div>
       {#if sections.mcp}
@@ -574,7 +574,7 @@ Example usage or output
             title="Download JSON of installed plugins (re-importable on a new device)"
             onclick={() => downloadJsonPayload("operad-plugins-config", { plugins: data.plugins })}
             disabled={data.plugins.length === 0}
-          >\u2913</button>
+          >⤓</button>
         </span>
       </div>
       {#if sections.plugins}
