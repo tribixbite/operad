@@ -644,17 +644,17 @@
     }
     thead th { font-size: 0.5625rem; padding: 0 0.25rem 0.375rem; }
     /*
-     * On phones, allocate columns proportionally: name takes the rest,
-     * RSS gets a tight right-aligned slot, actions get just enough room
-     * for two 44 px buttons abreast (44 + 4 gap + 44 + cell padding ≈
-     * 100 px). 7 rem (98 px) fell 1 px short and forced a single-column
-     * stack 5 rows tall; 7.5 rem fits two buttons abreast and wraps the
-     * rest, which keeps the row height much shorter on running-claude
-     * sessions that have 5–6 actions.
+     * Phone column allocation. With 36 px buttons (see the 640 px rule
+     * in app.css), a running-claude session row has 5 action icons:
+     * 5 × 36 + 4 × 3.5 gap + 8 px cell padding ≈ 202 px. Bumped to 210 px
+     * so the 5th button doesn't wrap by 2 px when the html font-size
+     * shrink kicks in. If a future runtime exposes a sixth icon (e.g. an
+     * extra runtime-specific action), it'll wrap below — acceptable.
+     * RSS gets a tight right-aligned slot, name takes the rest.
      */
     .th-name { width: auto; }
-    .th-rss { width: 3.5rem; }
-    .th-actions { width: 7.5rem; }
+    .th-rss { width: 52px; }
+    .th-actions { width: 210px; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }

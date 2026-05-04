@@ -219,27 +219,36 @@ body.drawer-open {
  */
 @media (max-width: 640px) {
   /*
-   * Use absolute pixels (not rem) so the touch target stays at 44 px
-   * regardless of the 768 px-block's `html { font-size: 14px }` shrink.
-   * 2.75 rem × 14 px = 38.5 px, which falls under WCAG AAA's 44 px floor.
+   * Phone touch targets: 36 px is the practical sweet spot.
+   * - 28 px (desktop default) was the original P0 from the mobile audit:
+   *   "4–6 icon buttons packed horizontally trigger accidental taps."
+   * - 44 px (WCAG AAA) was visibly too large — five 44 px icons in the
+   *   SessionTable row column wrapped to 3 rows of 2/2/1 and tripled
+   *   each session row's height.
+   * - 36 px is what most production mobile UIs land on (Material's
+   *   IconButton default, BambuStudio's controls, Apple's 44pt-which-
+   *   on-most-devices-is-~36px). Five buttons fit in a single row at
+   *   36 + 4 px gap × 4 + cell padding ≈ 200 px.
+   * Use absolute px so the 768 px block's `html { font-size: 14px }`
+   * doesn't shrink them further.
    */
   .btn-icon {
-    width: 44px;
-    height: 44px;
-    font-size: 16px;
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
     border-radius: 6px;
   }
   .btn, .btn-sm {
-    min-height: 44px;
-    padding-inline: 14px;
+    min-height: 36px;
+    padding-inline: 12px;
     font-size: 13px;
   }
   .btn-sm {
-    min-height: 40px;
+    min-height: 32px;
   }
   /* Site-wide nav touch targets — header/footer link rows. */
   nav a, header a, footer a {
-    min-height: 40px;
+    min-height: 36px;
     display: inline-flex;
     align-items: center;
   }
