@@ -144,34 +144,10 @@ body {
 .btn-primary:hover { background: rgba(88, 166, 255, 0.15); }
 
 /*
- * Touch-target sizing on phones. Below 640 px viewports — i.e. Termux /
- * any handset — bump every interactive control to a 44 px hit box (WCAG
- * AAA minimum). The action rows in SessionTable currently pack 6–7 icon
- * buttons per row; at 28 px they're untappable on a finger-sized
- * pointer. Padding/font-size stay flexible above 640 px so the desktop
- * dashboard still reads as compact.
+ * Touch-target sizing on phones is handled below the older "compact
+ * layout" media query so the cascade order matches what we want — see
+ * the @media (max-width: 640px) block at the bottom of this file.
  */
-@media (max-width: 640px) {
-  .btn-icon {
-    width: 2.75rem;
-    height: 2.75rem;
-    font-size: 1rem;
-  }
-  .btn, .btn-sm {
-    min-height: 2.75rem;
-    padding-inline: 0.875rem;
-    font-size: 0.8125rem;
-  }
-  .btn-sm {
-    min-height: 2.5rem;
-  }
-  /* Site-wide nav touch targets — header/footer link rows. */
-  nav a, header a, footer a {
-    min-height: 2.5rem;
-    display: inline-flex;
-    align-items: center;
-  }
-}
 
 /* Gauge bar */
 .gauge-bar {
@@ -212,20 +188,59 @@ body.drawer-open {
 ::-webkit-scrollbar-track { background: var(--bg-primary); }
 ::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
 
-/* Mobile compact layout — match desktop UA appearance */
+/*
+ * Mobile compact layout — match desktop UA appearance for narrow tablets
+ * and phones. NOTE: this used to shrink .btn-icon / .btn / .btn-sm too,
+ * which conflicted with the 640 px touch-target rule below — the 768 px
+ * block authored later in cascade order won and reduced buttons to 21 px,
+ * defeating the WCAG AAA goal. Button sizing is now handled exclusively
+ * by the 640 px rule that follows; this block keeps the smaller font /
+ * badge / dot / nav padding for compact layout but leaves buttons alone.
+ */
 @media (max-width: 768px) {
   html { font-size: 14px; }
-  .btn-icon {
-    width: 1.5rem;
-    height: 1.5rem;
-    font-size: 0.7rem;
-    border-radius: 4px;
-  }
-  .btn { padding: 0.25rem 0.5rem; font-size: 0.6875rem; }
-  .btn-sm { padding: 0.1875rem 0.375rem; font-size: 0.625rem; }
   .badge { padding: 0.0625rem 0.375rem; font-size: 0.625rem; }
   .dot { width: 6px; height: 6px; }
   nav a { padding: 0.3rem; }
   nav a svg { width: 16px; height: 16px; }
   .card { padding: 0.625rem; }
+}
+
+/*
+ * Touch-target sizing on phones. Below 640 px viewports — Termux on
+ * Android, any handset — bump every interactive control to a 44 px hit
+ * box (WCAG AAA minimum). The action rows in SessionTable pack 6–7 icon
+ * buttons per row; at 28 px they're untappable on a finger-sized
+ * pointer. This block is authored AFTER the 768 px block so cascade
+ * order favours the touch-target sizing on phones — switching the order
+ * was the v0.4.8 fix; previously the 768 px block silently shrunk
+ * buttons back to 21 px even though the 640 px rule was technically
+ * "more specific" by media query.
+ */
+@media (max-width: 640px) {
+  /*
+   * Use absolute pixels (not rem) so the touch target stays at 44 px
+   * regardless of the 768 px-block's `html { font-size: 14px }` shrink.
+   * 2.75 rem × 14 px = 38.5 px, which falls under WCAG AAA's 44 px floor.
+   */
+  .btn-icon {
+    width: 44px;
+    height: 44px;
+    font-size: 16px;
+    border-radius: 6px;
+  }
+  .btn, .btn-sm {
+    min-height: 44px;
+    padding-inline: 14px;
+    font-size: 13px;
+  }
+  .btn-sm {
+    min-height: 40px;
+  }
+  /* Site-wide nav touch targets — header/footer link rows. */
+  nav a, header a, footer a {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+  }
 }

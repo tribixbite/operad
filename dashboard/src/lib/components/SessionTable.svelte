@@ -628,16 +628,29 @@
 
   /* Mobile compact */
   @media (max-width: 768px) {
-    .session-table { font-size: 0.6875rem; }
+    .session-table {
+      font-size: 0.6875rem;
+      /*
+       * Force the table layout algorithm to honour our explicit column
+       * widths instead of expanding to fit unwrapped action-button
+       * content. Without this, .td-actions's natural width (5 × 44 px
+       * + gaps) blows past the viewport and the whole table is
+       * horizontally scrollable inside <main>. With table-layout:fixed,
+       * the column widths below are hard caps and the flex-wrap rule on
+       * .td-actions actually engages.
+       */
+      table-layout: fixed;
+      width: 100%;
+    }
     thead th { font-size: 0.5625rem; padding: 0 0.25rem 0.375rem; }
     /*
-     * Drop the fixed actions-column width on phone viewports — the
-     * desktop hint (8.5 rem) was sized for 28 px buttons. With 44 px
-     * touch targets and 6+ icons per running-claude row, capping the
-     * column forced overflow. `auto` lets the column take whatever
-     * width its (now wrap-capable) flex content needs.
+     * On phones, allocate columns proportionally: name takes the rest,
+     * RSS gets a tight right-aligned slot, actions get just enough room
+     * for two 44 px buttons abreast — the rest wrap to additional rows.
      */
-    .th-actions { width: auto; }
+    .th-name { width: auto; }
+    .th-rss { width: 4rem; }
+    .th-actions { width: 7rem; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }
