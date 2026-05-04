@@ -143,6 +143,36 @@ body {
 .btn-primary { border-color: var(--accent-blue); color: var(--accent-blue); }
 .btn-primary:hover { background: rgba(88, 166, 255, 0.15); }
 
+/*
+ * Touch-target sizing on phones. Below 640 px viewports — i.e. Termux /
+ * any handset — bump every interactive control to a 44 px hit box (WCAG
+ * AAA minimum). The action rows in SessionTable currently pack 6–7 icon
+ * buttons per row; at 28 px they're untappable on a finger-sized
+ * pointer. Padding/font-size stay flexible above 640 px so the desktop
+ * dashboard still reads as compact.
+ */
+@media (max-width: 640px) {
+  .btn-icon {
+    width: 2.75rem;
+    height: 2.75rem;
+    font-size: 1rem;
+  }
+  .btn, .btn-sm {
+    min-height: 2.75rem;
+    padding-inline: 0.875rem;
+    font-size: 0.8125rem;
+  }
+  .btn-sm {
+    min-height: 2.5rem;
+  }
+  /* Site-wide nav touch targets — header/footer link rows. */
+  nav a, header a, footer a {
+    min-height: 2.5rem;
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
 /* Gauge bar */
 .gauge-bar {
   display: block;
