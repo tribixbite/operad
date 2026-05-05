@@ -680,15 +680,17 @@
     .session-table { font-size: 0.6875rem; }
     thead th { font-size: 0.5625rem; padding: 0 0.25rem 0.375rem; }
     /*
-     * Mobile column hints. With 21 px buttons + 0.25 rem flex gap
-     * (3.5 px at 14 px html font), 5 buttons take 5×21 + 4×3.5 = 119 px.
-     * Add cell padding (0.25 rem each side = 7 px) and we need ≥ 126 px.
-     * Use 140 px so an extra launch-app button (6 buttons) still fits
-     * without wrapping under the row, which used to push the wrapped
-     * buttons past the viewport edge.
+     * Mobile column hints. 5 × 21 px buttons + 4 × 2 px gap
+     * (`.td-actions` gap tightened to 0.125 rem on mobile below) +
+     * 8 px cell padding = 121 px. Pad to 124 px so a 6th button (e.g.
+     * launch_package) wraps cleanly. Combined with the global
+     * .card overflow guard, the table can no longer push past the
+     * viewport — earlier 140 px setting was 1 px over because the
+     * name column also had room to grow.
      */
     .th-rss { width: 3rem; }
-    .th-actions { width: 140px; }
+    .th-actions { width: 124px; }
+    .td-actions { gap: 0.125rem; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }
