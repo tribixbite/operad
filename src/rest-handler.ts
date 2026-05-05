@@ -1592,6 +1592,40 @@ export class RestHandler {
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
+        case "config-overrides": {
+          // Surface the user-mutable JSON overlay (sdk + quota knobs)
+          // that the dashboard's Settings form uses. The TOML stays the
+          // structural source of truth — this endpoint never touches it.
+          // GET   → current overlay (empty if none).
+          // PATCH → shallow-merge body into the overlay; restart hint in
+          //         the response since SDK config is read at boot.
+          const { loadOverrides, patchOverrides } = await import("./config-overrides.js");
+          const stateFile = this.ctx.config.orchestrator.state_file;
+          if (method === "GET") {
+            return { status: 200, data: loadOverrides(stateFile) };
+          }
+          if (method === "PATCH") {
+            try {
+              const parsed = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+              const merged = patchOverrides(stateFile, parsed);
+              return {
+                status: 200,
+                data: {
+                  ok: true,
+                  overrides: merged,
+                  // SDK defaults are read into the bridge at daemon start.
+                  // Persisting now is fine; new values apply on the next
+                  // daemon restart (`tmx upgrade` or watchdog cycle).
+                  applies_on: "daemon_restart",
+                },
+              };
+            } catch (err) {
+              return { status: 400, data: { error: `Invalid JSON body: ${(err as Error).message}` } };
+            }
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
         case "tokens-daily": {
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
           if (method === "GET") {

@@ -291,6 +291,50 @@ export async function launchApp(target: string): Promise<void> {
   await checkedPost(`/api/launch/${encodeURIComponent(target)}`);
 }
 
+/**
+ * Read/write the runtime overrides JSON overlay (sdk + quota knobs).
+ * The TOML config stays the structural source of truth; this overlay
+ * holds preferences the dashboard's Settings form is allowed to mutate.
+ */
+export interface ConfigOverrides {
+  sdk?: {
+    effort?: "low" | "medium" | "high" | "max";
+    thinking?: "adaptive" | "enabled" | "disabled";
+    max_budget_usd?: number;
+    model?: string;
+  };
+  quota?: {
+    warning_pct?: number;
+    critical_pct?: number;
+    weekly_tokens?: number;
+  };
+}
+
+export async function fetchConfigOverrides(): Promise<ConfigOverrides> {
+  const res = await fetch("/api/config-overrides");
+  return checkedJson(res);
+}
+
+/**
+ * Shallow-merge a patch into the overlay. Keys not present in `patch`
+ * are preserved on disk. Returns the merged result + a hint about
+ * when the new values take effect (`applies_on: "daemon_restart"`).
+ */
+export async function patchConfigOverrides(
+  patch: ConfigOverrides,
+): Promise<{ ok: boolean; overrides: ConfigOverrides; applies_on: string }> {
+  const res = await fetch("/api/config-overrides", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+  }
+  return res.json();
+}
+
 // -- Schedules / consolidation / leases / trust -------------------------------
 
 /** List all persisted agent schedules (cron + interval). */

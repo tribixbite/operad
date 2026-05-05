@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
-  import { fetchCustomization, fetchFileContent, saveFileContent, downloadFile, fetchRecent } from "$lib/api";
+  import { fetchCustomization, fetchFileContent, saveFileContent, downloadFile, fetchRecent, fetchConfigOverrides, patchConfigOverrides } from "$lib/api";
   import type {
     CustomizationResponse, McpServerInfo, PluginInfo, SkillInfo, PlanInfo,
     ClaudeMdInfo, HookInfo, MarketplacePlugin, RecentProject,
@@ -69,13 +69,55 @@
     agentsMd: false,
   });
 
-  /** SDK configuration state */
+  /**
+   * SDK configuration state. Loaded from the runtime-overrides overlay
+   * via fetchConfigOverrides on mount; saved back via the Save button
+   * with patchConfigOverrides. Defaults below are the in-memory
+   * fallback when no overlay exists yet.
+   */
   let sdkDefaults = $state({
     effort: "high" as "low" | "medium" | "high" | "max",
     thinking: "adaptive" as "adaptive" | "enabled" | "disabled",
     maxBudgetUsd: 0,
     model: "",
   });
+  /** Set after a successful save; cleared on next form change. */
+  let sdkSaveStatus = $state<null | { kind: "ok" | "err"; msg: string }>(null);
+  let sdkSaving = $state(false);
+
+  /** Load existing overrides on mount so the form mirrors what the
+   * daemon will read at next start. */
+  $effect(() => {
+    fetchConfigOverrides().then((o) => {
+      if (o.sdk?.effort) sdkDefaults.effort = o.sdk.effort;
+      if (o.sdk?.thinking) sdkDefaults.thinking = o.sdk.thinking;
+      if (typeof o.sdk?.max_budget_usd === "number") sdkDefaults.maxBudgetUsd = o.sdk.max_budget_usd;
+      if (typeof o.sdk?.model === "string") sdkDefaults.model = o.sdk.model;
+    }).catch(() => { /* offline / 404 — keep in-memory defaults */ });
+  });
+
+  async function saveSdkDefaults() {
+    sdkSaving = true;
+    sdkSaveStatus = null;
+    try {
+      const res = await patchConfigOverrides({
+        sdk: {
+          effort: sdkDefaults.effort,
+          thinking: sdkDefaults.thinking,
+          max_budget_usd: sdkDefaults.maxBudgetUsd,
+          model: sdkDefaults.model,
+        },
+      });
+      sdkSaveStatus = {
+        kind: "ok",
+        msg: `Saved. New defaults apply on ${res.applies_on === "daemon_restart" ? "next daemon restart (`tmx upgrade` or watchdog cycle)" : res.applies_on}.`,
+      };
+    } catch (err) {
+      sdkSaveStatus = { kind: "err", msg: `Save failed: ${(err as Error).message}` };
+    } finally {
+      sdkSaving = false;
+    }
+  }
 
   /** Which item is expanded for detail view (keyed by path or id) */
   let expandedItem: string | null = $state(null);
@@ -1118,6 +1160,14 @@ Example usage or output
             These defaults apply to new SDK streaming sessions started from the dashboard.
             Per-session overrides are available in the conversation drawer.
           </p>
+          <div class="sdk-actions">
+            <button class="btn btn-sm btn-primary" onclick={saveSdkDefaults} disabled={sdkSaving}>
+              {sdkSaving ? "Saving…" : "Save defaults"}
+            </button>
+            {#if sdkSaveStatus}
+              <span class="sdk-save-msg" class:err={sdkSaveStatus.kind === "err"}>{sdkSaveStatus.msg}</span>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -1569,6 +1619,18 @@ Example usage or output
     margin: 0.75rem 0 0;
     line-height: 1.5;
   }
+  .sdk-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.625rem;
+    flex-wrap: wrap;
+  }
+  .sdk-save-msg {
+    font-size: 0.6875rem;
+    color: var(--accent-green);
+  }
+  .sdk-save-msg.err { color: var(--accent-red); }
   .badge-green {
     background: rgba(34, 197, 94, 0.15);
     color: #22c55e;

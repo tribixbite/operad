@@ -79,6 +79,119 @@ describe("validateConfig", () => {
       expect(err.fix.length).toBeGreaterThan(0);
     }
   });
+
+  /*
+   * Multi-runtime: opencode and codex SessionTypes should be accepted by
+   * validateConfig the same way claude is — they're agent runtimes that
+   * use SessionRuntime adapters for startup, so the validator (which
+   * only flags missing names + service-type missing-command) shouldn't
+   * fire on them.
+   */
+  test("opencode session with path is valid", () => {
+    const cfg = { sessions: [sessionWith({ name: "spike", type: "opencode", command: undefined, path: "/tmp/p" })] } as unknown as TmxConfig;
+    expect(validateConfig(cfg)).toEqual([]);
+  });
+
+  test("codex session with path is valid", () => {
+    const cfg = { sessions: [sessionWith({ name: "research", type: "codex", command: undefined, path: "/tmp/p" })] } as unknown as TmxConfig;
+    expect(validateConfig(cfg)).toEqual([]);
+  });
+});
+
+/*
+ * Parser-level tests: validateConfigFile loads + parses a TOML file from
+ * disk and returns *string* errors from both parse-time enforcement and
+ * post-parse validateConfig. This is where the SessionType union and
+ * the agent-runtime path-required rule actually fire.
+ */
+import { validateConfigFile } from "../config.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+function withTomlFile(toml: string, fn: (path: string) => void) {
+  const dir = mkdtempSync(join(tmpdir(), "operad-config-test-"));
+  const path = join(dir, "operad.toml");
+  writeFileSync(path, toml, "utf8");
+  try { fn(path); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+describe("validateConfigFile — agent runtime types parse cleanly", () => {
+  test("opencode session with path parses without errors", () => {
+    withTomlFile(
+      `
+      [orchestrator]
+      [[session]]
+      name = "spike"
+      type = "opencode"
+      path = "/tmp/spike"
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("codex session with path parses without errors", () => {
+    withTomlFile(
+      `
+      [orchestrator]
+      [[session]]
+      name = "research"
+      type = "codex"
+      path = "/tmp/research"
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("opencode without path is rejected (path required for agent runtimes)", () => {
+    withTomlFile(
+      `
+      [orchestrator]
+      [[session]]
+      name = "spike"
+      type = "opencode"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.some((e) => /path/i.test(e))).toBe(true);
+      },
+    );
+  });
+
+  test("codex without path is rejected", () => {
+    withTomlFile(
+      `
+      [orchestrator]
+      [[session]]
+      name = "research"
+      type = "codex"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.some((e) => /path/i.test(e))).toBe(true);
+      },
+    );
+  });
+
+  test("unknown SessionType is rejected at parse time", () => {
+    withTomlFile(
+      `
+      [orchestrator]
+      [[session]]
+      name = "ghost"
+      type = "windsurf"
+      path = "/tmp/g"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.length).toBeGreaterThan(0);
+        // Don't pin exact message — just confirm the type field is flagged.
+        expect(errors.some((e) => /type/i.test(e))).toBe(true);
+      },
+    );
+  });
 });
 
 describe("migrateState", () => {

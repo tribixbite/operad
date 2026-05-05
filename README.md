@@ -86,6 +86,40 @@ Session types:
 
 Adding a new agent runtime is a five-step adapter pattern — see `src/runtimes/runtime.ts` for the interface and the existing claude/opencode/codex adapters for examples.
 
+### Runtime adapters
+
+Coding-agent runtimes share the same lifecycle (tmux create → wait for ready prompt → optionally send "go") but differ in startup command, resume semantics, and what an idle prompt looks like. The `SessionRuntime` interface captures those differences:
+
+```ts
+// src/runtimes/runtime.ts
+export interface SessionRuntime {
+  readonly id: SessionType;            // matches TOML `type = "..."`
+  readonly label: string;              // human-readable
+  startupCommand(c: SessionConfig): string | null;
+  readonly readyPatterns: readonly RegExp[];
+  readonly readyTimeoutMs?: number;    // override default 60s
+  readonly readyPollIntervalMs?: number;
+}
+```
+
+Existing adapters (`src/runtimes/{claude,opencode,codex}.ts`) live next to it. To add a fourth:
+
+1. Add the id to `SessionType` in `src/types.ts`.
+2. Add it to `VALID_SESSION_TYPES` in `src/config.ts`.
+3. Implement the adapter under `src/runtimes/<id>.ts`.
+4. Register it in `src/runtimes/index.ts`'s `REGISTRY`.
+5. (Optional) extend `checkAgentRuntimes()` in `src/doctor.ts` so first-run users get an install hint when the binary's missing.
+
+Operad's session lifecycle code dispatches via `getRuntime(type)` — there are no `case "claude":` branches left in `session.ts` or `daemon.ts`. Test the adapter contract via `src/__tests__/runtimes.test.ts`.
+
+**Gemini CLI is not supported.** Its stateless one-shot `gemini "<prompt>"` invocation model doesn't fit operad's persistent-session orchestration; supporting it would require a separate "agent runner" subsystem rather than a SessionRuntime adapter.
+
+**`history` readers are runtime-specific.** `src/claude-session.ts` parses Claude's JSONL history; OpenCode and Codex store their conversation state differently (project-scoped, not UUID-keyed) and don't yet have parallel readers — opening them via Recent Projects works, but project-history search is Claude-only for now.
+
+### Runtime overrides
+
+The dashboard's **Settings → SDK Streaming** form persists to a JSON overlay at `<state_dir>/config-overrides.json` (typically `~/.local/share/operad/`). The TOML stays the structural source of truth; the overlay holds preferences the UI is allowed to mutate (SDK effort/thinking/budget/model, quota thresholds). New values take effect on the next daemon restart — `tmx upgrade` or a watchdog cycle.
+
 ## CLI Commands
 
 | Command | Description |

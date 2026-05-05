@@ -31,6 +31,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResul
   results.push(checkDashboard());
   results.push(checkGit());
   results.push(checkAdbBinary(opts.configPath));
+  results.push(...checkAgentRuntimes(opts.configPath));
   results.push(await checkSqliteDriver());
 
   if (!opts.skipSlowChecks) {
@@ -128,6 +129,114 @@ function checkAdbBinary(configPath?: string): CheckResult {
     };
   }
   return { name: "adb", status: "ok", message: result.stdout.trim().split("\n")[0] };
+}
+
+/**
+ * For each agent runtime referenced by the config (claude / opencode /
+ * codex), probe whether its binary is on PATH. Without this check, a
+ * `[[session]] type = "opencode"` with no `opencode` installed would
+ * boot fine and only fail when the agent first tries to start in
+ * tmux — by which point the user is debugging tmux capture-pane
+ * output. claude is special-cased: the binary may live as `cc`
+ * (the user's shell alias) so we treat absence as a warn rather than
+ * fail, since the SDK-spawn path also exists.
+ *
+ * Returns one CheckResult per *referenced* runtime. Runtimes with no
+ * sessions are skipped — no point fussing about codex if the user
+ * doesn't use it.
+ */
+function checkAgentRuntimes(configPath?: string): CheckResult[] {
+  const defaultPath =
+    process.platform === "win32"
+      ? join(
+          process.env.APPDATA ??
+            join(process.env.USERPROFILE ?? homedir(), "AppData", "Roaming"),
+          "operad",
+          "operad.toml",
+        )
+      : join(process.env.HOME ?? homedir(), ".config", "operad", "operad.toml");
+  const path = configPath ?? defaultPath;
+  if (!existsSync(path)) return [];
+
+  let text: string;
+  try { text = readFileSync(path, "utf8"); }
+  catch { return []; }
+
+  // Tolerant scan: every `type = "<id>"` line. The TOML parser is the real
+  // source of truth at boot; here we just discover which runtimes are
+  // referenced so we know which probes to run.
+  const types = new Set<string>();
+  const re = /^\s*type\s*=\s*"([a-z]+)"/gim;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) types.add(m[1].toLowerCase());
+
+  // Map runtime → (binary name, install hints per platform). claude's
+  // binary path is intentionally omitted — the SDK bridge handles it.
+  type Probe = {
+    id: string;
+    bin: string;
+    label: string;
+    severity: "fail" | "warn";
+    hints: { termux: string; mac: string; win: string; linux: string };
+  };
+  const probes: Probe[] = [
+    {
+      id: "opencode", bin: "opencode", label: "OpenCode CLI",
+      severity: "fail",
+      hints: {
+        termux: "pkg install bun  # then: bun add -g opencode-ai@latest",
+        mac:    "brew install opencode  # or: bun add -g opencode-ai@latest",
+        win:    "winget install opencode  # or: bun add -g opencode-ai@latest",
+        linux:  "bun add -g opencode-ai@latest  # or: npm i -g opencode-ai@latest",
+      },
+    },
+    {
+      id: "codex", bin: "codex", label: "OpenAI Codex CLI",
+      severity: "fail",
+      hints: {
+        termux: "bun add -g @openai/codex@latest",
+        mac:    "brew install --cask codex  # or: bun add -g @openai/codex@latest",
+        win:    "winget install OpenAI.Codex  # or: bun add -g @openai/codex@latest",
+        linux:  "bun add -g @openai/codex@latest  # or: npm i -g @openai/codex@latest",
+      },
+    },
+    {
+      id: "claude", bin: "claude", label: "Claude Code CLI",
+      severity: "warn",
+      hints: {
+        termux: "bun add -g @anthropic-ai/claude-code  # or rely on the `cc` alias / SDK bridge",
+        mac:    "brew install claude  # or: bun add -g @anthropic-ai/claude-code",
+        win:    "winget install Anthropic.Claude  # or: bun add -g @anthropic-ai/claude-code",
+        linux:  "bun add -g @anthropic-ai/claude-code  # or: npm i -g @anthropic-ai/claude-code",
+      },
+    },
+  ];
+
+  const results: CheckResult[] = [];
+  for (const p of probes) {
+    if (!types.has(p.id)) continue;
+    const r = spawnSync(p.bin, ["--version"], { encoding: "utf8", timeout: 3000 });
+    if (!r.error && r.status === 0) {
+      results.push({
+        name: `runtime:${p.id}`,
+        status: "ok",
+        message: `${p.label} → ${(r.stdout || r.stderr || "").trim().split("\n")[0]}`,
+      });
+      continue;
+    }
+    let fix: string;
+    if (process.env.TERMUX_VERSION || process.env.PREFIX?.includes("com.termux")) fix = p.hints.termux;
+    else if (process.platform === "darwin") fix = p.hints.mac;
+    else if (process.platform === "win32") fix = p.hints.win;
+    else fix = p.hints.linux;
+    results.push({
+      name: `runtime:${p.id}`,
+      status: p.severity,
+      message: `Config references type="${p.id}" but \`${p.bin}\` is not on PATH — sessions will fail to start`,
+      fix,
+    });
+  }
+  return results;
 }
 
 /**

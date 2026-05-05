@@ -1286,6 +1286,22 @@ export class Daemon {
       // Accumulate assistant text per session for memory extraction on result
       const assistantTextBuffer = new Map<string, string>();
 
+      // Apply the JSON overlay (config-overrides.json) so the dashboard's
+      // SDK Defaults form actually takes effect. The TOML is the source
+      // of truth for structure (sessions, ADB, etc.); the overlay holds
+      // user-mutable preferences keyed by /api/config endpoints.
+      const { loadOverrides } = await import("./config-overrides.js");
+      const overrides = loadOverrides(this.config.orchestrator.state_file);
+      const sdkConfig: import("./sdk-bridge.js").SdkBridgeConfig = {};
+      if (overrides.sdk?.effort) sdkConfig.effort = overrides.sdk.effort;
+      if (overrides.sdk?.thinking === "adaptive") sdkConfig.thinking = { type: "adaptive" };
+      else if (overrides.sdk?.thinking === "enabled") sdkConfig.thinking = { type: "enabled" };
+      else if (overrides.sdk?.thinking === "disabled") sdkConfig.thinking = { type: "disabled" };
+      if (typeof overrides.sdk?.max_budget_usd === "number" && overrides.sdk.max_budget_usd > 0) {
+        sdkConfig.maxBudgetUsd = overrides.sdk.max_budget_usd;
+      }
+      if (overrides.sdk?.model) sdkConfig.model = overrides.sdk.model;
+
       this.sdkBridge = new SdkBridge(
         this.log,
         (sessionName, data) => {
@@ -1348,6 +1364,7 @@ export class Daemon {
             }
           }
         },
+        sdkConfig,
       );
 
       // Wire WS message handler — dispatched via WsHandler

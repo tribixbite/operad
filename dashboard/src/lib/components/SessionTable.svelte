@@ -210,6 +210,16 @@
         onclick={(e) => handleOpenTab(e, session.name)}
         title="Open in Termux tab"
       >{session.name}</button>
+      <!--
+        Runtime badge — only shown for non-claude agents so the row stays
+        uncluttered on the dominant case. session.type is one of
+        claude / opencode / codex / daemon / service; we hide it for
+        claude (default) and for daemon/service (which aren't agent
+        runtimes, the user already knows from the lack of a chat icon).
+      -->
+      {#if session.type === "opencode" || session.type === "codex"}
+        <span class="runtime-badge {session.type}" title={`${session.type} runtime`}>{session.type}</span>
+      {/if}
       {#if session.claude_status === "waiting"}
         <span class="claude-badge waiting" title="Waiting for input">idle</span>
       {:else if session.claude_status === "working"}
@@ -568,6 +578,32 @@
   }
   .session-name:hover { text-decoration: underline; }
   .session-name:active { color: var(--accent-purple); }
+  /*
+   * Runtime badge — inline tag identifying non-claude agents. Hidden
+   * on the default claude case so the row stays uncluttered. Per-
+   * runtime accent colours pick up the landing page's branding.
+   */
+  .runtime-badge {
+    font-size: 0.5625rem;
+    padding: 0.0625rem 0.3125rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-left: 0.25rem;
+    font-weight: 500;
+    line-height: 1.2;
+    flex-shrink: 0;
+  }
+  .runtime-badge.opencode {
+    color: var(--accent-purple);
+    background: rgba(188, 140, 255, 0.12);
+    border: 1px solid rgba(188, 140, 255, 0.3);
+  }
+  .runtime-badge.codex {
+    color: var(--accent-cyan, #22d3ee);
+    background: rgba(34, 211, 238, 0.12);
+    border: 1px solid rgba(34, 211, 238, 0.3);
+  }
   /* Claude status badge */
   .claude-badge {
     font-size: 0.5625rem;
