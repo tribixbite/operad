@@ -143,11 +143,6 @@ body {
 .btn-primary { border-color: var(--accent-blue); color: var(--accent-blue); }
 .btn-primary:hover { background: rgba(88, 166, 255, 0.15); }
 
-/*
- * Touch-target sizing on phones is handled below the older "compact
- * layout" media query so the cascade order matches what we want — see
- * the @media (max-width: 640px) block at the bottom of this file.
- */
 
 /* Gauge bar */
 .gauge-bar {
@@ -189,95 +184,36 @@ body.drawer-open {
 ::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
 
 /*
- * Mobile compact layout — match desktop UA appearance for narrow tablets
- * and phones. NOTE: this used to shrink .btn-icon / .btn / .btn-sm too,
- * which conflicted with the 640 px touch-target rule below — the 768 px
- * block authored later in cascade order won and reduced buttons to 21 px,
- * defeating the WCAG AAA goal. Button sizing is now handled exclusively
- * by the 640 px rule that follows; this block keeps the smaller font /
- * badge / dot / nav padding for compact layout but leaves buttons alone.
+ * Mobile compact layout — restored to the pre-touch-target-bump shape
+ * that the user preferred. The earlier 36 / 44 px rules made buttons
+ * visibly too large for the dashboard's information-dense rows.
+ *
+ * 1.5 rem (= ~21 px at the 14 px html font-size below) is the historical
+ * sizing — small but reachable on a finger. Compact-card summary rows
+ * keep their tightened padding so the home-page status stack stays
+ * visually even (the ADB/Memory/etc cards used to render at uneven
+ * heights with the bigger button rule).
  */
 @media (max-width: 768px) {
   html { font-size: 14px; }
+  .btn-icon {
+    width: 1.5rem;
+    height: 1.5rem;
+    font-size: 0.7rem;
+    border-radius: 4px;
+  }
+  .btn { padding: 0.25rem 0.5rem; font-size: 0.6875rem; }
+  .btn-sm { padding: 0.1875rem 0.375rem; font-size: 0.625rem; }
   .badge { padding: 0.0625rem 0.375rem; font-size: 0.625rem; }
   .dot { width: 6px; height: 6px; }
   nav a { padding: 0.3rem; }
   nav a svg { width: 16px; height: 16px; }
   .card { padding: 0.625rem; }
-}
-
-/*
- * Touch-target sizing on phones. Below 640 px viewports — Termux on
- * Android, any handset — bump every interactive control to a 44 px hit
- * box (WCAG AAA minimum). The action rows in SessionTable pack 6–7 icon
- * buttons per row; at 28 px they're untappable on a finger-sized
- * pointer. This block is authored AFTER the 768 px block so cascade
- * order favours the touch-target sizing on phones — switching the order
- * was the v0.4.8 fix; previously the 768 px block silently shrunk
- * buttons back to 21 px even though the 640 px rule was technically
- * "more specific" by media query.
- */
-@media (max-width: 640px) {
-  /*
-   * Phone touch targets: 36 px is the practical sweet spot.
-   * - 28 px (desktop default) was the original P0 from the mobile audit:
-   *   "4–6 icon buttons packed horizontally trigger accidental taps."
-   * - 44 px (WCAG AAA) was visibly too large — five 44 px icons in the
-   *   SessionTable row column wrapped to 3 rows of 2/2/1 and tripled
-   *   each session row's height.
-   * - 36 px is what most production mobile UIs land on (Material's
-   *   IconButton default, BambuStudio's controls, Apple's 44pt-which-
-   *   on-most-devices-is-~36px). Five buttons fit in a single row at
-   *   36 + 4 px gap × 4 + cell padding ≈ 200 px.
-   * Use absolute px so the 768 px block's `html { font-size: 14px }`
-   * doesn't shrink them further.
-   */
-  .btn-icon {
-    width: 36px;
-    height: 36px;
-    font-size: 14px;
-    border-radius: 6px;
-  }
-  /*
-   * Compact-card summary rows (Memory / Procs / Tokens / CFC / ADB /
-   * Services at the top of the home page) are glance chrome, not
-   * primary tap targets. Most of these cards have NO inner button —
-   * the whole row IS a button — so they render at ~30–36 px tall.
-   * ADB has an inner refresh button; under the global 36 px touch
-   * rule it inflated the card to 55 px and broke the visual rhythm.
-   *
-   * Two pieces:
-   *   - Inner btn-icon shrinks to 22 px (still finger-tappable; the
-   *     whole .card-header area is a tap zone too).
-   *   - Card-header vertical padding trimmed from 0.625rem to
-   *     0.375rem so a 22 px button + padding ≈ 34 px, matching the
-   *     text-only cards at 33–36 px. This applies uniformly so
-   *     button-as-row cards (Memory etc) drop 4 px to ~30 px and
-   *     button-inside cards (ADB) drop to ~34 px — within 4 px of
-   *     each other instead of 20+ px.
-   */
-  .compact-card .btn-icon {
-    width: 22px;
-    height: 22px;
-    font-size: 0.75rem;
-    border-radius: 4px;
-  }
+  /* Compact-card padding trim kept from the alignment-fix work — the
+   * ADB row's inner refresh button benefits from a tighter card-header
+   * so its row height matches the text-only neighbour cards. */
   .compact-card .card-header {
     padding-top: 0.375rem;
     padding-bottom: 0.375rem;
-  }
-  .btn, .btn-sm {
-    min-height: 36px;
-    padding-inline: 12px;
-    font-size: 13px;
-  }
-  .btn-sm {
-    min-height: 32px;
-  }
-  /* Site-wide nav touch targets — header/footer link rows. */
-  nav a, header a, footer a {
-    min-height: 36px;
-    display: inline-flex;
-    align-items: center;
   }
 }
