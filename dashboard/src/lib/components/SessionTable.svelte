@@ -628,38 +628,93 @@
 
   /* Mobile compact */
   @media (max-width: 768px) {
-    .session-table {
-      font-size: 0.6875rem;
-      /*
-       * Force the table layout algorithm to honour our explicit column
-       * widths instead of expanding to fit unwrapped action-button
-       * content. Without this, .td-actions's natural width (5 × 44 px
-       * + gaps) blows past the viewport and the whole table is
-       * horizontally scrollable inside <main>. With table-layout:fixed,
-       * the column widths below are hard caps and the flex-wrap rule on
-       * .td-actions actually engages.
-       */
-      table-layout: fixed;
-      width: 100%;
-    }
-    thead th { font-size: 0.5625rem; padding: 0 0.25rem 0.375rem; }
     /*
-     * Phone column allocation. With 36 px buttons (see the 640 px rule
-     * in app.css), a running-claude session row has 5 action icons:
-     * 5 × 36 + 4 × 3.5 gap + 8 px cell padding ≈ 202 px. Bumped to 210 px
-     * so the 5th button doesn't wrap by 2 px when the html font-size
-     * shrink kicks in. If a future runtime exposes a sixth icon (e.g. an
-     * extra runtime-specific action), it'll wrap below — acceptable.
-     * RSS gets a tight right-aligned slot, name takes the rest.
+     * Mobile layout: each session row becomes a 2-line card.
+     *   Line 1:  ● name                              152 MB
+     *   Line 2:  [💬] [⏹] [↻] [▶] [⏸]
+     *
+     * Why two lines instead of a single flex strip:
+     *   - A single-line strip with name flex-grow:1 leaves 20+ px of
+     *     dead pixels between the short name and RSS+actions cluster
+     *     ("still misaligned" complaint, screenshot 21:08).
+     *   - A single-line strip with name shrunk to content packs tight
+     *     but action-button x positions then differ across rows by
+     *     name length (jagged right edge across the table).
+     *   - Two lines keeps each line tight while preserving consistent
+     *     button alignment vertically across rows. Standard mobile
+     *     pattern (Material lists, every iOS table view).
+     *
+     * The <tr> becomes a CSS grid with two grid rows: the first row
+     * holds name (left-fill) + RSS (right-pinned); the second row
+     * spans the full width and holds the action buttons left-aligned
+     * with consistent gaps.
      */
-    .th-name { width: auto; }
-    .th-rss { width: 52px; }
-    .th-actions { width: 210px; }
-    .session-row td { padding: 0.375rem 0.25rem; }
-    .session-name { font-size: 0.6875rem; }
-    .td-rss { font-size: 0.625rem; }
-    .td-name { gap: 0.375rem; }
+    .session-table { display: block; font-size: 0.6875rem; }
+    .session-table thead { display: none; }
+    .session-table tbody { display: block; }
+
+    .session-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 0.5rem;
+      row-gap: 0.25rem;
+      padding: 0.5rem 0.5rem;
+      border-bottom: 1px solid var(--border);
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .session-row > td {
+      display: block;
+      padding: 0;
+      border: none;
+    }
+
+    /* Line 1, left: name (truncates if long) */
+    .td-name {
+      grid-column: 1;
+      grid-row: 1;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .session-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 0.8125rem;
+    }
+    /* Line 1, right: RSS pinned to row's right edge */
+    .td-rss {
+      grid-column: 2;
+      grid-row: 1;
+      justify-self: end;
+      align-self: center;
+      font-size: 0.6875rem;
+      white-space: nowrap;
+    }
+    /* Line 2: action buttons span full row width, left-aligned. The
+     * display:flex must be reasserted because `.session-row > td
+     * { display: block }` above blocks the desktop `.td-actions
+     * { display: flex }` rule (which is what lets justify-content
+     * apply to the buttons inside). Without this, the buttons fall
+     * back to inline-block and text-align:right (also inherited from
+     * desktop) pushes them to the right edge of the row. */
+    .td-actions {
+      display: flex;
+      grid-column: 1 / span 2;
+      grid-row: 2;
+      justify-self: stretch;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 0.5rem;
+      text-align: left;
+    }
     .claude-badge { font-size: 0.5rem; padding: 0.0625rem 0.25rem; }
     .pane-output { font-size: 0.5625rem; max-height: 3.5rem; padding: 0.25rem 0.375rem; }
+    /* Expanded detail row also spans full width as a card */
+    .session-row + tr td.td-expand {
+      display: block;
+      padding: 0.25rem 0.375rem 0.75rem;
+    }
   }
 </style>
