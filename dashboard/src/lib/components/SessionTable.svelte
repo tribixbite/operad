@@ -127,8 +127,31 @@
     }
   }
 
-  async function handleOpenTab(e: Event, name: string) {
+  /**
+   * Click handler for the session-name button.
+   *
+   * Sessions with a `launch_package` (e.g. x2d → com.termux.x11, the
+   * BambuStudio GUI surfaced through the termux-x11 viewer) get the
+   * viewer launched on tap — the user's intent is "show me the screen
+   * for this session", not "open a Termux tab" (those sessions are
+   * bare and have no tmux pane to switch to anyway).
+   *
+   * Everything else (claude/opencode/codex tmux sessions) keeps the
+   * existing behaviour: open a Termux tab attached to the tmux pane.
+   */
+  async function handleOpenTab(e: Event, name: string, launchPackage: string | null | undefined) {
     e.stopPropagation();
+    if (launchPackage) {
+      // Bring the viewer activity to the foreground via the same code
+      // path the dedicated 🚀 launch icon uses. ADB monkey preferred,
+      // am start -n fallback — see android-engine.launchApp.
+      try {
+        await launchApp(launchPackage);
+      } catch (err) {
+        actionError = `Launch ${launchPackage} failed: ${(err as Error).message}`;
+      }
+      return;
+    }
     try {
       await openTab(name);
     } catch (err) {
@@ -207,8 +230,10 @@
       <span class="dot {dotCls(session.status, session.suspended)}"></span>
       <button
         class="session-name"
-        onclick={(e) => handleOpenTab(e, session.name)}
-        title="Open in Termux tab"
+        onclick={(e) => handleOpenTab(e, session.name, session.launch_package)}
+        title={session.launch_package
+          ? `Show ${session.name} on screen (launches ${session.launch_package})`
+          : "Open in Termux tab"}
       >{session.name}</button>
       <!--
         Runtime badge — only shown for non-claude agents so the row stays
