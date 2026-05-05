@@ -1,9 +1,17 @@
 <script lang="ts">
-  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt } from "$lib/api";
+  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt, openSession } from "$lib/api";
+  import { store } from "$lib/store.svelte";
   import type { PromptSearchResult, PromptEntry } from "$lib/types";
+  import ConversationDrawer from "./ConversationDrawer.svelte";
 
   interface Props {
-    /** Called when user selects a prompt; receives the full display text */
+    /**
+     * Called when user selects a prompt — receives the full display text.
+     * When provided (e.g. ConversationViewer's input picker) the row's
+     * primary tap inserts the prompt into the consumer. When NOT provided
+     * (the home-page library) the row tap is a no-op; the explicit copy
+     * and open icon-buttons do the work.
+     */
     onselect?: (text: string) => void;
     /** Compact dropdown-style rendering (smaller font, no header) */
     compact?: boolean;
@@ -139,14 +147,18 @@
     }
   }
 
-  // -- Select / copy ----------------------------------------------------------
+  // -- Select / copy / open ---------------------------------------------------
 
+  /**
+   * Primary tap on a prompt row.
+   *  - If the parent passed `onselect` (e.g. ConversationViewer's input
+   *    picker), invoke it — that's the intentional tap target.
+   *  - Otherwise (home-page library) do nothing. The user wants to use
+   *    the explicit copy / open icon buttons; auto-copy on tap was easy
+   *    to trigger by accident on a phone.
+   */
   function handleSelect(prompt: PromptEntry) {
-    if (onselect) {
-      onselect(prompt.display);
-    } else {
-      copyToClipboard(prompt.display);
-    }
+    if (onselect) onselect(prompt.display);
   }
 
   async function copyToClipboard(text: string) {
@@ -157,6 +169,64 @@
     } catch {
       copyFeedback = "Copy failed";
       setTimeout(() => { copyFeedback = null; }, 1500);
+    }
+  }
+
+  /**
+   * "Open" a prompt: jump to the conversation it came from.
+   *
+   * Strategy: each prompt records its project path. We look for a
+   * currently-tracked session whose path matches, and open the
+   * ConversationDrawer for it. If no session is tracked we fall back
+   * to opening one via cmdOpen (the daemon will reuse an existing
+   * registry entry if one exists for that path), then attach the
+   * drawer once it's running.
+   *
+   * `drawerSession` is bound to the ConversationDrawer at the bottom
+   * of this component. The drawer unsubscribes / cleans up on close.
+   */
+  let drawerSession = $state<string | null>(null);
+  let openingSession = $state<string | null>(null); // prompt id mid-open
+
+  function findSessionForPath(path: string): string | null {
+    const sessions = store.daemon?.sessions ?? [];
+    const match = sessions.find((s) => s.path === path);
+    return match?.name ?? null;
+  }
+
+  async function handleOpenPrompt(prompt: PromptEntry) {
+    // 1) Already-tracked session for this project? Open its drawer.
+    const existing = findSessionForPath(prompt.project);
+    if (existing) {
+      drawerSession = existing;
+      return;
+    }
+    // 2) Otherwise open a fresh session for the project (cmdOpen reuses
+    // any existing registry entry — see src/session-commands.ts:cmdOpen)
+    // and try the drawer once it appears in status.
+    openingSession = prompt.id;
+    try {
+      await openSession(prompt.project);
+      // status refresh is automatic via the SSE store; poll briefly for the
+      // session to register, then attach.
+      const start = Date.now();
+      while (Date.now() - start < 5000) {
+        await new Promise((r) => setTimeout(r, 250));
+        const found = findSessionForPath(prompt.project);
+        if (found) {
+          drawerSession = found;
+          break;
+        }
+      }
+      if (!drawerSession) {
+        copyFeedback = "Opened — refresh to view conversation";
+        setTimeout(() => { copyFeedback = null; }, 2000);
+      }
+    } catch (err) {
+      copyFeedback = `Open failed: ${(err as Error).message}`;
+      setTimeout(() => { copyFeedback = null; }, 2500);
+    } finally {
+      openingSession = null;
     }
   }
 
@@ -297,13 +367,20 @@
       </div>
     {:else}
       {#each prompts as prompt (prompt.id)}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!--
+          When `onselect` is provided (e.g. ConversationViewer's input
+          picker) the row tap inserts the prompt; render as a button.
+          Otherwise the row is a static container — explicit copy / open
+          icon-buttons handle the actions, so an accidental tap doesn't
+          dump 100+ chars onto the clipboard.
+        -->
         <div
           class="prompt-item"
-          onclick={() => handleSelect(prompt)}
-          onkeydown={(e) => { if (e.key === "Enter") handleSelect(prompt); }}
-          role="button"
-          tabindex="0"
+          class:selectable={!!onselect}
+          onclick={onselect ? () => handleSelect(prompt) : undefined}
+          onkeydown={onselect ? (e) => { if (e.key === "Enter") handleSelect(prompt); } : undefined}
+          role={onselect ? "button" : undefined}
+          tabindex={onselect ? 0 : undefined}
           title={prompt.display}
         >
           <div class="prompt-text">{truncate(prompt.display, 120)}</div>
@@ -314,17 +391,54 @@
               <span class="prompt-session">{prompt.sessionId.slice(0, 6)}</span>
             {/if}
           </div>
-          <!-- Star toggle -->
-          <button
-            class="star-btn"
-            class:starred={prompt.starred}
-            onclick={(e) => { e.stopPropagation(); toggleStar(prompt); }}
-            title={prompt.starred ? "Unstar" : "Star"}
-          >
-            {prompt.starred ? "\u2605" : "\u2606"}
-          </button>
+          <div class="prompt-actions">
+            {#if !onselect}
+              <!--
+                Copy → clipboard. Replaces the implicit row-tap-to-copy
+                behaviour that was easy to fire by accident on a phone.
+              -->
+              <button
+                class="prompt-action-btn"
+                onclick={(e) => { e.stopPropagation(); copyToClipboard(prompt.display); }}
+                title="Copy prompt text"
+                aria-label="Copy prompt"
+              ><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.75 1A1.75 1.75 0 0 0 3 2.75v8.5A1.75 1.75 0 0 0 4.75 13H6v1.25A1.75 1.75 0 0 0 7.75 16h6A1.75 1.75 0 0 0 15.5 14.25v-8.5A1.75 1.75 0 0 0 13.75 4H12.5V2.75A1.75 1.75 0 0 0 10.75 1zM4.5 2.75A.25.25 0 0 1 4.75 2.5h6A.25.25 0 0 1 11 2.75v8.5a.25.25 0 0 1-.25.25H4.75a.25.25 0 0 1-.25-.25zM12.5 5.5h1.25a.25.25 0 0 1 .25.25v8.5a.25.25 0 0 1-.25.25h-6a.25.25 0 0 1-.25-.25V13h3A1.75 1.75 0 0 0 12.5 11.25z"/></svg></button>
+              <!--
+                Open → ConversationDrawer for the project this prompt
+                came from. Reuses an already-tracked session when one
+                exists; otherwise calls cmdOpen (which reuses any
+                registered entry per the same-path dedup behaviour).
+              -->
+              <button
+                class="prompt-action-btn"
+                onclick={(e) => { e.stopPropagation(); handleOpenPrompt(prompt); }}
+                disabled={openingSession === prompt.id}
+                title={`Open conversation in ${projectBasename(prompt.project)}`}
+                aria-label="Open conversation"
+              >{openingSession === prompt.id
+                ? "…"
+                : "›"}</button>
+            {/if}
+            <!-- Star toggle (kept) -->
+            <button
+              class="star-btn"
+              class:starred={prompt.starred}
+              onclick={(e) => { e.stopPropagation(); toggleStar(prompt); }}
+              title={prompt.starred ? "Unstar" : "Star"}
+            >
+              {prompt.starred ? "\u2605" : "\u2606"}
+            </button>
+          </div>
         </div>
       {/each}
+
+      <!-- Conversation drawer mounts when a prompt's "open" button fires. -->
+      {#if drawerSession}
+        <ConversationDrawer
+          sessionName={drawerSession}
+          onclose={() => (drawerSession = null)}
+        />
+      {/if}
 
       {#if hasMore}
         <button
@@ -484,6 +598,46 @@
   }
   .prompt-item:first-child { border-top: none; }
   .prompt-item:hover { background: var(--bg-tertiary); }
+  /* Pointer cursor only when the row is the actual tap target. The
+   * non-selectable case has explicit copy/open icon-buttons instead. */
+  .prompt-item:not(.selectable) { cursor: default; }
+  .prompt-item:not(.selectable):hover { background: none; }
+  /* Container for copy / open / star actions on the right side. */
+  .prompt-actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+  }
+  .prompt-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    line-height: 1;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+    flex-shrink: 0;
+  }
+  .prompt-action-btn:hover {
+    background: var(--border);
+    color: var(--text-primary);
+    border-color: var(--accent-blue);
+  }
+  .prompt-action-btn:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
 
   .prompt-text {
     grid-column: 1;
