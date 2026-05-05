@@ -333,7 +333,13 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    width: 100%;
+    /* `flex-basis: 100%` forces the command line onto a new flex row
+     * inside .script-info (which is flex-wrap: wrap). Without it, the
+     * cmd shares the line with name + badge and pushes the play button
+     * off the right on long commands. With it, the cmd reliably sits
+     * on its own line below the name/badge. */
+    flex-basis: 100%;
+    min-width: 0;
   }
   .no-results {
     font-size: 0.6875rem;

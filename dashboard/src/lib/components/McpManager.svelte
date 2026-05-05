@@ -305,6 +305,11 @@
   .disabled-row { opacity: 0.5; }
   .name-cell { font-weight: 500; color: var(--accent-blue); }
   .cmd-cell {
+    /* The .table-scroll parent intentionally allows horizontal scroll
+     * for long MCP commands. min-width:0 lets the cell shrink first
+     * before the scroll engages, so on phone viewports the table
+     * fits without a swipe whenever commands are short. */
+    min-width: 0;
     max-width: 10rem;
     overflow: hidden;
     text-overflow: ellipsis;

@@ -282,6 +282,13 @@
     padding: 0.0625rem 0.125rem;
     border-radius: 2px;
     white-space: nowrap;
+    /* Allow each crumb to shrink in addition to its 80 px cap so a
+     * deep path doesn't push the breadcrumbs container past its
+     * parent. The .breadcrumbs parent already has min-width:0 +
+     * overflow:hidden but children also need flex-shrink to compose
+     * correctly with the wrapper's clip. */
+    min-width: 0;
+    flex-shrink: 1;
     max-width: 80px;
     overflow: hidden;
     text-overflow: ellipsis;

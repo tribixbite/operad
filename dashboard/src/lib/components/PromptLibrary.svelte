@@ -554,6 +554,13 @@
     border-radius: 4px;
     outline: none;
     cursor: pointer;
+    /*
+     * On phones, allow the select to shrink. Without min-width:0 the
+     * native <select> insists on its content width (longest option
+     * text) and pushes the filter-row past its container.
+     */
+    min-width: 0;
+    flex: 0 1 10rem;
     max-width: 10rem;
   }
   .project-select:focus { border-color: var(--accent-blue); }
@@ -675,6 +682,14 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    /*
+     * Allow the project name to shrink to share row space with time
+     * + session badge. min-width: 0 unlocks the ellipsis when the
+     * meta row is tighter than the project's natural width. max-width
+     * caps the desktop case so a long path doesn't dominate the row.
+     */
+    min-width: 0;
+    flex: 0 1 auto;
     max-width: 8rem;
   }
   .prompt-time { white-space: nowrap; }
