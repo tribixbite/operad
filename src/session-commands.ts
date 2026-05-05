@@ -222,6 +222,82 @@ export class SessionCommands {
     return this.cmdStart();
   }
 
+  /**
+   * Force-cleanup a session — "cleave broken stuff".
+   *
+   * The motivating case: termux-x11 crashes but the BambuStudio child
+   * (or any other GUI consumer) is left orphaned, reparented to init,
+   * still consuming CPU. Normal stop only kills processes the daemon
+   * tracks; it can't reach an orphan whose adopted PID died with the
+   * X server.
+   *
+   * Strategy:
+   *   1. Run the normal stop path (kills tracked PIDs, group-kills
+   *      anything matching the bare-service pattern from
+   *      getBareServicePattern).
+   *   2. Then a wider sweep — pkill -9 -f for every keyword the daemon
+   *      knows for this session type. For x2d this means BambuStudio,
+   *      run_gui.sh, bambu-studio. Catches orphans the regular stop
+   *      path missed because the parent PID was already gone.
+   *   3. Reset state to stopped + drop any adopted PID record.
+   *
+   * Returns the count of pkill matches per pattern (best-effort —
+   * pkill doesn't always emit a count).
+   */
+  async cmdForceCleanup(name: string): Promise<IpcResponse> {
+    const resolved = this.ctx.resolveName(name);
+    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
+
+    // Step 1: normal stop (covers tracked PIDs + adoptedPids).
+    await this.ctx.stopSessionByName(resolved);
+
+    // Step 2: wide sweep. Derive the pattern set from session config.
+    const cfg = this.ctx.config.sessions.find((s) => s.name === resolved);
+    const patterns: string[] = [];
+    if (cfg?.command) {
+      const cmd = cfg.command;
+      if (cmd.includes("termux-x11")) patterns.push("com.termux.x11.Loader", "Xtermux-x11");
+      if (cmd.includes("playwright")) patterns.push("playwright.*mcp", "chromium.*--type=");
+      if (cmd.includes("run_gui.sh") || cmd.includes("/x2d")) {
+        patterns.push("run_gui\\.sh", "BambuStudio", "bambu-studio", "x2d_bridge");
+      }
+      if (cmd.includes("xfce4-session")) patterns.push("xfce4-session", "xfdesktop", "xfce4-panel");
+    }
+
+    const sweep: Array<{ pattern: string; killed: number }> = [];
+    for (const p of patterns) {
+      try {
+        // -e prints PID for each match — count lines for telemetry.
+        const before = spawnSync("pgrep", ["-f", p], { encoding: "utf-8", timeout: 3000 });
+        const beforeCount = before.status === 0
+          ? (before.stdout ?? "").trim().split("\n").filter(Boolean).length
+          : 0;
+        if (beforeCount > 0) {
+          spawnSync("pkill", ["-9", "-f", p], { timeout: 3000, stdio: "ignore" });
+        }
+        sweep.push({ pattern: p, killed: beforeCount });
+      } catch {
+        sweep.push({ pattern: p, killed: 0 });
+      }
+    }
+
+    // Step 3: ensure state is stopped + clear adoption.
+    this.ctx.state.forceStatus(resolved, "stopped");
+
+    this.ctx.log.info(
+      `Force-cleanup '${resolved}' — patterns swept: ${JSON.stringify(sweep)}`,
+      { session: resolved },
+    );
+    return {
+      ok: true,
+      data: {
+        session: resolved,
+        sweep,
+        total_killed: sweep.reduce((n, s) => n + s.killed, 0),
+      },
+    };
+  }
+
   /** Health command — run health sweep now */
   cmdHealth(): IpcResponse {
     const results = runHealthSweep(

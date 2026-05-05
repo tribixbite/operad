@@ -181,6 +181,7 @@ export interface CmdDelegates {
   cmdOpen: (path: string, name?: string, autoGo?: boolean, priority?: number, forceNew?: boolean) => Promise<IpcResponse>;
   cmdClose: (name: string) => Promise<IpcResponse>;
   cmdDedupe: (dryRun?: boolean) => Promise<IpcResponse>;
+  cmdForceCleanup: (name: string) => Promise<IpcResponse>;
   cmdRecent: (count?: number) => IpcResponse;
   cmdSuspend: (name: string) => IpcResponse;
   cmdResume: (name: string) => IpcResponse;

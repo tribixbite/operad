@@ -283,6 +283,24 @@ export async function closeSession(name: string): Promise<void> {
 }
 
 /**
+ * Force-cleanup orphan processes for a session — "cleave broken stuff".
+ * Used when a bare service crashed mid-flight (e.g. termux-x11 died but
+ * BambuStudio kept consuming CPU). Wider than stop: pkill -9 -f for every
+ * keyword pattern the session's command matches, so reparented orphans
+ * get reaped too. Returns the kill count per pattern.
+ */
+export async function forceCleanupSession(name: string): Promise<{ session: string; sweep: Array<{ pattern: string; killed: number }>; total_killed: number }> {
+  const res = await fetch(`/api/cleanup/${encodeURIComponent(name)}`, { method: "POST" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+  }
+  const body = await res.json() as { ok: boolean; data: { session: string; sweep: Array<{ pattern: string; killed: number }>; total_killed: number }; error?: string };
+  if (!body.ok) throw new Error(body.error ?? "force-cleanup failed");
+  return body.data;
+}
+
+/**
  * Launch an Android app's launcher activity by package name (or full
  * `pkg/activity` component spec). Used by the "Launch app" button on
  * session rows whose config declares a `launch_package`.

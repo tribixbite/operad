@@ -277,8 +277,13 @@ export function killAllNotifyProcesses(): void {
  * This is aggressive but safe — termux-api processes are ephemeral and
  * the daemon immediately re-emits the current status notification.
  *
- * Also kills and restarts crond to reap zombie [crond] children that accumulate
- * when cron-spawned processes' parents die before reaping them.
+ * Also opportunistically reaps `[crond] <defunct>` zombies. operad no
+ * longer starts crond itself (cronie's inotify mode was leaking helper
+ * forks at ~5/min, accumulating thousands of zombies that exhausted
+ * the PID table) — but the user, or another orchestrator on the same
+ * device, may. When we see crond zombies on boot we pkill the parent
+ * and let init reap. No restart this time, since operad has no use
+ * for crond and ScheduleEngine handles everything natively.
  */
 function killStaleTermuxApiProcesses(): number {
   let killed = 0;
@@ -301,9 +306,9 @@ function killStaleTermuxApiProcesses(): number {
     });
   } catch { /* non-fatal — pkill returns 1 if no match */ }
 
-  // Reap zombie crond children by restarting crond.
-  // Zombies occur when cron-spawned processes' parents die before wait().
-  // Killing crond causes init to reap its zombie children, then restart crond.
+  // Reap any leaked crond zombies left over from a previous daemon boot
+  // or a separately-launched crond. Without restart — operad doesn't
+  // use it and re-spawning would just start the leak fresh.
   try {
     const zombieCount = spawnSync("sh", ["-c", "ps -e 2>/dev/null | grep -c '\\[crond\\]'"], {
       encoding: "utf-8",
@@ -313,8 +318,6 @@ function killStaleTermuxApiProcesses(): number {
     const zCount = parseInt(zombieCount.stdout?.trim() ?? "0", 10);
     if (zCount > 0) {
       spawnSync("pkill", ["-9", "crond"], { timeout: 3000, stdio: "ignore" });
-      // Restart crond after brief delay for cleanup
-      spawnSync("sh", ["-c", "sleep 1 && crond"], { timeout: 5000, stdio: "ignore" });
       killed += zCount;
     }
   } catch { /* non-fatal */ }

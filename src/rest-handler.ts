@@ -505,6 +505,16 @@ export class RestHandler {
           if (!name) return { status: 400, data: { error: "Session name required" } };
           resp = await this.ctx.cmdClose(name);
           break;
+        case "cleanup":
+          // Force-cleanup orphan processes for a session — used when a
+          // bare service crashed mid-flight (e.g. termux-x11 died but
+          // BambuStudio kept consuming CPU). Goes wider than cmdStop:
+          // pkill -9 -f for every keyword pattern the session's command
+          // matches, so reparented orphans get reaped too.
+          if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          if (!name) return { status: 400, data: { error: "Session name required" } };
+          resp = await this.ctx.cmdForceCleanup(name);
+          break;
         case "dedupe": {
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           // ?dry=1 reports what would be removed without mutating state.

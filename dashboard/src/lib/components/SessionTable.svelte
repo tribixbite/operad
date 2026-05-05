@@ -2,7 +2,7 @@
   import {
     startSession, stopSession, restartSession, goSession,
     openTab, closeSession, suspendSession, resumeSession,
-    fetchSdkStatus, launchApp,
+    fetchSdkStatus, launchApp, forceCleanupSession,
   } from "$lib/api";
   import { store, refreshStatus } from "$lib/store.svelte";
   import type { DaemonStatus, SessionState, SdkBridgeStatus } from "$lib/types";
@@ -175,6 +175,28 @@
     }
   }
 
+  /**
+   * Force-kill any orphan processes left over from a crashed bare
+   * service. Confirms first because pkill -9 can be destructive — but
+   * the wider sweep is the whole point: tracked-PID stop can't reach
+   * orphans whose parent died with the X server.
+   */
+  async function handleForceCleanup(e: Event, name: string) {
+    e.stopPropagation();
+    if (!confirm(`Force-kill all orphan processes for '${name}'? This may also affect related apps still running on the same display (e.g. BambuStudio if cleaning up termux-x11).`)) return;
+    actionError = null;
+    try {
+      const result = await forceCleanupSession(name);
+      const totals = result.sweep.filter(s => s.killed > 0).map(s => `${s.pattern}: ${s.killed}`).join(", ");
+      actionError = result.total_killed > 0
+        ? `Cleaned up ${result.total_killed} process${result.total_killed === 1 ? "" : "es"} (${totals})`
+        : "No orphan processes found";
+      await refreshStatus();
+    } catch (err) {
+      actionError = `Cleanup failed for ${name}: ${(err as Error).message}`;
+    }
+  }
+
   async function handleSuspend(e: Event, name: string) {
     e.stopPropagation();
     actionError = null;
@@ -284,6 +306,21 @@
         <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
       {:else if session.status === "stopped" || session.status === "failed" || session.status === "pending"}
         <button class="btn-icon primary" onclick={(e) => handleAction(e, "start", session.name)} title="Start"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
+        <!--
+          "Cleave broken" — force-kill orphan processes for this session.
+          The motivating case: termux-x11 dies but BambuStudio is left
+          orphaned spinning CPU, reparented to init. Normal stop only
+          touches tracked PIDs; this hits every keyword pattern the
+          daemon knows for the session's command (see
+          session-commands.cmdForceCleanup), so reparented orphans
+          finally get reaped.
+        -->
+        <button
+          class="btn-icon danger"
+          onclick={(e) => handleForceCleanup(e, session.name)}
+          title="Force-kill orphan processes for this session"
+          aria-label="Force cleanup"
+        ><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12L7 8L3 4"/><path d="M9 12L13 8L9 4"/></svg></button>
         <button class="btn-icon danger" onclick={(e) => handleClose(e, session.name)} title="Remove"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
       {/if}
     </td>

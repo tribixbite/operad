@@ -302,6 +302,7 @@ export class Daemon {
       cmdOpen: (path, name, autoGo, priority, forceNew) => this.sessionCommands.cmdOpen(path, name, autoGo, priority, forceNew),
       cmdClose: (name) => this.sessionCommands.cmdClose(name),
       cmdDedupe: (dryRun) => this.sessionCommands.cmdDedupe(dryRun),
+      cmdForceCleanup: (name) => this.sessionCommands.cmdForceCleanup(name),
       cmdRecent: (count) => this.sessionCommands.cmdRecent(count),
       cmdSuspend: (name) => this.sessionCommands.cmdSuspend(name),
       cmdResume: (name) => this.sessionCommands.cmdResume(name),
@@ -505,8 +506,14 @@ export class Daemon {
     // Step 3: Start sessions in dependency order (with boot timeout)
     const timedOut = await this.startAllSessions(bootDeadline);
 
-    // Step 4: Start cron daemon if not running
-    this.startCron();
+    // (Removed: Step 4 used to start crond. operad has zero crontab files
+    // and ScheduleEngine handles all persistent scheduling natively, so
+    // crond was vestigial — and in cronie's default-with-inotify mode it
+    // forked helper children that never got reaped, accumulating
+    // thousands of `crond <defunct>` zombies that pinned PIDs and
+    // starved fork(). startCron() and its band-aid reaper are now
+    // gone; if a user really wants system crond they can launch it
+    // themselves outside the daemon.)
 
     // Step 5: Restore Termux tabs for non-headless running sessions.
     // Uses TermuxService service_execute intent to create real Termux tabs
@@ -1086,6 +1093,12 @@ export class Daemon {
     if (cfg.command.includes("termux-x11")) return /com\.termux\.x11\.Loader/;
     // mcp-server-playwright / @playwright/mcp
     if (cfg.command.includes("playwright")) return /playwright.*mcp|mcp.*playwright/;
+    // x2d → run_gui.sh which execs BambuStudio. Match either the wrapper
+    // or BS itself so force-cleanup can take down the whole tree even
+    // when the wrapper has exec'd away.
+    if (cfg.command.includes("run_gui.sh") || cfg.command.includes("/x2d")) {
+      return /run_gui\.sh|[Bb]ambu[Ss]tudio|bambu-studio/;
+    }
     // Generic: match the first non-env non-cleanup token from the command
     // e.g. "sleep 3 && DISPLAY=:1 bun foo" → match "bun foo" is too loose
     return null;
@@ -1485,21 +1498,6 @@ export class Daemon {
     }
   }
 
-
-  // -- Cron -------------------------------------------------------------------
-
-  /** Start crond if not already running */
-  private startCron(): void {
-    try {
-      const result = spawnSync("pgrep", ["-x", "crond"], { timeout: 5000, stdio: "ignore" });
-      if (result.status !== 0) {
-        spawnSync("crond", ["-s", "-P"], { timeout: 5000, stdio: "ignore" });
-        this.log.info("Started crond");
-      }
-    } catch {
-      this.log.warn("Failed to start crond");
-    }
-  }
 
   // -- Signal handling --------------------------------------------------------
 
