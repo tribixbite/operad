@@ -59,6 +59,31 @@ body {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1rem;
+  /*
+   * Hard upper bound — no card may grow wider than its parent. Combined
+   * with body's overflow-x:hidden this means a runaway descendant
+   * (long path, wide table, fixed-width column) clips inside the card
+   * instead of pushing the card past the viewport. Box-sizing keeps
+   * border + padding inside the bound. This is the global overflow
+   * guard; per-component `min-width: 0` on flex items completes the
+   * picture for shrink behaviour.
+   */
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/*
+ * Application-root overflow guard. Without this, any grid/flex
+ * descendant that declares a fixed-width child can punch out the
+ * viewport even when body has overflow-x:hidden — body just clips,
+ * the user still sees buttons cut off. By bounding <main> we force
+ * the offender to wrap or get hidden inside its own card instead.
+ */
+main {
+  max-width: 100vw;
+  overflow-x: hidden;
+  box-sizing: border-box;
 }
 
 .badge {

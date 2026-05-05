@@ -307,6 +307,15 @@
     display: flex;
     align-items: center;
     gap: 0.375rem;
+    /*
+     * flex:1 + min-width:0 is the canonical "shrink to fit" pair.
+     * Without flex:1 the cell takes its natural content width — for
+     * scripts with long commands ("bun ./scripts/vite-cli.ts dev")
+     * that natural width exceeds the row, pushing the play button
+     * past the right edge of the parent card. min-width:0 unlocks
+     * the ellipsis on .script-name / .script-cmd inside.
+     */
+    flex: 1;
     min-width: 0;
     flex-wrap: wrap;
   }

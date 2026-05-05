@@ -679,11 +679,16 @@
      */
     .session-table { font-size: 0.6875rem; }
     thead th { font-size: 0.5625rem; padding: 0 0.25rem 0.375rem; }
-    /* 5 × 21 px buttons + 4 × 4 px gaps + cell padding ≈ 130 px, so an
-     * 8 rem column fits the running-claude row (5 actions) without
-     * wrapping. RSS column tightens to give actions enough room. */
+    /*
+     * Mobile column hints. With 21 px buttons + 0.25 rem flex gap
+     * (3.5 px at 14 px html font), 5 buttons take 5×21 + 4×3.5 = 119 px.
+     * Add cell padding (0.25 rem each side = 7 px) and we need ≥ 126 px.
+     * Use 140 px so an extra launch-app button (6 buttons) still fits
+     * without wrapping under the row, which used to push the wrapped
+     * buttons past the viewport edge.
+     */
     .th-rss { width: 3rem; }
-    .th-actions { width: 8.5rem; }
+    .th-actions { width: 140px; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }
