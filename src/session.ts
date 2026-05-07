@@ -218,7 +218,13 @@ export function sessionExists(name: string): boolean {
 /** Capture the current pane content for a session */
 export function capturePane(sessionName: string, _lines = 5): string {
   // Note: tmux 3.5a doesn't support -l flag for capture-pane
-  const output = tmux("capture-pane", "-t", `=${sessionName}`, "-p");
+  // tmux's `=name` exact-match prefix only resolves for target-session
+  // subcommands (has-session, kill-session, etc). target-pane subcommands
+  // (capture-pane, send-keys, list-panes) need a target-window form, so we
+  // append `:` — that resolves to the session's current window, then to
+  // its current pane. Without the colon, tmux treats `=name` as a literal
+  // pane name and errors with "can't find pane".
+  const output = tmux("capture-pane", "-t", `=${sessionName}:`, "-p");
   return output ?? "";
 }
 
@@ -226,10 +232,11 @@ export function capturePane(sessionName: string, _lines = 5): string {
 export function sendKeys(sessionName: string, text: string, pressEnter = true): boolean {
   // Send text and Enter as separate calls — Claude Code's TUI can miss
   // Enter when combined in a single send-keys invocation with text.
-  const textOk = tmux("send-keys", "-t", `=${sessionName}`, text) !== null;
+  // See capturePane() for why `=name:` (trailing colon) is required.
+  const textOk = tmux("send-keys", "-t", `=${sessionName}:`, text) !== null;
   if (!textOk) return false;
   if (pressEnter) {
-    return tmux("send-keys", "-t", `=${sessionName}`, "Enter") !== null;
+    return tmux("send-keys", "-t", `=${sessionName}:`, "Enter") !== null;
   }
   return true;
 }
@@ -459,7 +466,7 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
   }
 
   // Try sending Ctrl-C first for a graceful exit
-  tmux("send-keys", "-t", `=${name}`, "C-c");
+  tmux("send-keys", "-t", `=${name}:`, "C-c");
   await sleep(1000);
 
   // Send "exit" command
@@ -557,7 +564,9 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
  * running inside each tmux pane — their process groups contain the actual work.
  */
 export function getSessionPanePids(sessionName: string): number[] {
-  const output = tmux("list-panes", "-t", `=${sessionName}`, "-F", "#{pane_pid}");
+  // list-panes uses target-window, so `=name:` (trailing colon) is required
+  // for exact-match — see capturePane() for the full explanation.
+  const output = tmux("list-panes", "-t", `=${sessionName}:`, "-F", "#{pane_pid}");
   if (!output) return [];
   return output
     .split("\n")

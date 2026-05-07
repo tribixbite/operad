@@ -403,7 +403,7 @@ export class RestHandler {
             return { status: 400, data: { error: `'${name}' is a bare (headless) session — no tmux tab` } };
           }
           if (createTermuxTab(name, this.ctx.log)) {
-            try { spawnSync("tmux", ["select-window", "-t", `=${name}`], { timeout: 3000 }); } catch { /* best-effort */ }
+            try { spawnSync("tmux", ["select-window", "-t", `=${name}:`], { timeout: 3000 }); } catch { /* best-effort */ }
             bringTermuxToForeground(this.ctx.log);
             return { status: 200, data: { ok: true, session: name } };
           }

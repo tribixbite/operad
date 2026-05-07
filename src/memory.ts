@@ -153,10 +153,12 @@ export class MemoryMonitor {
   /** Get PID of the shell inside a tmux session pane */
   getSessionPid(sessionName: string): number | null {
     try {
-      // Use spawnSync to avoid shell injection via session names
-      // `=name` is tmux's exact-match target sigil — without it `-t foo`
-      // prefix-matches and `foo-2` would be returned for `foo`.
-      const result = spawnSync("tmux", ["list-panes", "-t", `=${sessionName}`, "-F", "#{pane_pid}"], {
+      // Use spawnSync to avoid shell injection via session names.
+      // `=name:` is tmux's exact-match target sigil for pane/window targets
+      // — bare `=name` only resolves for target-session subcommands. The
+      // trailing colon turns it into a target-window which then resolves
+      // to the session's current pane.
+      const result = spawnSync("tmux", ["list-panes", "-t", `=${sessionName}:`, "-F", "#{pane_pid}"], {
         encoding: "utf-8",
         timeout: 5000,
       });
