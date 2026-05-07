@@ -462,6 +462,17 @@
 
   .session-table {
     width: 100%;
+    /*
+     * Lock column widths to the th hints. With the default `auto`
+     * algorithm, a wide child of the expanded-row td (colspan=3, hosts
+     * ScriptRunner with long monospaced commands) grows ALL three
+     * columns proportionally — pushing every row's action cell past
+     * the viewport edge and clipping the rightmost play button.
+     * `fixed` layout forces the table to honour 100 % of its parent
+     * and the declared th widths; content inside cells then wraps or
+     * gets clipped by per-cell `overflow-x: hidden`, never the table.
+     */
+    table-layout: fixed;
     border-collapse: collapse;
     font-size: 0.8125rem;
   }
@@ -474,7 +485,16 @@
     letter-spacing: 0.04em;
     padding: 0 0.375rem 0.5rem;
   }
-  .th-rss { text-align: right; }
+  /*
+   * Column widths — must add to ≤100 % of the table for `table-layout:
+   * fixed` to leave the name column some breathing room. At mobile
+   * (14 px html font), 4.5 rem = 63 px (4 char-wide RSS + unit) and
+   * 8.5 rem = 119 px (5 × 21 px buttons + 4 × 3.5 px gap). Total non-
+   * name = 182 px → on a 360-css-px viewport that leaves ~150 px for
+   * the session name + dot + badge, which fits the longest configured
+   * names with ellipsis.
+   */
+  .th-rss { text-align: right; width: 4.5rem; }
   .th-actions { text-align: right; width: 8.5rem; }
   .session-row {
     cursor: pointer;
