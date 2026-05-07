@@ -145,6 +145,7 @@ tmx boot
 - **LD_PRELOAD on Termux**: Bun's glibc runner strips it. `cleanEnv()` re-injects, `ensureTmuxLdPreload()` sets via tmux.
 - **esbuild android binary**: `node build.cjs` (not `bun build.cjs`). Bun's platform detection rejects the android binary.
 - **tmux spawnSync**: Use array args, not string concatenation. No shell quoting needed.
+- **tmux exact-match sigil**: `=name` works ONLY for target-session subcommands (has-session, kill-session, list-clients, switch-client). Pane/window targets (send-keys, capture-pane, list-panes, select-window) need `=name:` (trailing colon → target-window → resolves to current pane). Bare `=name` on those errors with "can't find pane".
 - **Symlink resolution**: Use `realpathSync(__filename)` to resolve repo root from symlinked `~/.local/bin/tmx`.
 - **Nested CC detection**: Daemon strips `CLAUDECODE`, `CLAUDE_CODE_*`, `ENABLE_CLAUDE_CODE_*`, `CLAUDE_TMPDIR` from env.
 - **SSE connection limit**: Close EventSource on `beforeunload`/`pagehide` to avoid exhausting 6-per-origin limit.
