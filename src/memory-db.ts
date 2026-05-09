@@ -519,6 +519,51 @@ const SCHEMA_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_spec_agent ON agent_specializations(agent_name)`,
   `CREATE INDEX IF NOT EXISTS idx_spec_domain ON agent_specializations(domain, confidence DESC)`,
+
+  // Workflow definitions — DAG of tasks, persisted as JSON for schema
+  // freedom. spec_json is `{ nodes: WorkflowNode[], edges: WorkflowEdge[] }`
+  // (see src/workflow.ts for the type defs). Source: TOML config sections
+  // (`[[workflow]]`) get reflected here on boot; user-created workflows can
+  // be persisted by the dashboard via REST. UNIQUE(name) lets config reload
+  // upsert without duplicating rows.
+  `CREATE TABLE IF NOT EXISTS agent_workflows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    spec_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL DEFAULT 'config',
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+
+  // One row per workflow run. status: running / success / failed / cancelled.
+  `CREATE TABLE IF NOT EXISTS agent_workflow_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,
+    workflow_name TEXT NOT NULL,
+    triggered_by TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'running',
+    message TEXT,
+    FOREIGN KEY(workflow_id) REFERENCES agent_workflows(id) ON DELETE CASCADE
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON agent_workflow_runs(workflow_id, started_at DESC)`,
+
+  // One row per node-execution within a run. status: pending / running /
+  // success / failed / skipped. exit_code is null for non-shell nodes.
+  `CREATE TABLE IF NOT EXISTS agent_workflow_run_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    node_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER,
+    exit_code INTEGER,
+    output TEXT,
+    error TEXT,
+    FOREIGN KEY(run_id) REFERENCES agent_workflow_runs(id) ON DELETE CASCADE,
+    UNIQUE(run_id, node_id)
+  )`,
 ];
 
 /**

@@ -123,6 +123,8 @@ export interface LazyEngineAccess {
   getDashboard: () => DashboardServer | null;
   /** ScheduleEngine instance, or null if not initialized */
   getScheduleEngine: () => ScheduleEngine | null;
+  /** WorkflowEngine instance, or null if not initialized */
+  getWorkflowEngine: () => import("./workflow.js").WorkflowEngine | null;
   /**
    * Upsert a persistent agent schedule via ScheduleEngine.
    * Returns the schedule row ID, or -1 if ScheduleEngine is not yet initialized.

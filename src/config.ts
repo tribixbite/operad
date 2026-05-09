@@ -392,11 +392,58 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
       : undefined,
   })).filter((t) => t.name && t.command);
 
+  // Workflow definitions from [[workflow]] sections (DAG of tasks).
+  // Each [[workflow]] has a name + array of [[workflow.task]] entries; each
+  // task carries `id`, `command`, optional `cwd`/`timeout_s`/`needs`/`on`.
+  const workflowRaw = (raw.workflow ?? []) as Record<string, unknown>[];
+  const workflows: import("./workflow.js").WorkflowConfig[] = [];
+  for (let i = 0; i < workflowRaw.length; i++) {
+    const w = workflowRaw[i];
+    const prefix = `workflow[${i}]`;
+    const name = asString(w.name, `${prefix}.name`, "");
+    if (!name) {
+      errors.push(`${prefix}: 'name' is required`);
+      continue;
+    }
+    if (!NAME_PATTERN.test(name)) {
+      errors.push(`${prefix}: name '${name}' must match [a-z0-9-]+`);
+    }
+    const enabled = w.enabled != null ? asBool(w.enabled, `${prefix}.enabled`, true) : true;
+    const taskRaw = Array.isArray(w.task) ? (w.task as Record<string, unknown>[]) : [];
+    if (taskRaw.length === 0) {
+      errors.push(`${prefix}: at least one [[${prefix}.task]] is required`);
+      continue;
+    }
+    const seenIds = new Set<string>();
+    const tasks = taskRaw.map((t, j) => {
+      const tp = `${prefix}.task[${j}]`;
+      const id = asString(t.id, `${tp}.id`, "");
+      if (!id) errors.push(`${tp}: 'id' is required`);
+      if (seenIds.has(id)) errors.push(`${tp}: duplicate task id '${id}'`);
+      seenIds.add(id);
+      const command = asString(t.command, `${tp}.command`, "");
+      if (!command) errors.push(`${tp}: 'command' is required`);
+      const onRaw = t.on != null ? asString(t.on, `${tp}.on`, "success") : undefined;
+      if (onRaw && !["success", "error", "always"].includes(onRaw)) {
+        errors.push(`${tp}: 'on' must be one of success|error|always (got '${onRaw}')`);
+      }
+      return {
+        id,
+        command,
+        cwd: t.cwd != null ? asString(t.cwd, `${tp}.cwd`, "") : undefined,
+        timeout_s: t.timeout_s != null ? asNumber(t.timeout_s, `${tp}.timeout_s`, 600) : undefined,
+        needs: t.needs != null ? asStringArray(t.needs, `${tp}.needs`, []) : undefined,
+        on: onRaw as "success" | "error" | "always" | undefined,
+      };
+    });
+    workflows.push({ name, enabled, tasks });
+  }
+
   if (errors.length > 0) {
     throw new Error(`Config validation failed:\n  ${errors.join("\n  ")}`);
   }
 
-  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents, tools };
+  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents, tools, workflows };
 }
 
 // -- Type coercion helpers ----------------------------------------------------

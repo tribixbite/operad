@@ -1602,6 +1602,65 @@ export class RestHandler {
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
+        case "workflows": {
+          // GET /api/workflows                — list all workflows
+          // GET /api/workflows/<name>         — get one
+          // GET /api/workflows/<name>/runs    — recent runs
+          // POST /api/workflows/<name>/run    — execute a workflow now
+          // POST /api/workflows               — upsert from JSON body { name, spec }
+          // DELETE /api/workflows/<name>      — drop workflow + run history
+          // PATCH /api/workflows/<name>       — { enabled: bool }
+          const wfEng = this.ctx.getWorkflowEngine();
+          if (!wfEng) return { status: 503, data: { error: "Workflow engine not initialized" } };
+
+          // The path after "workflows" can be "/<name>" or "/<name>/run" or
+          // "/<name>/runs" — `name` already holds the first segment; sniff
+          // for a sub-action via the original URL path (queryParams alone
+          // can't tell us /run vs /runs).
+          const subAction = segments[2] ?? "";
+
+          if (method === "GET" && !name) {
+            return { status: 200, data: wfEng.getAll() };
+          }
+          if (method === "GET" && name && !subAction) {
+            const w = wfEng.get(name);
+            return w ? { status: 200, data: w } : { status: 404, data: { error: "Not found" } };
+          }
+          if (method === "GET" && name && subAction === "runs") {
+            return { status: 200, data: wfEng.recentRuns(name) };
+          }
+          if (method === "POST" && name && subAction === "run") {
+            try {
+              const result = await wfEng.run(name, { triggered_by: "api" });
+              return { status: 200, data: result };
+            } catch (err) {
+              return { status: 500, data: { error: String(err) } };
+            }
+          }
+          if (method === "POST" && !name && body) {
+            const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+            if (!b.name || !b.spec) {
+              return { status: 400, data: { error: "Missing required fields: name, spec" } };
+            }
+            try {
+              const id = wfEng.upsert(String(b.name), b.spec as import("./workflow.js").WorkflowSpec, "api");
+              return { status: 201, data: { id } };
+            } catch (err) {
+              return { status: 400, data: { error: String(err) } };
+            }
+          }
+          if (method === "DELETE" && name) {
+            return { status: 200, data: { deleted: wfEng.delete(name) } };
+          }
+          if (method === "PATCH" && name && body) {
+            const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+            wfEng.setEnabled(name, Boolean(b.enabled));
+            return { status: 200, data: { name, enabled: Boolean(b.enabled) } };
+          }
+
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
         case "config-overrides": {
           // Surface the user-mutable JSON overlay (sdk + quota knobs)
           // that the dashboard's Settings form uses. The TOML stays the

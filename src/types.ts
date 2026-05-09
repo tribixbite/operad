@@ -284,6 +284,8 @@ export interface TmxConfig {
   agents: import("./agents.js").AgentConfig[];
   /** User-defined tool definitions from TOML [[tool]] sections */
   tools: import("./tools.js").TomlToolConfig[];
+  /** Workflow definitions from TOML [[workflow]] sections — DAG of tasks. */
+  workflows: import("./workflow.js").WorkflowConfig[];
 }
 
 // -- Runtime state (persisted to JSON) ----------------------------------------

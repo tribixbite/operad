@@ -1,3 +1,17 @@
-13-daemon-extraction-comprehensive.md
-14-audit-fixes-and-migration.md
-15-cross-platform-windows.md
+# Sprint queue (operad). One-line items, FIFO. Strikethrough means done.
+
+## Deferred from Operit survey (2026-05-09)
+
+- Skill/Plugin marketplace mechanics (Operit `data/skill/`): GitHub-zip plugin
+  import + cached version pool + visibility toggle + hot-load without daemon
+  restart. operad's TOML-only tool registry would grow into this naturally.
+  Sketch: $XDG_CONFIG_HOME/operad/skills/<owner>/<repo>/<commit-or-tag>/
+  with a `manifest.toml` describing tools/agents. Reuse the existing
+  `~/.local/share/operad/config-overrides.json` pattern for visibility toggles.
+
+- Runtime-injected metadata-rich tool prompts (Operit `core/config/SystemToolPrompts.kt`,
+  ~903 lines): templatized tool definitions (`{name, type, required, description,
+  default}`) merged into the agent prompt at dispatch time, with context-aware
+  filters (active runtime, attached repos, MCP-discovered tools). operad's
+  `seedSpecializations()` could borrow this pattern. Likely lands in
+  agent-engine.ts as a new `buildToolPromptSection(ctx, agent)` helper.

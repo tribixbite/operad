@@ -176,6 +176,7 @@ export class Daemon {
   private memoryDb: MemoryDb | null = null;
   private toolExecutor: ToolExecutor | null = null;
   private scheduleEngine: ScheduleEngine | null = null;
+  private workflowEngine: import("./workflow.js").WorkflowEngine | null = null;
   private lastUserActivityEpoch: number = Math.floor(Date.now() / 1000);
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
@@ -316,6 +317,7 @@ export class Daemon {
       getTelemetrySink: () => this.telemetrySink,
       getDashboard: () => this.dashboard,
       getScheduleEngine: () => this.scheduleEngine,
+      getWorkflowEngine: () => this.workflowEngine,
       broadcastWs: (type, data) => this.broadcastSwitchboard(type, data),
       ensureSocket: () => this.ensureSocket(),
       reloadAgents: () => this.reloadAgents(),
@@ -1292,6 +1294,24 @@ export class Daemon {
         return this.agentEngine.executeScheduledRun(schedule);
       });
       this.scheduleEngine.start();
+
+      // Workflow engine — DAG executor for multi-step task graphs (e.g.
+      // pull → install → test → alert-on-failure). Boot-time upsert from
+      // the [[workflow]] sections in TOML so config-defined workflows are
+      // immediately runnable via REST/IPC; engine itself never polls.
+      const { WorkflowEngine, compileWorkflowConfig } = await import("./workflow.js");
+      this.workflowEngine = new WorkflowEngine(this.memoryDb, this.log);
+      for (const wf of this.config.workflows ?? []) {
+        try {
+          this.workflowEngine.upsert(wf.name, compileWorkflowConfig(wf), "config");
+          if (!wf.enabled) this.workflowEngine.setEnabled(wf.name, false);
+        } catch (err) {
+          this.log.error(`Workflow "${wf.name}" upsert failed: ${err}`);
+        }
+      }
+      if ((this.config.workflows ?? []).length > 0) {
+        this.log.info(`Workflow engine initialized (${this.config.workflows.length} workflow(s) from config)`);
+      }
     }
 
     // Initialize SDK bridge (uses WS broadcast for streaming)
