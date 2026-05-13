@@ -102,6 +102,42 @@ Launch `build-on-termux.sh` from the session's project directory in a new Termux
 
 ---
 
+### Workflows
+
+Workflows are DAGs of shell tasks with conditional edges. Each workflow has a unique name; runs are persisted with per-node status.
+
+#### `GET /api/workflows`
+List all workflows (config-defined + user-created). Returns `[{ id, name, spec, enabled, created_by }]`.
+
+#### `GET /api/workflows/:name`
+Fetch a single workflow by name. 404 if missing.
+
+#### `POST /api/workflows`
+Upsert a workflow.
+
+Body: `{ "name": "string", "spec": { "nodes": [...], "edges": [...] } }`
+
+Node shape: `{ "id": "string", "type": "task" | "noop", "command"?: "string", "cwd"?: "string", "env"?: { ... }, "timeout_s"?: 600 }`.
+Edge shape: `{ "from": "id", "to": "id", "on"?: "success" | "error" | "always" }`. Default `on = "success"`.
+
+Returns `{ id }`. 400 on cycle / dangling edge / duplicate node id.
+
+#### `DELETE /api/workflows/:name`
+Delete a workflow + cascade its run history. Returns `{ deleted: boolean }`.
+
+#### `PATCH /api/workflows/:name`
+Toggle the enabled flag.
+
+Body: `{ "enabled": boolean }`
+
+#### `POST /api/workflows/:name/run`
+Execute a workflow synchronously. Returns the full `WorkflowRunResult`: `{ run_id, workflow_name, status, message, nodes: { <id>: { status, exit_code?, output?, error? } }, started_at, finished_at }`. `status` is `success` | `failed` | `cancelled`.
+
+#### `GET /api/workflows/:name/runs`
+Recent runs for a workflow, newest first (default limit 20). Returns `[{ id, workflow_id, workflow_name, status, started_at, finished_at, message }]`.
+
+---
+
 ### System
 
 #### `GET /api/status`

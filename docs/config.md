@@ -316,6 +316,55 @@ description = "Number of commits (default 10)"
 
 ---
 
+## `[[workflow]]` sections (opt-in)
+
+Define DAG task pipelines. Each workflow has a name and one or more `[[workflow.task]]` entries; each task can declare `needs` (upstream task ids) and `on` (gating semantics for ALL its incoming edges — `success` default, `error`, or `always`). The engine compiles this into a `{nodes, edges}` graph, rejects cycles, and executes via Kahn's topological order.
+
+Boot-time upserts make config-defined workflows immediately runnable via `POST /api/workflows/<name>/run`. User-created workflows (POSTed at runtime) persist alongside.
+
+```toml
+[[workflow]]
+name = "nightly-build"
+enabled = true  # optional; default true
+
+  [[workflow.task]]
+  id = "pull"
+  command = "git pull --ff-only"
+  cwd = "$HOME/project"
+
+  [[workflow.task]]
+  id = "install"
+  command = "bun install --frozen-lockfile"
+  needs = ["pull"]
+  timeout_s = 300
+
+  [[workflow.task]]
+  id = "build"
+  command = "bun run build"
+  needs = ["install"]
+
+  [[workflow.task]]
+  id = "alert"
+  command = "echo 'build broken' | tee /tmp/alert"
+  needs = ["build"]
+  on = "error"   # runs only if `build` failed
+```
+
+Per-task fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | yes | Unique within the workflow. Referenced by other tasks' `needs`. |
+| `command` | string | yes | Shell command (runs under `sh -c`). |
+| `cwd` | string | no | Working directory. No `$VAR` expansion at runtime — pass absolute paths. |
+| `timeout_s` | number | no | Hard-kill after this many seconds. Default 600. |
+| `needs` | string[] | no | Upstream task ids — each becomes an incoming edge. |
+| `on` | string | no | Edge gating: `success` (default), `error`, or `always`. |
+
+Skip propagation: when a task fails and a downstream `on = "success"` edge is blocked, the dependent task is marked `skipped`. Subsequent edges that depend on the skipped task are also blocked unless `on = "always"` rescues them. A task runs as soon as **any** of its incoming edges fires (OR semantics across multiple `needs`).
+
+---
+
 ## Config Validation
 
 The daemon validates the config on startup:

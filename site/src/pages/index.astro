@@ -132,6 +132,14 @@ import Layout from "../layouts/Layout.astro";
               Trust calibration, tool leases, persistent scheduling (cron/interval), and TOML-based custom tools.
             </p>
           </div>
+          <div class="rounded-lg border border-terminal-purple/20 bg-terminal-surface p-5">
+            <div class="mb-3 font-[family-name:var(--font-mono)] text-lg text-terminal-purple">07</div>
+            <h3 class="mb-2 font-[family-name:var(--font-mono)] text-sm font-bold text-terminal-bright">Workflow DAGs</h3>
+            <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim leading-relaxed">
+              TOML-defined task pipelines with conditional edges (success / error / always).
+              SQLite-persisted run history, cycle detection, skip propagation, REST execution.
+            </p>
+          </div>
         </div>
       </div>
     </section>
@@ -482,8 +490,11 @@ import Layout from "../layouts/Layout.astro";
                 { path: "/api/memory", method: "GET", desc: "System memory + per-session RSS" },
                 { path: "/api/processes", method: "GET", desc: "Running processes (Android: app list)" },
                 { path: "/api/kill/:pkg", method: "POST", desc: "Force-stop a process" },
-              ].map((v, i) => (
-                <tr class={i < 11 ? "border-b border-terminal-border/30" : ""}>
+                { path: "/api/workflows", method: "GET", desc: "List all workflows" },
+                { path: "/api/workflows/:name/run", method: "POST", desc: "Execute a workflow DAG" },
+                { path: "/api/workflows/:name/runs", method: "GET", desc: "Workflow run history" },
+              ].map((v, i, arr) => (
+                <tr class={i < arr.length - 1 ? "border-b border-terminal-border/30" : ""}>
                   <td class="px-4 py-2.5 text-terminal-bright">{v.path}</td>
                   <td class={`px-4 py-2.5 ${v.method === "SSE" ? "text-terminal-cyan" : v.method === "POST" ? "text-terminal-amber" : "text-terminal-green"}`}>{v.method}</td>
                   <td class="px-4 py-2.5 text-terminal-dim">{v.desc}</td>

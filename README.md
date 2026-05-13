@@ -9,6 +9,7 @@ Cross-platform tmux session orchestrator for Claude Code sessions. Designed for 
 - Prompt history: search, star, and replay Claude prompts across all projects
 - Battery and memory awareness on Android/Termux
 - Token quota tracking with velocity trends and per-session attribution
+- Workflow DAG engine: TOML-defined task pipelines with conditional edges (`success` / `error` / `always`), SQLite-persisted run history, REST execution
 
 ## Quick Start
 

@@ -22,6 +22,7 @@ src/
   ws-handler.ts           — WebSocket message dispatch + switchboard payload builders (~245 lines)
   ipc-handler.ts          — IPC command routing (~130 lines)
   rest-handler.ts         — REST API handler — 103 routes + MCP/scripts/ADB helpers (~2230 lines)
+  workflow.ts             — DAG task executor: nodes + edges, cycle detection, Kahn topo, persistent run history (~430 lines)
   session-controller.ts   — Session lifecycle state machine (unit-testable; future integration target)
   session-commands.ts     — cmd* handlers (status/start/stop/restart/go/send/tabs/open/close/etc.) (~780 lines)
   session-resolver.ts     — Pure resolveSessionName/Path/OpenTarget + resolveBootSessions helpers (~235 lines)

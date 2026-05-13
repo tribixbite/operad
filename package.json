@@ -27,7 +27,10 @@
     "session-manager",
     "claude-code",
     "terminal",
-    "cross-platform"
+    "cross-platform",
+    "workflow",
+    "dag",
+    "task-pipeline"
   ],
   "scripts": {
     "build": "node build.cjs",
