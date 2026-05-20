@@ -1,9 +1,10 @@
 # Skill / plugin marketplace — design spec
 
 Date: 2026-05-20
-Status: draft (round 2 — post-reviewer-2 pivots)
+Status: draft (round 3 — post-reviewer-3 pivots)
 Owner: tribixbite
-Reviewers: gemini-3-pro-preview (round 1), high-thinking subagent (round 2)
+Reviewers: gemini-3-pro-preview (round 1), high-thinking subagent (round 2),
+high-thinking subagent (round 3)
 
 ## 1 — Goal
 
@@ -12,10 +13,9 @@ bundles of tools, agents, workflows, and SKILL.md context produced by the wider
 ecosystem (Anthropic's `claude-plugins-official`, third-party plugin
 marketplaces like `wshobson/agents`, the official MCP registry, and arbitrary
 git URLs). Installation is one command. The daemon hot-loads new primitives
-without restart, with carefully-scoped guarantees about in-flight work. Trust
-is graded by source. No central registry operad has to keep online for the
-system to work; the curated index at `operad.stream/skills` is one source
-among many.
+with carefully-scoped guarantees about in-flight work. Trust is graded by
+source. No central registry operad has to keep online for the system to work;
+the curated index at `operad.stream/skills` is one source among many.
 
 ## 2 — Non-goals
 
@@ -27,16 +27,24 @@ among many.
   APIs.
 - Re-implementing MCP transport semantics; operad orchestrates lifecycle but
   the protocol is owned by the MCP spec.
-- **`proxied` MCP multiplexing** — round-2 review caught that wedging an
-  HTTP shim in front of a stdio MCP breaks sampling / elicitation / roots
-  and requires a non-trivial per-session multiplexer. Cut from v1. Revisit
-  after MCP 2026-06 lands and there is a real-world need.
-- **MCP Tasks primitive** (June 2026 spec) — out of scope for v1. `gateway`
-  mode is request/response only; Tasks support is a v1.1 follow-up that may
-  require a new `task-gateway` mode.
-- **Auto-update on a schedule** — every iteration of the design has had a
-  daily-cron knob; every reviewer has wanted it cut for v1 scope-creep
-  reasons. Cut, period. Per-skill manual update only.
+- **`proxied` MCP multiplexing** — round-2 review caught that wedging an HTTP
+  shim in front of stdio breaks sampling / elicitation / roots and requires
+  a non-trivial multiplexer. Cut from v1.
+- **`gateway` MCP mode** — round-3 review caught that as a "config-write
+  helper" it's behaviourally identical to `config-only` (Claude Code owns
+  lifecycle, operad just writes a config entry). Two enum values producing
+  the same behaviour means v1.1's real gateway logic would silently
+  re-define the meaning of `gateway` for any v1 author who declared it. Cut
+  to ONE lifecycle value in v1.
+- **MCP Tasks primitive** (June 2026 spec) — out of scope for v1. Re-evaluate
+  alongside `gateway` reintroduction.
+- **Auto-update on a schedule** — cut.
+- **Bulk update (`--all`)** — cut.
+- **CLI search (`skill.search`)** — deferred to v1.1. Search across 4
+  providers with no common ranking is bad UX. Users discover via the
+  operad.stream landing page or upstream marketplaces' own UIs.
+- **`--check` on `tmx skill list`** — deferred to v1.1. Update on demand via
+  `tmx skill update <id>`.
 
 ## 3 — Locked decisions
 
@@ -44,259 +52,294 @@ among many.
 
 A skill is a bundle that may contain any combination of:
 
-- **Tools** — operad `[[tool]]` definitions (shell command + parameter schema).
-- **Agents** — `[[agent]]` definitions (specialization, prompts, personality).
+- **Tools** — operad `[[tool]]` definitions.
+- **Agents** — `[[agent]]` definitions.
 - **Workflows** — `[[workflow]]` DAGs (see `src/workflow.ts`).
-- **MCP servers** — same shape as `~/.claude.json` `mcpServers` entries, plus
-  a `lifecycle` flag (`config-only` | `gateway`). `proxied` was cut from v1.
-- **SKILL.md bundles** — Anthropic Agent Skills, with optional `scripts/`,
-  `references/`, `assets/` subdirectories.
+- **MCP servers** — same shape as `~/.claude.json` `mcpServers` entries,
+  always under `lifecycle = "config-only"` in v1. Both stdio (`command` +
+  `args`) and HTTP (`url`) servers route through the same code path. The
+  `McpLifecycle` enum is reserved (single-value) for future expansion.
+- **SKILL.md bundles** — Anthropic Agent Skills.
 
 A skill may also be empty of operad-specific content if it's a pure
-Claude-Code plugin we're aggregating for discovery.
+Claude-Code plugin aggregated for discovery.
 
 ### 3.2 Distribution model
 
-operad is an **aggregator/resolver**, not a single registry. Modelled on
-Obtainium: each installed skill carries a `Source` record describing which
-provider resolved its identity and how to refetch / check for updates.
+operad is an aggregator/resolver, not a registry. Each installed skill
+carries a `Source` record describing which provider resolved its identity
+and how to refetch / check for updates.
 
 ### 3.3 Manifest split
 
 Authors publish **two files** in the same repo / bundle:
 
 1. `.claude-plugin/marketplace.json` — Anthropic's plugin format, untouched.
-   Claude Code consumes this directly. operad's adapter reads it for
-   skills / MCPs / commands / hooks / agents.
 2. `.operad/operad.toml` — operad-native primitives (tools, agents,
-   workflows, mcp-lifecycle flags). The path is `.operad/` (not bare
-   `operad.toml` at repo root) to keep the root clean and to give
-   Anthropic room to extend their loader's repo-root scan without
-   colliding with operad files. The adapter searches `.operad/operad.toml`
-   first, then bare `operad.toml`, then gives up.
+   workflows, mcp-lifecycle hints).
 
-The adapter merges them at read time. Authors who only target Claude Code
-publish (1) only; authors who want operad's full surface publish both. CI
-in operad-curated includes a smoke test that runs `claude plugin install`
-on a fixture skill with `.operad/` present, verifying claude-code ignores
-the sibling directory cleanly. If the smoke test ever fails, we have
-upstream conversation to start, not silent breakage.
+**Discovery order:** the adapter looks for `.operad/operad.toml` first. If
+absent, it checks bare `operad.toml` at the repo root. If both exist, the
+adapter prefers `.operad/` and logs a `WARN: bare operad.toml shadowed by
+.operad/operad.toml at <path>` event into `skill_events.detail`. The
+adapter never merges across both paths — pick one.
 
-This replaces the round-1 "stuff workflows into `metadata.operad.*`"
-strategy which would have been schema abuse.
+The adapter merges marketplace.json + the resolved operad.toml at read
+time. Authors who only target Claude Code skip the operad file.
+
+CI in the operad-curated repo runs `claude plugin install` against a
+fixture skill containing `.operad/` and fails the build if claude-code
+rejects it. This is an after-the-fact catch, not a prevention — older
+claude-code versions on user machines may behave differently. We document
+the minimum supported Claude Code version (currently `>= 2.0`).
 
 ### 3.4 Trust model
 
-Two cooperating mechanisms.
-
 **Autonomy buckets.** Every tool a skill ships is registered with the
-ToolExecutor in the `suggest` bucket by default (existing Phase-10B
-primitive). User must promote each tool to `autonomous` for it to fire
-without confirmation.
+ToolExecutor in the `suggest` bucket by default. User must promote each
+tool to `autonomous` for it to fire without confirmation.
 
 **Source-tier install prompts.** Three trust tiers:
 
 - `trusted` — `claude-marketplace` resolved to
   `anthropics/claude-plugins-official`, `mcp-official`, or
-  `operad-curated`. Installs silently. Default autonomy: `suggest`.
-- `community` — `claude-marketplace` resolved to anything else (community
-  plugin marketplaces). Installs after confirmation showing the manifest.
-  Default autonomy: `suggest`.
+  `operad-curated`. Installs silently.
+- `community` — `claude-marketplace` resolved to anything else. Installs
+  after confirmation showing the manifest.
 - `escape` — `git+url`. Installs after detailed confirmation including
-  the manifest diff vs. any previous install. Default autonomy: `observe`.
+  the manifest diff vs. any previous install.
 
-**Autonomy ceiling — net-new work.** Round-2 review correctly flagged
-that the existing code has *one* bucket per tool, not a max-bucket. The
-ceiling is implemented as part of this work, not assumed:
+**Autonomy ceiling — net-new work.** Implemented as part of this work
+(not assumed):
 
-- New `tool_autonomy_caps` table: `(tool_id, max_bucket)`.
+- New `tool_autonomy_caps` table: `(tool_id PRIMARY KEY, max_bucket)`.
+- **Migration: existing tools (pre-marketplace) get `max_bucket =
+  autonomous` to preserve status quo.** New skills set their per-tier
+  cap at install. The migration is a one-shot at first daemon boot after
+  upgrade.
 - ToolExecutor's promotion API consults the cap; dashboard UI disables
   forbidden promotions; CLI `tmx tool autonomy <id> <bucket>` rejects
-  promotions above the cap with a clear error.
-- `escape`-tier skills set cap = `suggest`; `community`/`trusted` cap =
-  `autonomous`. The cap is per-source-tier, recorded at install, never
-  raised retroactively when re-installed from a different provider.
-- Skill manifests cannot lower the cap to autonomous — only the source
-  tier sets the ceiling. Author-supplied autonomy overrides cut entirely
-  to remove the footgun.
+  promotions above the cap with a typed `AUTONOMY_CAP_VIOLATION` error.
+- Per-tier cap mapping:
+  - `trusted` → cap `autonomous` (default bucket `suggest`).
+  - `community` → cap `autonomous` (default bucket `suggest`).
+  - `escape` → cap `suggest` (default bucket `observe`).
+- The cap is recorded at install. Re-install from a different provider
+  for an identical `(locator, version)` is a no-op; re-install from a
+  different provider tier (e.g. `community → trusted`) **does** update
+  the cap — only upward, never downward, to avoid the surprise of a
+  user-promoted tool silently degrading.
+- Skill manifests cannot set their own cap. Source tier is the only
+  knob.
 
-### 3.5 MCP server lifecycle
+**Tool name conflicts between skills are rejected at install time.** The
+new skill's primitives are validated against the existing
+`(generation+1)` view; on collision, install aborts with a typed
+`TOOL_NAME_CONFLICT` error listing the colliding tool and the
+already-installed skill. Operators resolve manually (uninstall the old
+one, or rename in their fork).
 
-Two modes, declared in `.operad/operad.toml` under `[mcp.<name>]`. `proxied`
-mode (round-1 design) was **cut** per round-2 review — wedging HTTP in
-front of stdio breaks sampling/elicitation/roots, two clients can't share
-one stdio session, and the multiplexer needed to make this work would be
-a substantial sub-project by itself.
+### 3.5 MCP server lifecycle (single mode in v1)
 
-- `config-only` (default) — operad writes the server block to
-  `~/.claude.json`. Claude Code spawns it. operad does nothing at
-  runtime. Suitable for stdio MCPs Claude Code already manages.
-- `gateway` — for stateless HTTP / streamable MCPs (per MCP 2026-06
-  transport direction). No daemon-owned long-running process. operad
-  records the URL and writes a `type: "http"` (or `"sse"`) entry into
-  `~/.claude.json`. `gateway` is currently just a config-write helper
-  for HTTP MCPs — a future v1.1 might add real proxy logic to support
-  request retries, auth header injection, or audit logging, but v1
-  treats it as a thin "MCP-is-an-HTTP-URL" record.
+One mode: `config-only`. operad writes the server block to `~/.claude.json`
+under flock-advisory-locked surgical RMW. Claude Code spawns and supervises
+the process. operad does nothing at runtime.
 
-**`~/.claude.json` writes** are read-modify-write under a `flock`-based
-advisory lock on `~/.claude.json.lock`. On platforms without flock
-(Windows), we use `proper-lockfile`. operad never blind-overwrites; it
-parses, surgically updates the `mcpServers` block under a top-level
-`operad_managed` array of names so we know what we own vs. what the user
-hand-added, and writes via temp-file-then-rename. If parsing fails, the
-install aborts with a typed error — operad does not touch a malformed
-`~/.claude.json`.
+Both stdio (`command`/`args`) and HTTP/SSE (`url` + `type: "http"|"sse"`)
+servers route through this path; Claude Code already handles both transport
+families. The `McpLifecycle` enum stays as a single-value type so future
+modes (`proxied`, `gateway`, `task-gateway`) can be added without churning
+the schema.
+
+**`~/.claude.json` writer:**
+
+- Read via `flock` on `~/.claude.json.lock` (advisory). On platforms
+  without flock (Windows), use `proper-lockfile`.
+- Parse the existing JSON. If parse fails, install aborts with a typed
+  `CLAUDE_JSON_MALFORMED` error — operad never touches a malformed file.
+- Surgically update `mcpServers` and a top-level **object** (not array)
+  named `operad_managed`:
+
+  ```json
+  "operad_managed": {
+    "<mcp-name>": {
+      "skill_id": "<operad-skill-id>",
+      "daemon_id": "<machine-uuid>",
+      "installed_at": 1747752000
+    }
+  }
+  ```
+
+  `daemon_id` is a UUID generated at first daemon boot and persisted in
+  `~/.local/share/operad/daemon-id`. It exists exactly to handle the
+  two-daemon-on-syncthing-dotfiles case.
+
+- Write via temp-file-then-rename.
+
+**Collision behaviours:**
+
+- `mcpServers[name]` exists, `operad_managed[name]` absent → user-owned
+  hand-written entry. operad refuses to install, returns
+  `MCP_NAME_USER_OWNED` listing the name and the operator's options
+  (rename in the skill manifest, or `--force-take-ownership` to claim it).
+- `operad_managed[name].daemon_id` ≠ this daemon's id → another daemon
+  owns it. Install refuses with `MCP_OWNED_BY_OTHER_DAEMON`. The user
+  decides which daemon should own it; manual resolution.
+- `mcpServers[name]` absent, `operad_managed[name]` present → orphan
+  state (user manually deleted the mcpServers entry). operad logs a
+  warning and removes the `operad_managed` entry on the next operation
+  that touches the file.
 
 ### 3.6 Single-writer principle
 
-The CLI never writes to the skills SQLite tables, the cache directory,
-or `~/.claude.json`. `tmx skill add <id>` sends an IPC `skill.install`
-request to the daemon. The daemon performs:
+CLI never writes to skills SQLite, the cache directory, or `~/.claude.json`.
+`tmx skill add <id>` sends an IPC `skill.install` request. The daemon
+performs the full transaction. Read-only CLI operations also go through
+IPC.
 
-1. Resolver dispatch → fetch → extract.
-2. Adapter normalization → `OperadSkill` shape.
-3. DB write + cache layout.
-4. Runtime loader registration.
-5. Ack to CLI.
+### 3.7 Hot-load and generation-counter discipline (Phase B work, deferred)
 
-This avoids SQLITE_BUSY, partial-JSON reads, and TOCTOU races between CLI
-and daemon. The CLI is a thin client. Even read-only operations (`tmx
-skill list`, `tmx skill info`) go through IPC — never direct DB reads —
-so future write-through paths inherit the same transactional guarantees.
+**The MVP ships without generation discipline** (see §9). The MVP caveat:
+"don't install skills while a workflow is running"; the daemon refuses
+installs while any workflow run is active (returns `INSTALL_BLOCKED_BY_RUN`)
+and refuses workflow starts while an install is in progress. Coarse,
+shippable, validates the rest of the pipeline.
 
-### 3.7 Hot-load and generation-counter discipline
-
-Round-2 review caught a critical race: in-flight workflow runs reference
-live tool/agent registries. A naïve "swap the version pointer and re-
-register the new primitives" approach silently corrupts a running workflow
-whose next node lands on a renamed parameter or a removed tool.
-
-Mechanism:
+Generation discipline lands in Phase C once the MVP has been exercised
+and we know which engines actually need it. The full design:
 
 - ToolExecutor, AgentEngine, and WorkflowEngine each expose a monotonic
   `generation` counter. Each registration writes its primitives into a
   generation-tagged shadow map: `tools[generation] = {...}`.
 - The current "live" generation is a single pointer (`current_generation`).
-- A workflow run snapshots `current_generation` at start. Every tool
-  lookup during the run resolves against `tools[snapshot_gen]`, not the
-  live pointer. The snapshot generation is refcounted; oldest generations
-  are GC'd only when refcount = 0.
-- Skill install / update / uninstall:
-  1. Build a new generation-tagged primitive map (current + delta).
-  2. Atomically swap `current_generation` to the new value.
-  3. New workflow runs pin the new generation; in-flight runs continue
-     against their pinned generation.
-- The cache directory keeps the old `<version>/` directory until no
-  workflow run holds its generation. A background sweeper GCs cache
-  directories with zero refcount and `installed_at` older than 24h.
-- Uninstall is similarly deferred: the row is marked `tombstoned` in
-  SQLite, primitives are no longer added to *new* generations, but
-  existing pinned generations keep working. The actual disk removal
-  happens on next GC pass.
+- **Every entry-point that calls `ToolExecutor.execute` acquires a
+  generation pin.** Acquire/release contract per call site:
 
-The dashboard's `/api/skills` SSE channel emits state transitions
-(`installing` → `installed` / `failed`) for live UI updates.
+  | Caller | Acquire | Release |
+  |---|---|---|
+  | `WorkflowEngine.run()` | at run start | at run finish / abort |
+  | `AgentEngine` OODA cycle | at cycle entry | at cycle exit |
+  | REST `POST /api/tool/<id>/run` | at request entry | at response send |
+  | IPC `tool.execute` | at command entry | at command exit |
+  | ScheduleEngine fire | at handler entry | at handler exit |
 
-**SSE budget** — operad already runs into the browser 6-per-origin limit
-on EventSources. Skill events multiplex onto the existing daemon-state
-SSE channel under a `type: "skill"` envelope; no new channel.
+- `skill_generation_refs.ref_kind` enum:
+  `workflow_run | agent_cycle | rest_request | ipc_call | scheduled_run`.
+  `ref_id` is the caller's identifier (workflow run UUID, request UUID, etc).
+- On install, the new generation is built but `current_generation` swaps
+  only after all pending pins have been recorded (no torn reads).
+- **Cache GC two-phase tombstone (round-3 fix):** sweeper marks cache
+  directories where refcount = 0 and `installed_at > TTL` as
+  `pending_delete` in the DB. A second pass, run on the next sweeper
+  tick (default 1h later), deletes only if the row is still `pending_delete`
+  AND refcount is still 0. Acquire-during-delete-window starts a new pin,
+  re-checks the pending flag, and removes it if found. This blocks the
+  ABA race the round-2 spec missed.
 
 ### 3.8 Disk layout
 
 ```
-~/.local/share/operad/skills/
-  index.db                                        # SQLite — see schema below
-  cache/
-    <provider>/
-      <sanitized-locator>/
-        <version>/
-          .claude-plugin/marketplace.json         # if present
-          plugin.json                             # if present
-          skills/<name>/SKILL.md + bundle         # if present
-          .operad/operad.toml                     # if present
-          .source                                 # JSON: fetched_url,
-                                                  # fetched_commit_sha (git
-                                                  # sources), fetched_archive_sha256
-                                                  # (registry / url sources),
+~/.local/share/operad/
+  daemon-id                                       # UUID, generated once
+  skills/
+    index.db                                      # SQLite
+    cache/
+      <provider>/
+        <sanitized-locator>/
+          <version>/                              # canonical version string
+            .claude-plugin/marketplace.json       # if present
+            plugin.json                           # if present
+            skills/<name>/SKILL.md + bundle       # if present
+            .operad/operad.toml                   # if present
+            .source                               # JSON: fetched_url,
+                                                  # fetched_commit_sha,
+                                                  # fetched_archive_sha256,
                                                   # fetched_at
 ```
 
-**No symlinks.** `~/.claude.json` entries written by operad use absolute paths
-into the cache. Avoids Android scoped-storage / FUSE breakage when users
-keep their Claude config on `/storage/emulated/0`.
+**No symlinks.** All references between the cache and Claude Code's view
+of the world go through absolute paths in `~/.claude.json` and
+`~/.claude/settings.json`.
 
-**SKILL.md delivery.** Exactly one path: write absolute-path entries into
-`~/.claude/settings.json` under `skills`. Round-2 review correctly
-flagged the round-1 "fallback to writing SKILL.md into agent context"
-path as a maintenance liability (two delivery paths, double the bugs).
-We document the minimum Claude Code version (≥ 2.0, which is well
-deployed) in the install precheck; older versions get a fatal `doctor`
-warning telling the user to upgrade Claude Code or skip SKILL.md skills.
+**SKILL.md delivery.** One path: write absolute-path entries into
+`~/.claude/settings.json` under `skills`. Min Claude Code version `>= 2.0`,
+enforced by a `doctor` precheck. No fallback.
 
 ### 3.9 Day-1 providers (4)
-
-Round-2 cut `smithery` (no auth/rate-limit/caching story) to v1.1.
 
 | Provider | Locator example | Trust tier | Notes |
 |---|---|---|---|
 | `claude-marketplace` | `wshobson/agents` | `community` (or `trusted` for `anthropics/*`) | Reads `.claude-plugin/marketplace.json` + plugin bundles via git clone. Tag-pinned. |
-| `mcp-official` | `exa-search` | `trusted` | `registry.modelcontextprotocol.io/v0.1/servers`. API freeze means safe to ship. TLS-pin the registry hostname (SPKI in source) so a DNS hijack can't silent-install. |
-| `operad-curated` | `operad/git-tools` | `trusted` | Static `index.json` hosted at `operad.stream/skills/index.json` (GitHub Pages). Resolver pins the **commit SHA** of the index repo (not `main` HEAD) so repo compromise can't push silent updates; the SHA pin updates on operad release, manual rotation only. PR-to-add new entries. |
-| `git+url` | `https://github.com/foo/bar@v1.0` | `escape` | Plain git clone with tag pin. Universal escape hatch. |
+| `mcp-official` | `exa-search` | `trusted` | `registry.modelcontextprotocol.io/v0.1/servers`. Resolver TLS-pins the registry hostname (SPKI in source) **plus a backup pin** so a single rotation doesn't brick the resolver. Both pins must rotate at most once per release; backup pin grace period is one release cycle. |
+| `operad-curated` | `operad/git-tools` | `trusted` | Resolver pins the **commit SHA** of the index repo (embedded in operad source); PR-to-add new entries. |
+| `git+url` | `https://github.com/foo/bar@v1.0` | `escape` | Plain git clone with tag pin. Universal escape hatch. Repos without a tag at HEAD fall back to using the commit SHA as the version string (`commit:<sha>`). |
 
-Deferred:
-
-- `smithery` — v1.1 with caching + debounce + (likely) API key story.
-- `github-topic` — high-discovery but high-malware-risk. v1.1 once trust
-  UX is exercised.
-- `awesome-list`, `tessl`, `huggingface-spaces` — not in plan.
+Deferred: `smithery`, `github-topic`, `awesome-list`, `tessl`,
+`huggingface-spaces`.
 
 ### 3.10 Update model
 
-- `tmx skill list` shows pinned version vs. latest available (resolver
-  runs a HEAD check per source). The HEAD check is opt-in via `--check`
-  to avoid hammering registries on every list call.
-- `tmx skill update <id>` — explicit per-skill update.
-- **No `--all` bulk update** — round-2 review correctly flagged the
-  "everything broke at once" support scenario. Per-skill only.
-- **No auto-update.** Future work. Cut from spec.
+- `tmx skill list` shows pinned version only (no auto-`HEAD` check).
+- `tmx skill update <provider>:<locator>` — explicit per-skill update.
+- No `--all`, no auto-update.
 
-### 3.11 Lease invalidation on uninstall / update
+### 3.11 Version-string normalization
 
-Round-2 caught this: Phase-10B leases are persistent and reference tools
-by name. Uninstall and update paths consult `tool_leases`; if any lease
-is active for a tool the operation would remove, the operation either:
+The resolver canonicalises locator versions before any DB or cache write.
 
-- Refuses with a typed error listing the leases (default behaviour), or
-- Force-revokes leases with `--force-revoke` (explicit flag, lands an
-  entry in `skill_events`).
+- Semver tags: `v1.0.0` and `1.0.0` both canonicalise to `v1.0.0` (the
+  `v` prefix is added if missing). Pre-release suffixes are preserved.
+- Commit SHAs: `commit:<full-40-char-sha>`. Short SHAs are rejected with
+  `LOCATOR_AMBIGUOUS_SHA`.
+- The string `latest` resolves to the highest semver tag in the source
+  (or HEAD commit if no tags); the resolved canonical form is stored,
+  not `latest` literally. Re-resolving `latest` later may produce a
+  different canonical version; that's the point of `tmx skill update`.
+
+UNIQUE constraint on `(provider, locator, version)` operates on the
+canonical form. `wshobson/agents@v1.0` and `wshobson/agents@1.0` produce
+one row, not two.
+
+### 3.12 Lease invalidation on uninstall / update
+
+Phase-10B leases reference tools by name. Uninstall and update paths
+consult `tool_leases` AND scheduled runs (`agent_schedules` rows that
+reference the tool in their prompt or planned actions). If any consumer
+exists, the operation:
+
+- Refuses with a typed `TOOL_HAS_ACTIVE_CONSUMERS` error listing
+  affected leases + scheduled runs (default), or
+- Force-revokes with `--force-revoke`: revokes leases, marks affected
+  scheduled runs as `paused` with reason `tool_removed_by_skill_op`.
+  The skill_events entry for the install/update records the cascade
+  details under `detail.force_revoke_cascade`. No separate event type.
 
 Updates that strictly add (no rename, no removal) skip the lease check.
 
-### 3.12 Integrity primitives
+### 3.13 Integrity primitives
 
-Round-2 noted that git clones aren't bit-stable, so a "tarball sha256"
-is meaningless for git sources.
+- **Git sources** (`claude-marketplace`, `git+url`, `operad-curated`):
+  `git rev-parse HEAD` is recorded as `fetched_commit_sha`; `git archive
+  <sha>` is sha256'd as `fetched_archive_sha256`.
+- **Registry sources** (`mcp-official`): `sha256(json_body)` is the
+  integrity primitive. **`ETag`/`Last-Modified` are NOT used for cache
+  invalidation** — Cloudflare-fronted registries rotate ETags on cache
+  rotation without content change, which would trigger spurious updates.
+  We compare the body sha256 only.
 
-- **Git sources** (`claude-marketplace`, `git+url`, `operad-curated` index
-  repo): integrity primitive is the resolved **commit SHA**. After
-  clone, `git rev-parse HEAD` is recorded in `.source`. For audit
-  reproducibility, `git archive <sha>` is also taken and its sha256
-  recorded — this is bit-stable across machines and verifiable later.
-- **Registry sources** (`mcp-official`): integrity primitive is the
-  sha256 of the fetched JSON document plus a recorded `Last-Modified`
-  / `ETag`. operad TLS-pins the registry hostname.
+### 3.14 Cache GC
 
-### 3.13 Cache GC
-
-- A background sweeper runs on daemon idle. Cache directories with
-  refcount 0 and last `installed_at` > 24h are eligible for removal.
-- Tombstoned rows whose cache directory has been swept are hard-deleted
-  from the DB at the same time.
+- Background sweeper runs on daemon idle.
+- Eligible directories: refcount = 0 AND `installed_at` > `cache_ttl_hours`.
+- **Two-phase tombstone (see §3.7)** prevents ABA races with newly-pinned
+  generations.
+- Default `cache_ttl_hours = 168` (7 days). Configurable in
+  `operad.toml` under `[skills]`. The reviewer was right that 24h was
+  a magic number; 7 days covers most overnight test runs and weekend
+  experiments.
 - Per `(provider, locator)`, keep at most **3** versions on disk: the
   currently-active one plus up to two recent inactive ones for rollback.
-  Older versions are GC'd unconditionally.
+  Older versions are GC'd unconditionally even if refcount = 0.
 
 ## 4 — Architecture
 
@@ -306,7 +349,7 @@ is meaningless for git sources.
                   ┌────────────────────────────────────────────┐
    Dashboard /    │           SkillManager (state, in daemon)   │
    CLI commands ──IPC▶  installed skills · enabled/disabled    │
-                  │  per-skill autonomy bucket · generation     │
+                  │  per-skill autonomy cap · generation        │
                   │  refcount · update state                    │
                   └──────────────────┬─────────────────────────┘
                                      │
@@ -316,18 +359,17 @@ is meaningless for git sources.
   ┌──────────┐                ┌────────────┐              ┌──────────┐
   │ Resolver │  ── pluggable ─│  Adapter   │── normalize ─│  Runtime │
   │ (locator │     providers  │  (manifest │   to operad  │ Loader   │
-  │ → fetch) │                │  → skill)  │   internal   │ (apply,  │
-  └──────────┘                └────────────┘              │  gen-tag)│
-        │                            │                    └──────────┘
+  │ → fetch) │                │  → skill)  │   internal   │ (apply)  │
+  └──────────┘                └────────────┘              └──────────┘
         │                            │                          │
         │                            │                          ▼
-        │                            │                 generation-tagged
         │                            │                 ToolExecutor /
         │                            │                 AgentEngine /
         │                            │                 WorkflowEngine
-        │                            │                 registries; live
-        │                            │                 generation pointer
-        ▼                            │                 swaps atomically
+        │                            │                 registries (with
+        │                            │                 generation
+        │                            │                 discipline added in
+        ▼                            │                 Phase C)
    ┌─────────────────────────────────┼───┐
    │  Providers (day-1, 4)           │   │
    │  • claude-marketplace           │   │
@@ -352,27 +394,28 @@ export type TrustTier = "trusted" | "community" | "escape";
 
 export type AutonomyBucket = "observe" | "suggest" | "autonomous";
 
-export type McpLifecycle = "config-only" | "gateway";
+// Single-value union in v1; reserved for future expansion (proxied,
+// gateway, task-gateway, etc).
+export type McpLifecycle = "config-only";
 
 export interface SkillSource {
   provider: Provider;
-  locator: string;          // owner/repo, registry name, etc.
-  version: string;          // tag, commit, or "latest" alias resolved
-  fetched_url: string;      // fully resolved url, for audit
-  fetched_at: number;       // unix epoch
-  fetched_commit_sha?: string;     // for git sources
-  fetched_archive_sha256: string;  // git archive output OR tarball/json
+  locator: string;
+  version: string;                  // canonical form (see §3.11)
+  fetched_url: string;
+  fetched_at: number;
+  fetched_commit_sha?: string;      // for git sources
+  fetched_archive_sha256: string;   // git-archive bytes OR json body bytes
 }
 
 export interface OperadSkill {
-  id: string;               // <provider>:<sanitized-locator>@<version>
+  id: string;                       // <provider>:<sanitized-locator>@<version>
   name: string;
   description: string;
   source: SkillSource;
   trust_tier: TrustTier;
   enabled: boolean;
 
-  // Primitive bundles — any subset
   tools?: SkillToolEntry[];
   agents?: AgentConfig[];
   workflows?: WorkflowConfig[];
@@ -382,23 +425,22 @@ export interface OperadSkill {
 
 export interface SkillToolEntry {
   toml: TomlToolConfig;
-  // Per-tier ceiling, computed at install. Cannot be raised by re-install.
-  autonomy_cap: AutonomyBucket;
+  autonomy_cap: AutonomyBucket;     // computed at install from tier
 }
 
 export interface SkillMcpEntry {
   name: string;
-  command?: string;         // stdio (config-only)
+  command?: string;                 // stdio
   args?: string[];
   env?: Record<string, string>;
-  url?: string;             // http / streamable (gateway)
+  url?: string;                     // http / sse
   transport?: "stdio" | "http" | "sse";
-  lifecycle: McpLifecycle;
+  lifecycle: McpLifecycle;          // always "config-only" in v1
 }
 
 export interface SkillMdEntry {
   name: string;
-  bundle_path: string;      // absolute path into cache
+  bundle_path: string;              // absolute path into cache
   frontmatter: Record<string, unknown>;
 }
 ```
@@ -407,20 +449,20 @@ export interface SkillMdEntry {
 
 ```sql
 CREATE TABLE skills (
-  id TEXT PRIMARY KEY,                     -- <provider>:<locator>@<version>
+  id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
   provider TEXT NOT NULL,
   locator TEXT NOT NULL,
   version TEXT NOT NULL,
   fetched_url TEXT NOT NULL,
-  fetched_commit_sha TEXT,                 -- nullable: git sources only
+  fetched_commit_sha TEXT,
   fetched_archive_sha256 TEXT NOT NULL,
   fetched_at INTEGER NOT NULL,
   trust_tier TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
   tombstoned INTEGER NOT NULL DEFAULT 0,
-  manifest_json TEXT NOT NULL,             -- full OperadSkill serialized
+  manifest_json TEXT NOT NULL,
   installed_at INTEGER NOT NULL,
   UNIQUE(provider, locator, version)
 );
@@ -430,38 +472,50 @@ CREATE INDEX idx_skills_provider_locator
 CREATE INDEX idx_skills_tombstoned
   ON skills(tombstoned, installed_at);
 
--- Active version pointer per (provider, locator). Updating = inserting a new
--- `skills` row + flipping this pointer in a single transaction.
 CREATE TABLE skill_active_version (
   provider TEXT NOT NULL,
   locator TEXT NOT NULL,
   version TEXT NOT NULL,
-  generation INTEGER NOT NULL,             -- pinned at activation
-  PRIMARY KEY (provider, locator),
-  FOREIGN KEY (provider, locator, version) REFERENCES skills(provider, locator, version)
+  generation INTEGER NOT NULL,
+  PRIMARY KEY (provider, locator)
 );
 
--- In-flight workflow runs that pin a generation. Refcount for cache GC.
+-- Phase C: refcount table for generation pins
 CREATE TABLE skill_generation_refs (
   generation INTEGER NOT NULL,
-  ref_kind TEXT NOT NULL,                  -- 'workflow_run' | 'session'
+  ref_kind TEXT NOT NULL,           -- workflow_run | agent_cycle |
+                                    -- rest_request | ipc_call |
+                                    -- scheduled_run
   ref_id TEXT NOT NULL,
+  acquired_at INTEGER NOT NULL,
   PRIMARY KEY (generation, ref_kind, ref_id)
 );
 CREATE INDEX idx_skill_gen_refs_gen ON skill_generation_refs(generation);
 
--- Per-tool autonomy ceiling. Set at skill install; read by ToolExecutor.
+-- Pending-delete state for two-phase cache tombstone
+CREATE TABLE skill_cache_pending_delete (
+  provider TEXT NOT NULL,
+  locator TEXT NOT NULL,
+  version TEXT NOT NULL,
+  marked_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, locator, version)
+);
+
+-- Autonomy ceiling
 CREATE TABLE tool_autonomy_caps (
   tool_id TEXT PRIMARY KEY,
-  max_bucket TEXT NOT NULL                 -- 'observe' | 'suggest' | 'autonomous'
+  max_bucket TEXT NOT NULL,         -- observe | suggest | autonomous
+  set_by_provider TEXT,             -- provider that set the current cap
+  set_at INTEGER NOT NULL
 );
 
 CREATE TABLE skill_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   skill_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,                -- install | update | enable | disable
-                                           -- | uninstall | error | force_revoke
-  detail TEXT,                             -- json
+  event_type TEXT NOT NULL,         -- install | update | enable | disable
+                                    -- | uninstall | error
+                                    -- (force_revoke folded into detail)
+  detail TEXT,                      -- json
   occurred_at INTEGER NOT NULL,
   FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
 );
@@ -475,19 +529,17 @@ src/skills/
   index.ts          — public SkillManager class (daemon-side)
   types.ts          — shared types
   resolver.ts       — locator → fetch (provider dispatch)
-  adapter.ts        — manifest → OperadSkill (provider dispatch +
-                      claude-plugin + operad.toml merge)
-  loader.ts         — apply / unapply / generation refcounts
-  store.ts          — sqlite + cache disk layout + claude.json writer
+  adapter.ts        — manifest → OperadSkill (claude-plugin + operad.toml merge)
+  loader.ts         — apply / unapply / generation refcounts (Phase C)
+  store.ts          — sqlite + cache disk layout
+  claude_json.ts    — flock-locked surgical RMW writer
   gc.ts             — background cache + tombstone sweeper
+  daemon_id.ts      — UUID provisioning
   providers/
     claude-marketplace.ts
     mcp-official.ts
     operad-curated.ts
     git-url.ts
-  mcp/
-    config_only.ts  — write to ~/.claude.json
-    gateway.ts      — record HTTP URL + write to ~/.claude.json
 ```
 
 ### 4.5 Provider interface
@@ -497,49 +549,46 @@ export interface ProviderModule {
   id: Provider;
   trustTier(locator: string): TrustTier;
 
-  // List available skills (used by dashboard search). May paginate.
+  // Listing — for future search; not invoked in v1 since CLI search is
+  // deferred. Implementations may stub.
   list(opts: { query?: string; cursor?: string; limit?: number }): Promise<{
     items: ProviderListing[];
     next_cursor?: string;
   }>;
 
-  // Fetch + extract a specific skill version. Returns the path to the
-  // extracted directory in the cache.
+  // Fetch + extract a specific skill version.
   fetch(locator: string, version: string, cacheDir: string): Promise<{
     extracted_path: string;
-    resolved_version: string;          // when locator says "latest", what was that?
+    resolved_version: string;
     fetched_url: string;
-    fetched_commit_sha?: string;       // git sources
+    fetched_commit_sha?: string;
     fetched_archive_sha256: string;
   }>;
 
-  // Read whatever manifests exist in the extracted directory and normalize to
-  // OperadSkill. Adapter for the provider's native format.
+  // Read whatever manifests exist in the extracted directory and normalize.
   read(extracted_path: string): Promise<Omit<OperadSkill, "id" | "source" | "trust_tier" | "installed_at" | "enabled">>;
 
-  // Lightweight HEAD check for updates. Returns the latest version string
-  // available, without fetching the bundle.
+  // HEAD check for updates (Phase D — dashboard "update available" badge).
   latest(locator: string): Promise<string>;
 }
 ```
 
 ## 5 — IPC + REST surface
 
-### 5.1 IPC commands (daemon ↔ CLI)
+### 5.1 IPC commands
 
 ```
-skill.install <provider> <locator> [<version>=latest] [--force-revoke]
+skill.install <provider> <locator> [<version>=latest]
+              [--force-revoke] [--force-take-ownership]
 skill.uninstall <provider> <locator> [--force-revoke]
 skill.update <provider> <locator>
-skill.list [--provider=<p>] [--check]
-skill.search <query> [--provider=<p>]
+skill.list [--provider=<p>]
 skill.enable <provider> <locator>
 skill.disable <provider> <locator>
 skill.info <provider> <locator>
 ```
 
-The CLI is a thin wrapper that sends these messages and renders the JSON
-responses. No DB or cache access on the CLI side, ever.
+Deferred to v1.1: `skill.search`, `--check` on `list`.
 
 ### 5.2 REST API (dashboard)
 
@@ -547,12 +596,12 @@ responses. No DB or cache access on the CLI side, ever.
 GET    /api/skills                          list installed
 GET    /api/skills/<id>                     get one (full manifest)
 POST   /api/skills/install                  { provider, locator, version?,
-                                              force_revoke? }
+                                              force_revoke?,
+                                              force_take_ownership? }
 POST   /api/skills/<id>/enable
 POST   /api/skills/<id>/disable
 POST   /api/skills/<id>/uninstall           { force_revoke? }
 POST   /api/skills/<id>/update              install latest if newer
-GET    /api/skills/search                   { provider?, q }
 GET    /api/skills/events                   recent events (timeline)
 ```
 
@@ -562,15 +611,14 @@ SSE channel under `type: "skill"`. No new SSE endpoint.
 ### 5.3 CLI surface
 
 ```sh
-tmx skill add <provider>:<locator>[@<version>]
-tmx skill add <github-url>              # → git+url, version = tag at HEAD
+tmx skill add <provider>:<locator>[@<version>] [--force-take-ownership]
+tmx skill add <github-url>              # → git+url
 tmx skill remove <provider>:<locator> [--force-revoke]
-tmx skill list [--provider=<p>] [--check]
-tmx skill search <query> [--provider=<p>]
+tmx skill list [--provider=<p>]
 tmx skill update <provider>:<locator>
 tmx skill enable <provider>:<locator>
 tmx skill disable <provider>:<locator>
-tmx skill info <provider>:<locator>     # show manifest, source, autonomy caps
+tmx skill info <provider>:<locator>
 ```
 
 ## 6 — Author workflow
@@ -583,193 +631,212 @@ my-plugin/
     my-skill/SKILL.md
     my-skill/scripts/...
   commands/
-    my-command.md                    # claude-plugin command
+    my-command.md
   agents/
-    my-agent.md                      # claude-plugin agent (subagent)
+    my-agent.md
   .operad/
-    operad.toml                      # operad-specific tools/agents/workflows/mcps
+    operad.toml                      # operad-specific
 ```
 
 Publishing checklist:
 
-1. Repo on GitHub. Tag releases with semver.
-2. Optional: add `topic:claude-code-plugin` for discoverability under the
-   eventual `github-topic` provider.
-3. Optional: PR to `operad-stream/skills` repo to be listed in
-   `operad-curated`.
+1. Repo on GitHub. Tag releases with semver (`v1.0.0`).
+2. Optional: `topic:claude-code-plugin` for future `github-topic` discovery.
+3. Optional: PR to `operad-stream/skills` to be listed in `operad-curated`.
 
 Users install with `tmx skill add git+url:https://github.com/me/my-plugin@v1.0.0`
-or `tmx skill add operad-curated:me/my-plugin` once curated.
+or `tmx skill add operad-curated:me/my-plugin`.
 
 ## 7 — Failure modes addressed
 
 ### 7.1 Two orchestrators fighting over one MCP process
 
-`proxied` mode is **cut from v1**. operad never spawns an MCP process
-that Claude Code might also try to spawn. `config-only` writes to
-`~/.claude.json` and lets Claude Code own the lifecycle entirely;
-`gateway` writes an HTTP URL with no daemon-owned process. Zero overlap.
+`proxied` and `gateway` modes both cut from v1. Only `config-only` ships;
+Claude Code owns every MCP lifecycle. Zero overlap.
 
 ### 7.2 SQLITE_BUSY / partial-read races
 
 CLI is a pure IPC client. Daemon is the sole writer. SkillManager
 serialises install transactions on a per-`(provider, locator)` mutex.
-Cache directory writes happen to a `<version>.tmp` directory and
-atomically rename to `<version>` after sha256 verification.
+Cache writes go to `<version>.tmp` and atomic-rename after sha256 check.
 
 ### 7.3 In-flight workflow run referencing tools from an old version
 
-Generation-counter discipline (§3.7). Workflow runs pin a generation at
-start; tool lookups resolve against the pinned snapshot, not the live
-pointer. Old generations are refcounted; cache GC waits for refcount = 0
-before disk removal.
+MVP: install refused while any workflow run is active
+(`INSTALL_BLOCKED_BY_RUN`); workflow start refused while install in
+progress. Phase C adds generation pinning across workflows / OODA cycles
+/ REST / IPC / scheduled runs.
 
 ### 7.4 Schema collision with Anthropic
 
-We do not extend `marketplace.json` or `plugin.json`. operad-specific
-content lives in `.operad/operad.toml`. If Anthropic adds strict
-validation, plugin authors that target both ecosystems are unaffected. A
-CI smoke test in operad-curated runs `claude plugin install` on a
-fixture skill with `.operad/` present and fails the build if claude-code
-rejects it.
+Two-file split, no extension of upstream schemas. CI smoke test in
+operad-curated catches breakage; minimum Claude Code version enforced
+by `doctor`.
 
 ### 7.5 Termux symlink failures
 
-Zero symlinks. All references between the cache and Claude Code's view of
-the world go through absolute paths in `~/.claude.json` and
-`~/.claude/settings.json`.
+Zero symlinks. All cross-references go through absolute paths in
+`~/.claude.json` and `~/.claude/settings.json`.
 
-### 7.6 `~/.claude.json` concurrent edit by user
+### 7.6 `~/.claude.json` concurrent edit by user / two daemons
 
-operad reads via `flock`-advisory-locked read-modify-write, parses,
-surgically updates `mcpServers` under a top-level `operad_managed`
-array so we know what we own, writes via temp-file-then-rename. If parse
-fails, install aborts. operad never blind-overwrites.
+flock-advisory-locked surgical RMW. `operad_managed` is an object keyed by
+mcp name with `{skill_id, daemon_id, installed_at}`. Three collision
+cases: user-owned entry refuses with `MCP_NAME_USER_OWNED` (overridable
+with `--force-take-ownership`); other-daemon-owned refuses with
+`MCP_OWNED_BY_OTHER_DAEMON`; orphan `operad_managed` entry without a
+matching `mcpServers` entry is GC'd on next touch.
 
 ### 7.7 Untrusted skill installs
 
-`escape`-tier installs land in `observe` bucket with `autonomy_cap =
-suggest` — user can promote to suggest with confirmation, never to
-autonomous. `community` tier installs into `suggest` with cap =
-`autonomous`. `trusted` tier same as community but installs silently.
+`escape`-tier → `observe` bucket, cap `suggest`. `community`/`trusted` →
+`suggest` bucket, cap `autonomous`. Caps enforced at promotion time.
 
-### 7.8 Skill removing a tool with an active lease
+### 7.8 Skill removing a tool with active consumers
 
-Uninstall and update paths consult `tool_leases`; refuse with typed
-error listing affected leases unless `--force-revoke` is passed (logs
-to `skill_events`).
+Lease + scheduled-run check. Refuses unless `--force-revoke`.
 
 ### 7.9 Registry compromise / DNS hijack
 
-- `mcp-official` resolver TLS-pins the registry SPKI in source. On
-  cert mismatch, the resolver aborts with a typed error.
-- `operad-curated` resolver pins the index repo's commit SHA. The SHA is
-  embedded in operad source; rotating it is a release event, never an
-  auto-pull.
-- Other providers (`claude-marketplace`, `git+url`) rely on git's tag
-  pinning + SHA recording; users see the resolved commit in `tmx skill
-  info`.
+- `mcp-official` TLS-pins SPKI (primary + backup).
+- `operad-curated` commit-SHA-pins the index repo; rotated only on
+  operad release.
+- Git sources audit-log the resolved commit SHA.
 
-### 7.10 Android OOM-kill of any operad-managed process
+### 7.10 Tool name collision between skills
 
-Not applicable in v1 — operad doesn't manage any MCP processes. Returns
-to relevance if `proxied` mode is reintroduced.
+Rejected at install with `TOOL_NAME_CONFLICT`. User resolves manually.
+
+### 7.11 Cache GC ABA race
+
+Two-phase tombstone (mark → wait sweeper tick → delete only if still
+zero refcount).
+
+### 7.12 SSE channel exhaustion
+
+Skill events multiplex onto existing `/api/events` channel under
+`type: "skill"`. No new EventSource.
 
 ## 8 — Testing strategy
 
-- **Unit tests** for each provider's `list` / `fetch` / `read` / `latest`
-  with recorded fixtures (no network in CI). Includes a `mcp-official`
-  TLS-pin test that fails the resolver when the cert doesn't match.
-- **Unit tests** for the adapter merging `marketplace.json` + `operad.toml`.
-- **Unit tests** for SkillManager install/uninstall/update transactions
-  (including rollback on failure, force-revoke logging, autonomy-cap
-  enforcement).
-- **Unit tests** for the `~/.claude.json` writer (lock contention,
-  malformed input, surgical update preserving user entries).
-- **Property test** for the cache-directory atomic-rename logic — random
-  crash injection between extract and rename.
-- **Integration test**: install a fixture skill via IPC, verify
-  tools/agents/workflows are registered, run a workflow that uses a tool
-  from the skill, update the skill mid-run, verify the in-flight run
-  completes against the old generation while a new run picks up the new
-  generation, uninstall, verify everything is deregistered and cache
-  GC'd.
-- **CI smoke test in operad-curated repo**: install a fixture skill
-  containing `.operad/operad.toml` with `claude plugin install` and
-  assert claude-code accepts it.
+- **Unit tests** for each provider's `fetch` / `read` / `latest` with
+  recorded fixtures (no network). Includes `mcp-official` TLS-pin test
+  that fails on cert mismatch (uses a fake cert + override of the pin
+  for the test).
+- **Unit tests** for the adapter merging `marketplace.json` +
+  `.operad/operad.toml`, including the `.operad/` vs bare-`operad.toml`
+  precedence warning, the no-operad-file case, and the no-marketplace-file
+  case.
+- **Unit tests** for `claude.json` writer: lock contention, malformed
+  parse, user-owned name refusal, other-daemon-owned refusal, orphan
+  cleanup, surgical update preserving unrelated entries.
+- **Unit tests** for SkillManager: install / uninstall / update
+  transactions, rollback on failure, autonomy-cap enforcement, lease +
+  scheduled-run cascade, tool-name-conflict rejection.
+- **Property test** for the cache atomic-rename: random crash injection
+  between extract and rename.
+- **Integration test (MVP):** install a fixture skill via IPC, verify
+  tools/agents/workflows are registered, run a workflow that uses a tool,
+  refuse a concurrent install while the workflow is running, uninstall,
+  verify deregistration.
+- **Integration test (Phase C):** generation discipline — start a long
+  workflow, install a skill mid-flight that renames a tool the workflow
+  uses, verify the in-flight run completes against the old generation
+  while a new run picks up the new generation, verify cache GC waits
+  for the pin to release.
+- **CI smoke test in operad-curated:** install a fixture skill containing
+  `.operad/operad.toml` with `claude plugin install` and assert
+  claude-code accepts it.
 
-## 9 — Implementation phases
+## 9 — Implementation phases (round-3 restructure)
 
-### Phase A — internal plumbing
-1. SQLite schema migration.
-2. `SkillManager`, `types`, `store`.
-3. Generation counter + refcount in ToolExecutor / AgentEngine /
-   WorkflowEngine. **This is the biggest in-tree change** — it touches
-   the three engines and the workflow runner. Land first, ship behind a
-   feature flag, validate with existing workflow tests still passing.
-4. IPC handlers.
-5. `~/.claude.json` advisory-locked writer.
-6. Runtime loader (apply/unapply, generation tagging).
-7. Adapter merge logic + `operad.toml` parser.
-8. Autonomy ceiling: `tool_autonomy_caps` table + ToolExecutor promotion
+Round-3 reviewer rightly flagged that round-2's Phase A (generation
+counter first, touching all three engines) was speculative engineering
+ahead of validated demand. New phases:
+
+### Phase A — MVP (validates the architecture)
+1. SQLite schema migration (all tables; generation tables exist but
+   unused).
+2. `daemon_id` provisioning.
+3. `~/.claude.json` flock-locked surgical writer.
+4. `SkillManager`, `types`, `store`, basic install/uninstall.
+5. `git+url` provider (simplest, validates the pipeline end-to-end).
+6. Adapter merge logic + `.operad/operad.toml` parser.
+7. **Naïve "live pointer" registration** — refuse installs while any
+   workflow run is active (`INSTALL_BLOCKED_BY_RUN`). Document the
+   caveat. Coarse, ship-able.
+8. Autonomy cap: `tool_autonomy_caps` table + ToolExecutor promotion
    gate + CLI / dashboard plumbing.
-9. Unit tests for all of the above.
+9. IPC handlers (install / uninstall / list / enable / disable / info).
+10. Lease invalidation on uninstall/update.
+11. Tool-name-conflict rejection at install.
+12. Unit tests for all of the above.
 
-### Phase B — providers
-10. `git+url` (escape hatch — simplest, validates the pipeline).
-11. `operad-curated` (static index — also needs site/ skills index
-    bootstrap).
-12. `claude-marketplace` (most leverage — anthropics/skills,
-    wshobson/agents, etc).
-13. `mcp-official` (registry API + TLS pin).
-14. Provider unit tests with fixtures.
+### Phase B — more providers (broadens reach without architecture changes)
+13. `operad-curated` (static index — also needs `operad-stream/skills`
+    repo bootstrap).
+14. `claude-marketplace` (biggest leverage).
+15. `mcp-official` (registry + TLS pin + backup pin).
+16. Provider fixture tests.
 
-### Phase C — MCP lifecycle
-15. `config-only` mode.
-16. `gateway` mode (HTTP URL recording + claude.json write).
+### Phase C — generation discipline (post-validation, scope only)
+17. Generation counter in ToolExecutor / AgentEngine / WorkflowEngine.
+18. Pin acquire/release at every call site (table from §3.7).
+19. Two-phase cache tombstone in GC.
+20. Drop the `INSTALL_BLOCKED_BY_RUN` coarse refusal.
+21. Integration test for mid-flight install.
 
 ### Phase D — UX
-17. REST endpoints + multiplexed SSE messages.
-18. Dashboard `SkillManager.svelte` panel: list, search, install, autonomy.
-19. CLI `tmx skill` subcommands.
-20. Docs in `docs/skills.md`.
-21. CHANGELOG, README, landing-page entries.
+22. REST endpoints + multiplexed SSE messages.
+23. Dashboard `SkillManager.svelte` panel.
+24. CLI `tmx skill` subcommands wired to IPC.
+25. Docs in `docs/skills.md`.
+26. CHANGELOG, README, landing-page entries.
 
 ### Phase E — hardening
-22. Property tests for cache atomic rename.
-23. Integration test for end-to-end install/use/uninstall.
-24. CI smoke test in operad-curated for claude-plugin compatibility.
-25. Doctor probes: validate `~/.claude.json` consistency with installed
-    `mcps`, validate Claude Code version ≥ 2.0 if skill_mds installed.
-26. Cache GC sweeper.
+27. Property tests for cache atomic rename.
+28. Integration test for end-to-end MVP install/use/uninstall.
+29. CI smoke test in operad-curated for claude-plugin compatibility.
+30. Doctor probes: `~/.claude.json` consistency, Claude Code version,
+    daemon_id existence.
+31. Cache GC sweeper.
 
 ## 10 — Future work (out of scope for v1)
 
-- `proxied` MCP mode — requires a proper stdio multiplexer with explicit
-  capability-intersection table; only worth doing if there's real demand
-  for OODA agents to call stdio MCPs directly while Claude Code is also
-  running.
-- `smithery` provider — auth + rate-limit + caching + debounce.
-- `github-topic` provider — needs per-result trust UX.
+- `proxied` MCP mode (requires real stdio multiplexer).
+- `gateway` MCP mode (re-add with real proxy semantics).
+- `task-gateway` MCP mode (MCP Tasks primitive support).
+- `smithery` provider (auth + rate limit + cache + debounce).
+- `github-topic` provider (per-result trust UX).
 - `huggingface-spaces` MCP-filtered provider.
 - `tessl` adapter once they ship a public API.
-- MCP Tasks primitive support — likely a new `task-gateway` mode.
 - Auto-update on a daily cron.
-- Signed manifests (sigstore / cosign style).
-- "Skill packs" — curated collections of skills installed together.
+- Signed manifests (sigstore / cosign).
+- "Skill packs" (curated collections installed together).
+- Bulk `--all` operations.
+- `tmx skill search` across providers.
+- `--check` on `tmx skill list`.
 
 ## 11 — Reviewer trail
 
-- **Round 1 — Gemini 3 Pro Preview**: caught the manifest-abuse
-  schema-collision risk, the proxied-MCP zombie-port-lock failure mode,
-  the symlink/FUSE breakage, and the SQLite single-writer requirement.
-  All folded in.
+- **Round 1 — Gemini 3 Pro Preview**: caught manifest-abuse schema
+  collision, proxied-MCP zombie-port-lock, symlink/FUSE breakage,
+  SQLite single-writer requirement.
 - **Round 2 — high-thinking spec reviewer**: caught that `proxied` mode
-  is broken at the protocol layer (stdio multiplexing breaks
-  sampling/elicitation/roots), that "atomic version pointer" is only
-  atomic at the DB layer and not the runtime layer, that the autonomy
-  "ceiling" was asserted without implementation, that git sources can't
-  have a meaningful "tarball sha256", that lease invalidation was
-  missing, that `~/.claude.json` had no concurrency story, and that the
-  SSE budget was already at the 6-per-origin limit. All folded in;
-  `proxied` and `smithery` cut from v1.
+  is broken at the protocol layer, "atomic version pointer" is
+  DB-only-not-runtime, autonomy ceiling didn't exist, git sha
+  meaningless for git clones, lease invalidation missing,
+  `~/.claude.json` had no concurrency story, SSE at 6-per-origin limit.
+  `proxied` and `smithery` cut.
+- **Round 3 — high-thinking spec reviewer**: caught generation-counter
+  scope omission (non-workflow callers), `operad_managed` array
+  needed object+daemon_id semantics, `gateway` mode as dead weight,
+  schema migration for `tool_autonomy_caps` unspecified, cross-tier
+  re-install ambiguous, cache GC ABA race, `force_revoke` cascade
+  incomplete, `.operad/operad.toml` discovery order ambiguous,
+  version-string normalization missing, mcp-official backup TLS pin
+  missing, 24h cache TTL magic number, git+url tag-less repo fallback
+  missing, ETag instability, phase ordering speculative. `gateway`
+  cut to single-value `McpLifecycle`. Phases restructured: MVP first
+  (coarse install-blocked-by-run refusal), generation discipline
+  deferred to Phase C.
