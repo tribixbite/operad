@@ -1,10 +1,10 @@
 # Skill / plugin marketplace — design spec
 
 Date: 2026-05-20
-Status: draft (round 3 — post-reviewer-3 pivots)
+Status: draft (round 4 — post-reviewer-4 pivots, pending round-5 sign-off)
 Owner: tribixbite
-Reviewers: gemini-3-pro-preview (round 1), high-thinking subagent (round 2),
-high-thinking subagent (round 3)
+Reviewers: gemini-3-pro-preview (round 1), high-thinking subagent (rounds
+2 / 3 / 4)
 
 ## 1 — Goal
 
@@ -99,7 +99,8 @@ the minimum supported Claude Code version (currently `>= 2.0`).
 ToolExecutor in the `suggest` bucket by default. User must promote each
 tool to `autonomous` for it to fire without confirmation.
 
-**Source-tier install prompts.** Three trust tiers:
+**Source-tier install prompts.** Three trust tiers, ordered most→least
+trusted: `trusted` > `community` > `escape`.
 
 - `trusted` — `claude-marketplace` resolved to
   `anthropics/claude-plugins-official`, `mcp-official`, or
@@ -125,19 +126,40 @@ tool to `autonomous` for it to fire without confirmation.
   - `community` → cap `autonomous` (default bucket `suggest`).
   - `escape` → cap `suggest` (default bucket `observe`).
 - The cap is recorded at install. Re-install from a different provider
-  for an identical `(locator, version)` is a no-op; re-install from a
-  different provider tier (e.g. `community → trusted`) **does** update
-  the cap — only upward, never downward, to avoid the surprise of a
-  user-promoted tool silently degrading.
+  for an identical `(locator, version)` is a no-op if the new tier
+  matches the recorded one. Cross-tier re-install is governed by the
+  **always-more-restrictive** rule (round-4 fix; reverses the round-3
+  "upward only" rule which let a user silently keep elevated autonomy
+  on code re-installed from a less-trusted source):
+  - Re-install at a stricter tier (e.g. `community → escape`): the cap
+    drops to the stricter ceiling. If any tool currently has a bucket
+    > the new cap, the install requires `--accept-cap-downgrade` and
+    re-prompts the user; on confirm, all affected tool buckets are
+    clamped to the new cap and an `autonomy_clamp` entry is recorded
+    in `skill_events.detail`.
+  - Re-install at a more permissive tier (e.g. `escape → trusted`):
+    cap relaxes; buckets are unchanged (user can opt-in to promote).
+  - Same-tier re-install: no-op.
 - Skill manifests cannot set their own cap. Source tier is the only
   knob.
 
-**Tool name conflicts between skills are rejected at install time.** The
-new skill's primitives are validated against the existing
-`(generation+1)` view; on collision, install aborts with a typed
-`TOOL_NAME_CONFLICT` error listing the colliding tool and the
-already-installed skill. Operators resolve manually (uninstall the old
-one, or rename in their fork).
+**Name conflicts between skills are rejected at install time.** The
+new skill's primitives are validated against the existing view; on
+collision, install aborts with one of:
+
+- `TOOL_NAME_CONFLICT` — `[[tool]]` collides with an existing tool.
+- `WORKFLOW_NAME_CONFLICT` — `[[workflow]]` collides with an existing
+  workflow (covers the round-4 gap: workflow.ts has no name-collision
+  guard today).
+- `AGENT_NAME_CONFLICT` — `[[agent]]` collides with an existing agent
+  specialization.
+- `MCP_NAME_CONFLICT` — `[[mcps]]` entry name collides with another
+  operad-managed MCP (user-owned and other-daemon-owned cases are
+  separately handled in §3.5).
+
+All conflict errors return the colliding name + the already-installed
+skill id. Operators resolve manually (uninstall the old one, or rename
+in their fork).
 
 ### 3.5 MCP server lifecycle (single mode in v1)
 
@@ -153,10 +175,21 @@ the schema.
 
 **`~/.claude.json` writer:**
 
-- Read via `flock` on `~/.claude.json.lock` (advisory). On platforms
-  without flock (Windows), use `proper-lockfile`.
-- Parse the existing JSON. If parse fails, install aborts with a typed
-  `CLAUDE_JSON_MALFORMED` error — operad never touches a malformed file.
+- Acquire `flock` on `~/.claude.json.lock` (advisory). On platforms
+  without flock (Windows), use `proper-lockfile`. The lock synchronises
+  operad-vs-operad only; **claude-code does not honour it** (round-4
+  reviewer was right that the round-3 spec implied protection it didn't
+  have).
+- Read `~/.claude.json` and capture `{mtime_ns, sha256(body)}`.
+- Parse. If parse fails, install aborts with `CLAUDE_JSON_MALFORMED` —
+  operad never touches a malformed file.
+- Compute the surgical update.
+- Re-stat the file. If `mtime_ns` or `sha256` changed, the file was
+  rewritten between read and the rename (most likely by claude-code
+  via `/mcp` or auth rotation). Release the lock, retry the whole
+  sequence ONCE. On second race, abort with `CLAUDE_JSON_RACED` and
+  return a typed error suggesting the user retry after closing the
+  conflicting client. We never silently clobber a concurrent write.
 - Surgically update `mcpServers` and a top-level **object** (not array)
   named `operad_managed`:
 
@@ -170,9 +203,19 @@ the schema.
   }
   ```
 
-  `daemon_id` is a UUID generated at first daemon boot and persisted in
-  `~/.local/share/operad/daemon-id`. It exists exactly to handle the
-  two-daemon-on-syncthing-dotfiles case.
+  `daemon_id` is a UUID generated at first daemon boot. **Location
+  precedence (round-4 fix):**
+  1. `$XDG_RUNTIME_DIR/operad/daemon-id` if `$XDG_RUNTIME_DIR` is set
+     and writable (Linux desktop). `$XDG_RUNTIME_DIR` is per-machine
+     `tmpfs`, exactly the right scope.
+  2. Else `$PREFIX/var/lib/operad/daemon-id` on Termux (per-Android-
+     device, never synced).
+  3. Else `~/.local/share/operad/daemon-id` as fallback with a
+     `doctor` warning that the path may sync via dotfile tools — user
+     should add it to their syncthing/chezmoi exclusion list.
+  The path is decided once on first boot and cached so re-bootstrapping
+  doesn't accidentally produce a different id under a different
+  $XDG_RUNTIME_DIR.
 
 - Write via temp-file-then-rename.
 
@@ -200,10 +243,22 @@ IPC.
 ### 3.7 Hot-load and generation-counter discipline (Phase B work, deferred)
 
 **The MVP ships without generation discipline** (see §9). The MVP caveat:
-"don't install skills while a workflow is running"; the daemon refuses
-installs while any workflow run is active (returns `INSTALL_BLOCKED_BY_RUN`)
-and refuses workflow starts while an install is in progress. Coarse,
-shippable, validates the rest of the pipeline.
+"don't install skills while ANY tool consumer is live". The daemon
+refuses installs while **any of the five caller types** holds a live
+tool reference (round-4 fix; the round-3 spec only blocked on workflow
+runs, which would have demonstrated the failure mode it claimed to
+defer — single-shot REST tool calls or OODA cycles would race silently).
+
+The gate is symmetric: while an install is in progress, the daemon
+refuses new tool reference acquisitions from any caller type. The
+typed errors are `INSTALL_BLOCKED_BY_ACTIVE_CONSUMER` (lists the
+specific caller kinds + ref_ids holding references) and
+`TOOL_BLOCKED_BY_ACTIVE_INSTALL` (returns the in-flight install id).
+
+This is coarse and acknowledged as such. It does mean the dashboard
+cannot be used for ad-hoc tool calls during an install — which is
+correct behaviour, since the alternative is silent registry tearing.
+Phase C replaces this with proper generation pinning.
 
 Generation discipline lands in Phase C once the MVP has been exercised
 and we know which engines actually need it. The full design:
@@ -319,8 +374,16 @@ Updates that strictly add (no rename, no removal) skip the lease check.
 ### 3.13 Integrity primitives
 
 - **Git sources** (`claude-marketplace`, `git+url`, `operad-curated`):
-  `git rev-parse HEAD` is recorded as `fetched_commit_sha`; `git archive
-  <sha>` is sha256'd as `fetched_archive_sha256`.
+  `git rev-parse HEAD` is recorded as `fetched_commit_sha`. This is the
+  canonical integrity primitive — bit-stable, verifiable later.
+  **Do NOT use `git archive` as a secondary digest** (round-4 fix):
+  `git archive` output is NOT byte-stable across git versions (it
+  includes compression metadata and tar mtime drift), so a CI builder
+  and a user machine on the same commit would produce different
+  digests. If we want a secondary cross-version digest, use
+  `git ls-tree -r <sha>` (a deterministic tree-of-blob-hashes listing)
+  sha256'd. That value lands in `fetched_archive_sha256` (kept
+  column name for schema continuity).
 - **Registry sources** (`mcp-official`): `sha256(json_body)` is the
   integrity primitive. **`ETag`/`Last-Modified` are NOT used for cache
   invalidation** — Cloudflare-fronted registries rotate ETags on cache
@@ -330,16 +393,71 @@ Updates that strictly add (no rename, no removal) skip the lease check.
 ### 3.14 Cache GC
 
 - Background sweeper runs on daemon idle.
-- Eligible directories: refcount = 0 AND `installed_at` > `cache_ttl_hours`.
-- **Two-phase tombstone (see §3.7)** prevents ABA races with newly-pinned
-  generations.
+- Eligible directories: refcount = 0 AND `installed_at` >
+  `cache_ttl_hours` AND **not currently referenced from
+  `~/.claude/settings.json` `skills`** (round-4 question — a SKILL.md
+  bundle still wired into Claude Code's settings must not be GC'd even
+  if no operad pin holds it). The GC computes the union of pinned
+  generations and `settings.json`-referenced bundle paths before
+  marking.
+- **Two-phase tombstone (see §3.7)** with explicit SQL ordering:
+
+  ```sql
+  -- Pass 1 (mark)
+  BEGIN;
+    SELECT provider, locator, version FROM <eligible-query>;
+    INSERT INTO skill_cache_pending_delete (...) SELECT ...;
+  COMMIT;
+
+  -- Pass 2 (delete), runs on the *next* sweeper tick
+  BEGIN;
+    SELECT spd.provider, spd.locator, spd.version
+      FROM skill_cache_pending_delete spd
+      LEFT JOIN skill_generation_refs r
+        ON r.generation = (SELECT generation FROM skill_active_version
+                            WHERE provider = spd.provider AND locator = spd.locator)
+     WHERE r.ref_id IS NULL;                  -- still no refs
+    -- rm -rf the disk dirs returned, then:
+    DELETE FROM skill_cache_pending_delete WHERE (provider,locator,version) IN (...);
+  COMMIT;
+  ```
+
+  Pin acquire on a `pending_delete` row clears the pending flag inside
+  the same transaction that records the pin, so the next pass-2 skips
+  the row.
 - Default `cache_ttl_hours = 168` (7 days). Configurable in
-  `operad.toml` under `[skills]`. The reviewer was right that 24h was
-  a magic number; 7 days covers most overnight test runs and weekend
-  experiments.
+  `operad.toml` under `[skills]`.
 - Per `(provider, locator)`, keep at most **3** versions on disk: the
   currently-active one plus up to two recent inactive ones for rollback.
   Older versions are GC'd unconditionally even if refcount = 0.
+
+### 3.15 Install transaction shape (5-store coordination)
+
+A single install touches five stores in order. Failure at any step
+rolls back the side-effects of all prior steps in the same install.
+Forward-recovery is not attempted automatically — partial installs are
+always rolled back rather than left half-applied (round-4 reviewer was
+right that without this, partially-installed skills accumulate
+silently).
+
+| # | Store | Operation | Failure compensation |
+|---|---|---|---|
+| 1 | SQLite | `BEGIN`. Insert `skills` row, insert tombstone-pending if updating. | `ROLLBACK`. No external side-effects yet. |
+| 2 | Cache disk | Extract bundle to `<version>.tmp/`, sha256-verify, atomic-rename to `<version>/`. | `rm -rf <version>.tmp/`. `ROLLBACK` SQLite. |
+| 3 | `~/.claude.json` | flock + mtime-stat + RMW (see §3.5 writer). | `rm -rf <version>/`. `ROLLBACK` SQLite. Release lock. |
+| 4 | `~/.claude/settings.json` | Same flock-style RMW pattern for the `skills` array. | Re-RMW `~/.claude.json` to undo step 3. `rm -rf <version>/`. `ROLLBACK` SQLite. |
+| 5 | In-memory registries | Register tools / agents / workflows in ToolExecutor / AgentEngine / WorkflowEngine. | Unregister anything that registered. Undo settings.json (step 4). Undo claude.json (step 3). Delete cache (step 2). ROLLBACK SQLite. |
+
+After step 5 succeeds, SQLite `COMMIT` flips `skill_active_version` and
+`enabled = 1` in one statement; from that point the install is
+"committed" and uninstall is the symmetric inverse path.
+
+If a compensation step itself fails (rare — most likely on
+`~/.claude.json` write during step-4 rollback), the daemon logs a
+`PARTIAL_INSTALL_RECOVERY_FAILED` event with the full diagnostic state
+needed for manual cleanup. The install IPC response includes the
+recovery state so the CLI can surface "manual cleanup needed" to the
+user with a concrete checklist.
 
 ## 4 — Architecture
 
@@ -754,23 +872,43 @@ Round-3 reviewer rightly flagged that round-2's Phase A (generation
 counter first, touching all three engines) was speculative engineering
 ahead of validated demand. New phases:
 
-### Phase A — MVP (validates the architecture)
+### Phase A0 — load-bearing pipeline (round-4 split)
+The minimum that proves the architecture works end-to-end. Lands behind
+an `--enable-skills-preview` daemon flag so we can dogfood without
+shipping unreviewed code paths to all users. Stop here for a week,
+install some real skills, and let real usage drive A1/A2 priorities.
+
 1. SQLite schema migration (all tables; generation tables exist but
    unused).
-2. `daemon_id` provisioning.
-3. `~/.claude.json` flock-locked surgical writer.
-4. `SkillManager`, `types`, `store`, basic install/uninstall.
-5. `git+url` provider (simplest, validates the pipeline end-to-end).
-6. Adapter merge logic + `.operad/operad.toml` parser.
-7. **Naïve "live pointer" registration** — refuse installs while any
-   workflow run is active (`INSTALL_BLOCKED_BY_RUN`). Document the
-   caveat. Coarse, ship-able.
-8. Autonomy cap: `tool_autonomy_caps` table + ToolExecutor promotion
-   gate + CLI / dashboard plumbing.
-9. IPC handlers (install / uninstall / list / enable / disable / info).
-10. Lease invalidation on uninstall/update.
-11. Tool-name-conflict rejection at install.
-12. Unit tests for all of the above.
+2. `daemon_id` provisioning (per §3.5 location precedence).
+3. `~/.claude.json` writer (flock + mtime+sha256 re-check + retry-once).
+4. `~/.claude/settings.json` writer (same pattern).
+5. `SkillManager` skeleton, `types`, `store`.
+6. `git+url` provider (simplest — validates the pipeline end-to-end).
+7. Adapter merge logic + `.operad/operad.toml` parser.
+8. 5-store install transaction (§3.15) with rollback on failure.
+9. IPC handlers (install / uninstall / list / info — no enable /
+   disable / update yet).
+10. Naïve "live pointer" registration — installs allowed only when no
+    tool consumers are active across ALL five caller types
+    (`INSTALL_BLOCKED_BY_ACTIVE_CONSUMER`).
+11. Unit tests for the writer, adapter, transaction, rollback paths.
+
+### Phase A1 — autonomy ceiling
+12. `tool_autonomy_caps` table + migration default (`autonomous` for
+    pre-existing tools).
+13. ToolExecutor promotion gate (`AUTONOMY_CAP_VIOLATION`).
+14. CLI / dashboard plumbing for tool promotion respecting caps.
+15. Cross-tier re-install rule (always-more-restrictive +
+    `--accept-cap-downgrade`).
+16. Unit tests for cap enforcement, migration, cross-tier rules.
+
+### Phase A2 — conflicts + lease cascade
+17. Tool / workflow / agent / mcp name-conflict rejection.
+18. Lease invalidation on uninstall/update + scheduled-run paused
+    cascade (`--force-revoke`).
+19. enable / disable / update IPC + REST.
+20. Unit tests for the conflict matrix + cascade behaviours.
 
 ### Phase B — more providers (broadens reach without architecture changes)
 13. `operad-curated` (static index — also needs `operad-stream/skills`
@@ -840,3 +978,23 @@ ahead of validated demand. New phases:
   cut to single-value `McpLifecycle`. Phases restructured: MVP first
   (coarse install-blocked-by-run refusal), generation discipline
   deferred to Phase C.
+- **Round 4 — high-thinking spec reviewer**: caught that the round-3
+  MVP gate only blocked workflows (would race against OODA / REST /
+  IPC / scheduled callers), the cross-tier "upward only" cap rule was
+  backwards (silently kept elevated autonomy on less-trusted code),
+  `flock` does NOT protect against claude-code's own writes to
+  `~/.claude.json` (claude-code never agreed to the lock — needs
+  mtime+sha256 re-check + retry-once), `daemon_id` at
+  `~/.local/share/operad/daemon-id` is exactly what Syncthing syncs
+  by default (must move to `$XDG_RUNTIME_DIR` or per-Android
+  `$PREFIX/var/lib/`), `git archive` output is NOT byte-stable
+  across git versions (use `git ls-tree` digest instead),
+  `WORKFLOW_NAME_CONFLICT` was missing, the round-3 Phase A bundled
+  twelve items, the 5-store transaction had no spec'd rollback
+  contract. `daemon_id` relocated; cap rule reversed to
+  always-more-restrictive; claude.json writer now does mtime+sha256
+  re-check; phase A split into A0 (load-bearing pipe), A1 (autonomy
+  cap), A2 (conflicts + lease). Round-4 reviewer asked the GC-of-
+  in-flight-SKILL.md-cache question: GC now consults
+  `~/.claude/settings.json` skills entries before marking. Round-5
+  pending.
