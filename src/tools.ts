@@ -159,6 +159,20 @@ export class ToolExecutor {
   }
 
   /**
+   * Unregister a tool by name. Used by the skill marketplace to roll
+   * back partial installs (§3.15 step-5 compensation) and to apply
+   * uninstalls. Idempotent; returns true if the tool existed.
+   */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
+  /** Quick existence check — used by the skill conflict pre-flight. */
+  hasTool(name: string): boolean {
+    return this.tools.has(name);
+  }
+
+  /**
    * Register a ToolProvider — external tool source with lifecycle management.
    * Calls provider.initialize() which should call executor.register() for each tool.
    */

@@ -110,6 +110,9 @@ async function main(): Promise<void> {
     case "switchboard":
       return runSwitchboard();
 
+    case "skill":
+      return runSkill();
+
     // Commands that proxy to daemon via IPC
     case "status":
     case "start":
@@ -142,7 +145,8 @@ async function main(): Promise<void> {
 /** Start the daemon in foreground mode */
 async function runDaemon(): Promise<void> {
   const configPath = getConfigFlag();
-  const daemon = new Daemon(configPath);
+  const enableSkillsPreview = process.argv.includes("--enable-skills-preview");
+  const daemon = new Daemon(configPath, { enableSkillsPreview });
   await daemon.start();
 }
 
@@ -612,6 +616,161 @@ async function runSwitchboard(): Promise<void> {
 ${BOLD}SUB-COMMANDS${RESET}
   ${CYAN}reset${RESET}  Reset cognitive/OODA/mindMeld to opt-in defaults (keeps sdkBridge, memoryInjection)
 `);
+}
+
+/**
+ * `tmx skill ...` — manage installed skills via the marketplace IPC.
+ * Phase A0; requires the daemon to be started with --enable-skills-preview.
+ */
+async function runSkill(): Promise<void> {
+  const sub = subArgs[0];
+  const configPath = getConfigFlag();
+  const client = getClient(configPath);
+
+  if (!sub || sub === "help" || sub === "--help") {
+    console.log(`${BOLD}operad skill${RESET} — manage installed plugin/skill bundles (preview)
+
+${BOLD}SUB-COMMANDS${RESET}
+  ${CYAN}add <locator>${RESET}                    install a skill (e.g. https://github.com/owner/repo@v1.0)
+  ${CYAN}remove <id>${RESET}                      uninstall by skill id
+  ${CYAN}list [--provider=<p>]${RESET}            list installed skills
+  ${CYAN}info <id>${RESET}                        show full manifest for a skill
+
+${BOLD}NOTES${RESET}
+  Requires the daemon to be started with --enable-skills-preview.
+  Day-1 providers: git+url (https/ssh git URLs). More in Phase B.
+`);
+    return;
+  }
+
+  const running = await client.isRunning();
+  if (!running) {
+    console.error(`${RED}Daemon not running. Start with: operad stream${RESET}`);
+    process.exit(1);
+  }
+
+  if (sub === "add") {
+    const locator = subArgs[1];
+    if (!locator) {
+      console.error(`${RED}Usage: tmx skill add <locator>${RESET}`);
+      process.exit(1);
+    }
+    const force = subArgs.includes("--force-take-ownership");
+    // Plain http(s) or ssh URL → git+url provider. Future providers
+    // will use a `provider:locator` form (e.g. `mcp-official:exa`).
+    const { provider, locator: parsedLocator, version } = parseSkillLocator(locator);
+    const resp = await client.send(
+      {
+        cmd: "skill.install",
+        provider,
+        locator: parsedLocator,
+        version,
+        force_take_ownership: force,
+      },
+      300_000,
+    );
+    if (resp.ok) {
+      const r = resp.data as { skill: { id: string }; warnings: string[] };
+      console.log(`${GREEN}Installed:${RESET} ${r.skill.id}`);
+      for (const w of r.warnings ?? []) console.log(`  ${YELLOW}warn:${RESET} ${w}`);
+    } else {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub === "remove" || sub === "uninstall") {
+    const id = subArgs[1];
+    if (!id) {
+      console.error(`${RED}Usage: tmx skill remove <id>${RESET}`);
+      process.exit(1);
+    }
+    const resp = await client.send({ cmd: "skill.uninstall", id }, 60_000);
+    if (resp.ok) console.log(`${GREEN}Uninstalled${RESET} ${id}`);
+    else {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub === "list") {
+    const providerArg = subArgs.find((a) => a.startsWith("--provider="));
+    const provider = providerArg ? providerArg.slice("--provider=".length) : undefined;
+    const resp = await client.send({ cmd: "skill.list", provider }, 15_000);
+    if (!resp.ok) {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    const skills = (resp.data ?? []) as Array<{
+      id: string; name: string; trust_tier: string; source: { provider: string };
+    }>;
+    if (skills.length === 0) {
+      console.log(`${DIM}(no skills installed)${RESET}`);
+      return;
+    }
+    for (const s of skills) {
+      console.log(`${BOLD}${s.id}${RESET}  ${DIM}${s.trust_tier}${RESET}  ${s.name}`);
+    }
+    return;
+  }
+
+  if (sub === "info") {
+    const id = subArgs[1];
+    if (!id) {
+      console.error(`${RED}Usage: tmx skill info <id>${RESET}`);
+      process.exit(1);
+    }
+    const resp = await client.send({ cmd: "skill.info", id }, 15_000);
+    if (!resp.ok) {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(resp.data, null, 2));
+    return;
+  }
+
+  console.error(`${RED}Unknown sub-command: ${sub}${RESET}`);
+  process.exit(1);
+}
+
+/**
+ * Parse a CLI locator into (provider, locator, version).
+ * - Bare http(s):// or git@... URL  → provider = "git+url"
+ * - `<provider>:<locator>[@version]` → split on first `:`
+ */
+function parseSkillLocator(
+  raw: string,
+): { provider: string; locator: string; version?: string } {
+  // Any recognisable URL form (http(s)/git@/file/ssh) routes to git+url.
+  // Local path arguments (anything starting with / or .) also route to
+  // git+url since git happily clones a bare filesystem repo.
+  if (
+    raw.startsWith("http://") || raw.startsWith("https://") ||
+    raw.startsWith("git@") || raw.startsWith("file://") ||
+    raw.startsWith("ssh://") || raw.startsWith("/") || raw.startsWith("./")
+  ) {
+    // Split off @version if present (treat the LAST @ that isn't part of
+    // an SSH user-host as the version separator). For local paths the
+    // ssh-style user-host doesn't apply.
+    const atIdx = raw.lastIndexOf("@");
+    if (atIdx > "ssh://".length) {
+      return { provider: "git+url", locator: raw.slice(0, atIdx), version: raw.slice(atIdx + 1) };
+    }
+    return { provider: "git+url", locator: raw };
+  }
+  const colonIdx = raw.indexOf(":");
+  if (colonIdx < 0) {
+    return { provider: "git+url", locator: raw };
+  }
+  const provider = raw.slice(0, colonIdx);
+  const rest = raw.slice(colonIdx + 1);
+  const atIdx = rest.lastIndexOf("@");
+  if (atIdx > 0) {
+    return { provider, locator: rest.slice(0, atIdx), version: rest.slice(atIdx + 1) };
+  }
+  return { provider, locator: rest };
 }
 
 /** Print diagnostic info when daemon fails to start */

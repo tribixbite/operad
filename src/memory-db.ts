@@ -564,6 +564,81 @@ const SCHEMA_STATEMENTS: string[] = [
     FOREIGN KEY(run_id) REFERENCES agent_workflow_runs(id) ON DELETE CASCADE,
     UNIQUE(run_id, node_id)
   )`,
+
+  // ── Skill marketplace (Phase A0) ────────────────────────────────────────
+  // See docs/superpowers/specs/2026-05-20-skill-marketplace-design.md §4.3.
+  // Generation-related tables (skill_generation_refs, skill_cache_pending_delete)
+  // exist now but are populated only in Phase C — A0 ships with the coarse
+  // INSTALL_BLOCKED_BY_ACTIVE_CONSUMER gate instead of per-pin discipline.
+
+  `CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    provider TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    version TEXT NOT NULL,
+    fetched_url TEXT NOT NULL,
+    fetched_commit_sha TEXT,
+    fetched_archive_sha256 TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    trust_tier TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    tombstoned INTEGER NOT NULL DEFAULT 0,
+    manifest_json TEXT NOT NULL,
+    installed_at INTEGER NOT NULL,
+    UNIQUE(provider, locator, version)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skills_provider_locator
+    ON skills(provider, locator)`,
+  `CREATE INDEX IF NOT EXISTS idx_skills_tombstoned
+    ON skills(tombstoned, installed_at)`,
+
+  `CREATE TABLE IF NOT EXISTS skill_active_version (
+    provider TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    version TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    PRIMARY KEY (provider, locator)
+  )`,
+
+  // Phase C: populated when generation discipline lands.
+  `CREATE TABLE IF NOT EXISTS skill_generation_refs (
+    generation INTEGER NOT NULL,
+    ref_kind TEXT NOT NULL,
+    ref_id TEXT NOT NULL,
+    acquired_at INTEGER NOT NULL,
+    PRIMARY KEY (generation, ref_kind, ref_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_gen_refs_gen
+    ON skill_generation_refs(generation)`,
+
+  `CREATE TABLE IF NOT EXISTS skill_cache_pending_delete (
+    provider TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    version TEXT NOT NULL,
+    marked_at INTEGER NOT NULL,
+    PRIMARY KEY (provider, locator, version)
+  )`,
+
+  // Phase A1: tool autonomy ceilings (rows added at install).
+  `CREATE TABLE IF NOT EXISTS tool_autonomy_caps (
+    tool_id TEXT PRIMARY KEY,
+    max_bucket TEXT NOT NULL,
+    set_by_provider TEXT,
+    set_at INTEGER NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS skill_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    detail TEXT,
+    occurred_at INTEGER NOT NULL,
+    FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_skill_events_occurred
+    ON skill_events(occurred_at DESC)`,
 ];
 
 /**

@@ -126,6 +126,11 @@ export interface LazyEngineAccess {
   /** WorkflowEngine instance, or null if not initialized */
   getWorkflowEngine: () => import("./workflow.js").WorkflowEngine | null;
   /**
+   * SkillManager instance, or null if not initialized (e.g. when the
+   * `--enable-skills-preview` flag is off). Phase A0.
+   */
+  getSkillManager: () => import("./skills/index.js").SkillManager | null;
+  /**
    * Upsert a persistent agent schedule via ScheduleEngine.
    * Returns the schedule row ID, or -1 if ScheduleEngine is not yet initialized.
    */

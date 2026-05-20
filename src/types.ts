@@ -422,7 +422,18 @@ export type IpcCommand =
   | { cmd: "register"; path?: string }
   | { cmd: "clone"; url: string; name?: string }
   | { cmd: "create"; name: string }
-  | { cmd: "switchboard_reset" };
+  | { cmd: "switchboard_reset" }
+  // Skill marketplace (Phase A0, behind --enable-skills-preview)
+  | {
+      cmd: "skill.install";
+      provider: string;
+      locator: string;
+      version?: string;
+      force_take_ownership?: boolean;
+    }
+  | { cmd: "skill.uninstall"; id: string }
+  | { cmd: "skill.list"; provider?: string }
+  | { cmd: "skill.info"; id: string };
 
 /** Response from daemon to CLI */
 export interface IpcResponse {

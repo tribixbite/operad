@@ -111,6 +111,12 @@ export class IpcHandler {
       case "create":
         return this.ctx.cmdCreate(cmd.name);
 
+      case "skill.install":
+      case "skill.uninstall":
+      case "skill.list":
+      case "skill.info":
+        return this.handleSkillCommand(cmd);
+
       case "switchboard_reset": {
         // Reset autonomous features (cognitive/OODA/mindMeld) to opt-in defaults.
         // Keeps master switch, sdkBridge, memoryInjection, and per-agent overrides.
@@ -125,6 +131,57 @@ export class IpcHandler {
 
       default:
         return { ok: false, error: `Unknown command: ${(cmd as { cmd: string }).cmd}` };
+    }
+  }
+
+  /**
+   * Skill marketplace IPC handler. Returns 503 if the SkillManager
+   * isn't initialized (preview flag off).
+   */
+  private async handleSkillCommand(
+    cmd: Extract<IpcCommand, { cmd: `skill.${string}` }>,
+  ): Promise<IpcResponse> {
+    const mgr = this.ctx.getSkillManager();
+    if (!mgr) {
+      return {
+        ok: false,
+        error: "Skill marketplace not enabled. Restart the daemon with --enable-skills-preview.",
+      };
+    }
+    try {
+      if (cmd.cmd === "skill.install") {
+        const result = await mgr.install(
+          cmd.provider as import("./skills/types.js").Provider,
+          cmd.locator,
+          cmd.version,
+          { force_take_ownership: cmd.force_take_ownership },
+        );
+        return { ok: true, data: result };
+      }
+      if (cmd.cmd === "skill.uninstall") {
+        mgr.uninstall(cmd.id);
+        return { ok: true, data: { id: cmd.id } };
+      }
+      if (cmd.cmd === "skill.list") {
+        return {
+          ok: true,
+          data: mgr.list(cmd.provider as import("./skills/types.js").Provider | undefined),
+        };
+      }
+      if (cmd.cmd === "skill.info") {
+        const s = mgr.get(cmd.id);
+        return s
+          ? { ok: true, data: s }
+          : { ok: false, error: `skill not found: ${cmd.id}` };
+      }
+      return { ok: false, error: `unhandled skill command: ${(cmd as { cmd: string }).cmd}` };
+    } catch (err) {
+      const e = err as Error & { code?: string; detail?: Record<string, unknown> };
+      return {
+        ok: false,
+        error: e.message,
+        data: e.code ? { code: e.code, detail: e.detail } : undefined,
+      };
     }
   }
 }

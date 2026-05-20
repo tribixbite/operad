@@ -177,6 +177,14 @@ export class Daemon {
   private toolExecutor: ToolExecutor | null = null;
   private scheduleEngine: ScheduleEngine | null = null;
   private workflowEngine: import("./workflow.js").WorkflowEngine | null = null;
+  private skillManager: import("./skills/index.js").SkillManager | null = null;
+  /**
+   * Whether the skill marketplace is enabled. Set from the
+   * `--enable-skills-preview` CLI flag; defaults to false in A0 so
+   * users on `npm i -g operadic@<A0-build>` don't get the half-built
+   * surface by accident.
+   */
+  private skillsPreviewEnabled = false;
   private lastUserActivityEpoch: number = Math.floor(Date.now() / 1000);
   private agentConfigs: AgentConfig[] = [];
   /** Master switchboard — controls subsystem enable/disable */
@@ -193,7 +201,8 @@ export class Daemon {
   private running = false;
   /** Resolved when shutdown() completes — replaces 1s polling interval */
   private shutdownResolve: (() => void) | null = null;
-  constructor(configPath?: string) {
+  constructor(configPath?: string, opts: { enableSkillsPreview?: boolean } = {}) {
+    this.skillsPreviewEnabled = opts.enableSkillsPreview === true;
     this.config = loadConfig(configPath);
     this.log = new Logger(this.config.orchestrator.log_dir);
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
@@ -318,6 +327,7 @@ export class Daemon {
       getDashboard: () => this.dashboard,
       getScheduleEngine: () => this.scheduleEngine,
       getWorkflowEngine: () => this.workflowEngine,
+      getSkillManager: () => this.skillManager,
       broadcastWs: (type, data) => this.broadcastSwitchboard(type, data),
       ensureSocket: () => this.ensureSocket(),
       reloadAgents: () => this.reloadAgents(),
@@ -1311,6 +1321,41 @@ export class Daemon {
       }
       if ((this.config.workflows ?? []).length > 0) {
         this.log.info(`Workflow engine initialized (${this.config.workflows.length} workflow(s) from config)`);
+      }
+
+      // Skill marketplace (Phase A0) — opt-in via --enable-skills-preview.
+      // The MVP runs behind a flag so users on stable builds don't see the
+      // half-built surface. See docs/superpowers/specs/2026-05-20-skill-
+      // marketplace-design.md §9.
+      if (this.skillsPreviewEnabled && this.toolExecutor) {
+        try {
+          const { SkillManager } = await import("./skills/index.js");
+          const { gitUrlProvider } = await import("./skills/providers/git-url.js");
+          this.skillManager = new SkillManager(this.memoryDb, this.log, {
+            providers: { "git+url": gitUrlProvider } as Record<
+              import("./skills/types.js").Provider,
+              import("./skills/types.js").ProviderModule
+            >,
+            toolExecutor: this.toolExecutor,
+            workflowEngine: this.workflowEngine,
+            hasActiveConsumers: () => {
+              // A0 coarse gate: only checks workflow runs. Phase A2
+              // widens to OODA cycles, REST tool calls, IPC tool
+              // calls, scheduled runs.
+              const wfRuns =
+                this.workflowEngine?.recentRuns(undefined, 10).filter(
+                  (r) => r.status === "running",
+                ) ?? [];
+              return wfRuns.map((r) => ({
+                kind: "workflow_run",
+                ref_id: String(r.id),
+              }));
+            },
+          });
+          this.log.info("Skill marketplace initialized (preview)");
+        } catch (err) {
+          this.log.error(`Skill marketplace init failed: ${err}`);
+        }
       }
     }
 
