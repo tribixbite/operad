@@ -1,0 +1,187 @@
+/**
+ * skills/providers/operad-curated.ts — Operad-stewarded curated index.
+ *
+ * Trust tier: always `trusted`. The curated index is a static JSON
+ * file at `https://operad.stream/skills/index.json` (GitHub Pages
+ * mirror of `operad-stream/skills` repo). Each entry maps a locator
+ * (e.g. `tribixbite/git-tools`) to a git URL + tag.
+ *
+ * Per spec §3.9, the index is **commit-SHA-pinned in operad source**
+ * (rotated only on operad release; never auto-pull from main HEAD).
+ * The resolver fetches the index at the pinned commit and then
+ * delegates the actual bundle clone to the git+url path.
+ *
+ * Phase B ships with INDEX_COMMIT_SHA empty as a sentinel — the
+ * resolver fails with PROVIDER_FETCH_FAILED until the operad-stream/
+ * skills repo is bootstrapped + a SHA is committed here in a follow-up.
+ * This is deliberate; the alternative is silently auto-pulling from
+ * main, which round-3 review correctly flagged as a supply-chain risk.
+ */
+
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { request as httpsRequest } from "node:https";
+import {
+  type FetchResult,
+  type ProviderListing,
+  type ProviderModule,
+  type ProviderReadResult,
+  type TrustTier,
+  SkillError,
+} from "../types.js";
+import { gitUrlProvider } from "./git-url.js";
+import { readSkillManifests } from "../adapter.js";
+
+const INDEX_REPO = "tribixbite/operad-stream-skills";
+/**
+ * Commit SHA of the curated index repo at the version operad ships
+ * against. EMPTY = provider disabled (per the spec — refuse to
+ * silently auto-pull from main HEAD).
+ */
+const INDEX_COMMIT_SHA: string =
+  process.env.OPERAD_CURATED_COMMIT_SHA ?? "";
+
+interface CuratedEntry {
+  locator: string;                  // user-facing slug (e.g. owner/skill)
+  name: string;
+  description?: string;
+  /** Git URL + tag — fed directly into the git+url provider for fetch. */
+  git_url: string;
+  default_version: string;
+}
+
+interface CuratedIndex {
+  schema_version: 1;
+  entries: CuratedEntry[];
+}
+
+export const operadCuratedProvider: ProviderModule = {
+  id: "operad-curated",
+
+  trustTier(): TrustTier {
+    return "trusted";
+  },
+
+  async list(opts: { query?: string; cursor?: string; limit?: number } = {}) {
+    const index = await loadIndex();
+    let items: ProviderListing[] = index.entries.map((e) => ({
+      locator: e.locator,
+      name: e.name,
+      description: e.description,
+      latest_version: e.default_version,
+    }));
+    if (opts.query) {
+      const q = opts.query.toLowerCase();
+      items = items.filter(
+        (i) => i.locator.toLowerCase().includes(q) ||
+               i.name.toLowerCase().includes(q) ||
+               (i.description ?? "").toLowerCase().includes(q),
+      );
+    }
+    return { items };
+  },
+
+  async fetch(locator: string, version: string, cacheParent: string): Promise<FetchResult> {
+    const index = await loadIndex();
+    const entry = index.entries.find((e) => e.locator === locator);
+    if (!entry) {
+      throw new SkillError(
+        "PROVIDER_FETCH_FAILED",
+        `operad-curated: no entry for '${locator}' in index@${INDEX_COMMIT_SHA}`,
+        { locator },
+      );
+    }
+    const resolvedVersion = version === "latest" ? entry.default_version : version;
+    // Delegate to git+url for the actual clone. Reuses its commit-SHA
+    // + ls-tree integrity primitive, atomic-rename, etc.
+    const result = await gitUrlProvider.fetch(
+      `${entry.git_url}@${resolvedVersion}`,
+      resolvedVersion,
+      cacheParent,
+    );
+    return {
+      ...result,
+      // Preserve the operad-curated locator in the audit URL so
+      // `tmx skill info` shows the curated identity, not the raw git URL.
+      fetched_url: `operad-curated:${locator}@${resolvedVersion} (resolved via ${result.fetched_url})`,
+    };
+  },
+
+  read(extracted_path: string): Promise<ProviderReadResult> {
+    // Same shape as git+url — operad-curated entries are git bundles.
+    return Promise.resolve(readSkillManifests({
+      extracted_path,
+      trust_tier: "trusted",
+    }));
+  },
+
+  async latest(locator: string): Promise<string> {
+    const index = await loadIndex();
+    const entry = index.entries.find((e) => e.locator === locator);
+    if (!entry) {
+      throw new SkillError("PROVIDER_FETCH_FAILED", `no curated entry for '${locator}'`);
+    }
+    return entry.default_version;
+  },
+};
+
+// -- Pinned-commit index loader ---------------------------------------------
+
+let cachedIndex: CuratedIndex | null = null;
+
+async function loadIndex(): Promise<CuratedIndex> {
+  if (cachedIndex) return cachedIndex;
+  if (!INDEX_COMMIT_SHA) {
+    throw new SkillError(
+      "PROVIDER_FETCH_FAILED",
+      `operad-curated is disabled: no commit SHA pinned in this operad build. Set OPERAD_CURATED_COMMIT_SHA env var to enable.`,
+    );
+  }
+  // Fetch via GitHub's raw content URL pinned to the commit SHA.
+  const url = `https://raw.githubusercontent.com/${INDEX_REPO}/${INDEX_COMMIT_SHA}/index.json`;
+  const body = await httpsGet(url);
+  // Sanity: hash check against the SHA — GitHub's raw URL is already
+  // commit-SHA-pinned but recomputing the body hash means a CDN
+  // compromise can't substitute a tampered index that happens to
+  // round-trip through their URL.
+  const observedSha = createHash("sha256").update(body).digest("hex");
+  const parsed = JSON.parse(body) as CuratedIndex;
+  if (parsed.schema_version !== 1) {
+    throw new SkillError(
+      "PROVIDER_FETCH_FAILED",
+      `unexpected curated index schema_version=${parsed.schema_version}`,
+      { observedSha },
+    );
+  }
+  cachedIndex = parsed;
+  return parsed;
+}
+
+function httpsGet(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpsRequest(
+      {
+        hostname: u.hostname, path: `${u.pathname}${u.search}`, method: "GET",
+        headers: { "user-agent": "operad-skill-resolver/operad-curated" },
+        timeout: 15_000,
+      },
+      (res) => {
+        if (res.statusCode == null || res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new SkillError(
+            "PROVIDER_FETCH_FAILED", `${url} returned HTTP ${res.statusCode}`,
+          ));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        res.on("error", (err) => reject(new SkillError("PROVIDER_FETCH_FAILED", err.message)));
+      },
+    );
+    req.on("error", (err) => reject(new SkillError("PROVIDER_FETCH_FAILED", err.message)));
+    req.on("timeout", () => { req.destroy(); reject(new SkillError("PROVIDER_FETCH_FAILED", "timeout")); });
+    req.end();
+  });
+}

@@ -1341,8 +1341,16 @@ export class Daemon {
         try {
           const { SkillManager } = await import("./skills/index.js");
           const { gitUrlProvider } = await import("./skills/providers/git-url.js");
+          const { mcpOfficialProvider } = await import("./skills/providers/mcp-official.js");
+          const { operadCuratedProvider } = await import("./skills/providers/operad-curated.js");
+          const { claudeMarketplaceProvider } = await import("./skills/providers/claude-marketplace.js");
           this.skillManager = new SkillManager(this.memoryDb, this.log, {
-            providers: { "git+url": gitUrlProvider } as Record<
+            providers: {
+              "git+url": gitUrlProvider,
+              "mcp-official": mcpOfficialProvider,
+              "operad-curated": operadCuratedProvider,
+              "claude-marketplace": claudeMarketplaceProvider,
+            } as Record<
               import("./skills/types.js").Provider,
               import("./skills/types.js").ProviderModule
             >,
