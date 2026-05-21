@@ -19,6 +19,7 @@
   import PlansPanel from "./PlansPanel.svelte";
   import ClaudeMdPanel from "./ClaudeMdPanel.svelte";
   import GovernancePanel from "./GovernancePanel.svelte";
+  import SkillManagerPanel from "./SkillManagerPanel.svelte";
 
   // -- Constants --------------------------------------------------------------
 
@@ -67,6 +68,7 @@
     subagents: false,
     memories: false,
     agentsMd: false,
+    skillMarketplace: false,
   });
 
   /**
@@ -938,6 +940,22 @@ Example usage or output
               {/each}
             </div>
           {/if}
+        </div>
+      {/if}
+    </div>
+
+    <!-- Section 5b: Skill marketplace (preview) — operad-managed
+         installer for plugin/skill bundles. Lives next to Marketplace
+         because both are "where do new tools come from" surfaces. -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("skillMarketplace")}>
+        <span class="chevron">{sections.skillMarketplace ? "▾" : "▸"}</span>
+        <span class="section-title">Skill marketplace</span>
+        <span class="badge badge-yellow" title="Preview feature behind --enable-skills-preview">preview</span>
+      </button>
+      {#if sections.skillMarketplace}
+        <div class="section-body">
+          <SkillManagerPanel />
         </div>
       {/if}
     </div>

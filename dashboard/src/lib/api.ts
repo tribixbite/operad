@@ -1246,3 +1246,107 @@ export async function fetchSdkSessionCosts(
   const res = await fetch(`/api/costs/sessions?limit=${limit}`);
   return checkedJson(res);
 }
+
+// ── Skill marketplace (Phase A0-D, preview) ───────────────────────────────
+
+/** Shape mirrored from src/skills/types.ts OperadSkill. Permissive
+ *  because the dashboard only reads a handful of fields. */
+export interface SkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  trust_tier: "trusted" | "community" | "escape";
+  enabled: boolean;
+  source: {
+    provider: string;
+    locator: string;
+    version: string;
+    fetched_url: string;
+    fetched_at: number;
+    fetched_commit_sha?: string;
+  };
+  tools?: Array<{ toml: { name: string; description?: string }; autonomy_cap: string }>;
+  agents?: unknown[];
+  workflows?: Array<{ name: string }>;
+  mcps?: Array<{ name: string; lifecycle: string }>;
+  skill_mds?: Array<{ name: string }>;
+}
+
+export interface ToolAutonomyCap {
+  tool_id: string;
+  max_bucket: string;
+  current_bucket: string;
+  set_by_provider: string | null;
+}
+
+export interface SkillEvent {
+  id: number;
+  skill_id: string;
+  event_type: string;
+  detail: string | null;
+  occurred_at: number;
+}
+
+/** GET /api/skills. Returns 503 when --enable-skills-preview is off. */
+export async function fetchSkills(provider?: string): Promise<SkillSummary[]> {
+  const q = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+  const res = await fetch(`/api/skills${q}`);
+  if (res.status === 503) return [];
+  return checkedJson(res);
+}
+
+/** POST /api/skills/install. */
+export async function installSkill(opts: {
+  provider: string;
+  locator: string;
+  version?: string;
+  force_take_ownership?: boolean;
+}): Promise<{ skill: SkillSummary; warnings: string[] }> {
+  const res = await fetch("/api/skills/install", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  return checkedJson(res);
+}
+
+/** POST /api/skills/<id>/uninstall. */
+export async function uninstallSkill(
+  id: string, opts: { force_revoke?: boolean } = {},
+): Promise<{ id: string; ok: boolean }> {
+  const res = await fetch(
+    `/api/skills/${encodeURIComponent(id)}/uninstall`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(opts),
+    },
+  );
+  return checkedJson(res);
+}
+
+/** GET /api/skills/events */
+export async function fetchSkillEvents(limit = 30): Promise<SkillEvent[]> {
+  const res = await fetch(`/api/skills/events?limit=${limit}`);
+  if (res.status === 503) return [];
+  return checkedJson(res);
+}
+
+/** GET /api/tool-autonomy */
+export async function fetchToolAutonomy(): Promise<ToolAutonomyCap[]> {
+  const res = await fetch("/api/tool-autonomy");
+  if (res.status === 503) return [];
+  return checkedJson(res);
+}
+
+/** POST /api/tool-autonomy — promote/demote a tool's current bucket. */
+export async function setToolAutonomy(
+  tool_id: string, bucket: string,
+): Promise<{ tool_id: string; max_bucket: string; current_bucket: string }> {
+  const res = await fetch("/api/tool-autonomy", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tool_id, bucket }),
+  });
+  return checkedJson(res);
+}
