@@ -163,7 +163,7 @@ export class IpcHandler {
         return { ok: true, data: result };
       }
       if (cmd.cmd === "skill.uninstall") {
-        mgr.uninstall(cmd.id);
+        mgr.uninstall(cmd.id, { force_revoke: cmd.force_revoke });
         return { ok: true, data: { id: cmd.id } };
       }
       if (cmd.cmd === "skill.list") {

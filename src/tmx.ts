@@ -686,10 +686,11 @@ ${BOLD}NOTES${RESET}
   if (sub === "remove" || sub === "uninstall") {
     const id = subArgs[1];
     if (!id) {
-      console.error(`${RED}Usage: tmx skill remove <id>${RESET}`);
+      console.error(`${RED}Usage: tmx skill remove <id> [--force-revoke]${RESET}`);
       process.exit(1);
     }
-    const resp = await client.send({ cmd: "skill.uninstall", id }, 60_000);
+    const force_revoke = subArgs.includes("--force-revoke");
+    const resp = await client.send({ cmd: "skill.uninstall", id, force_revoke }, 60_000);
     if (resp.ok) console.log(`${GREEN}Uninstalled${RESET} ${id}`);
     else {
       console.error(`${RED}${resp.error}${RESET}`);

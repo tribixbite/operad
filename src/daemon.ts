@@ -178,6 +178,7 @@ export class Daemon {
   private scheduleEngine: ScheduleEngine | null = null;
   private workflowEngine: import("./workflow.js").WorkflowEngine | null = null;
   private skillManager: import("./skills/index.js").SkillManager | null = null;
+  private consumerTracker: import("./skills/consumer-tracker.js").ConsumerTracker;
   /**
    * Whether the skill marketplace is enabled. Set from the
    * `--enable-skills-preview` CLI flag; defaults to false in A0 so
@@ -205,6 +206,14 @@ export class Daemon {
     this.skillsPreviewEnabled = opts.enableSkillsPreview === true;
     this.config = loadConfig(configPath);
     this.log = new Logger(this.config.orchestrator.log_dir);
+    // ConsumerTracker constructed eagerly — always-present, even when
+    // the SkillManager is disabled, so call sites can wrap tool
+    // executions unconditionally without nullish checks.
+    {
+      const { ConsumerTracker } = require("./skills/consumer-tracker.js") as
+        typeof import("./skills/consumer-tracker.js");
+      this.consumerTracker = new ConsumerTracker(this.log);
+    }
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
     // Run state schema migrations on every boot — no-op if already at current version.
     // migrateState mutates the raw state object; flush() persists the updated schemaVersion.
@@ -328,6 +337,7 @@ export class Daemon {
       getScheduleEngine: () => this.scheduleEngine,
       getWorkflowEngine: () => this.workflowEngine,
       getSkillManager: () => this.skillManager,
+      getConsumerTracker: () => this.consumerTracker,
       broadcastWs: (type, data) => this.broadcastSwitchboard(type, data),
       ensureSocket: () => this.ensureSocket(),
       reloadAgents: () => this.reloadAgents(),
@@ -1339,17 +1349,25 @@ export class Daemon {
             toolExecutor: this.toolExecutor,
             workflowEngine: this.workflowEngine,
             hasActiveConsumers: () => {
-              // A0 coarse gate: only checks workflow runs. Phase A2
-              // widens to OODA cycles, REST tool calls, IPC tool
-              // calls, scheduled runs.
+              // Phase A2: union of the in-process ConsumerTracker (OODA
+              // cycles, scheduled runs, future REST/IPC) AND
+              // long-running workflow runs (which are persisted in
+              // the workflow_runs table — the tracker only sees
+              // currently-executing work, so a workflow that started
+              // before daemon restart wouldn't otherwise count).
+              const tracked = this.consumerTracker.list();
               const wfRuns =
                 this.workflowEngine?.recentRuns(undefined, 10).filter(
                   (r) => r.status === "running",
                 ) ?? [];
-              return wfRuns.map((r) => ({
-                kind: "workflow_run",
-                ref_id: String(r.id),
-              }));
+              return [
+                ...tracked,
+                ...wfRuns
+                  .filter((r) => !tracked.some(
+                    (t) => t.kind === "workflow_run" && t.ref_id === String(r.id),
+                  ))
+                  .map((r) => ({ kind: "workflow_run", ref_id: String(r.id) })),
+              ];
             },
           });
           this.log.info("Skill marketplace initialized (preview)");

@@ -431,7 +431,7 @@ export type IpcCommand =
       version?: string;
       force_take_ownership?: boolean;
     }
-  | { cmd: "skill.uninstall"; id: string }
+  | { cmd: "skill.uninstall"; id: string; force_revoke?: boolean }
   | { cmd: "skill.list"; provider?: string }
   | { cmd: "skill.info"; id: string }
   | { cmd: "tool.autonomy.list" }

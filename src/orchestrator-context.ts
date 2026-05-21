@@ -131,6 +131,13 @@ export interface LazyEngineAccess {
    */
   getSkillManager: () => import("./skills/index.js").SkillManager | null;
   /**
+   * ConsumerTracker — process-wide active-consumer registry used by
+   * the skill install gate (§3.7). Always present even when the
+   * SkillManager is off, so call sites can call `.acquire()`
+   * unconditionally without nullish wrapping. Phase A2.
+   */
+  getConsumerTracker: () => import("./skills/consumer-tracker.js").ConsumerTracker;
+  /**
    * Upsert a persistent agent schedule via ScheduleEngine.
    * Returns the schedule row ID, or -1 if ScheduleEngine is not yet initialized.
    */

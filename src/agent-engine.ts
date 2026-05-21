@@ -157,6 +157,12 @@ export class AgentEngine {
   /**
    * Run a full OODA cycle — build context, run master controller, parse and
    * execute actions from its response.
+   *
+   * Phase A2: acquires an `agent_cycle` consumer pin for the duration of
+   * the cycle so the skill install gate (§3.7) doesn't race a registry
+   * mutation against a cycle that's about to call a tool. Pin released
+   * in finally — leaks would permanently block installs until daemon
+   * restart, see ConsumerTracker stale-pin warning.
    */
   async runOodaCycle(): Promise<void> {
     const { state, config, agentConfigs, log } = this.ctx;
@@ -209,6 +215,9 @@ export class AgentEngine {
     log.info("Running OODA cycle for master-controller");
     this.ctx.broadcast("ooda_status", { running: true });
 
+    // Phase A2 consumer pin — released in finally below.
+    const releasePin = this.ctx.getConsumerTracker().acquire("agent_cycle");
+
     try {
       const masterAgent = agentConfigs.find((a) => a.name === "master-controller");
       if (!masterAgent) return;
@@ -250,6 +259,8 @@ export class AgentEngine {
     } catch (err) {
       log.error(`OODA cycle failed: ${err}`);
       this.ctx.broadcast("ooda_status", { running: false, error: String(err) });
+    } finally {
+      releasePin();
     }
   }
 
@@ -917,6 +928,10 @@ export class AgentEngine {
   /**
    * Execute a scheduled agent run. Called by ScheduleEngine when a schedule fires.
    * Returns success/failure and cost for schedule bookkeeping.
+   *
+   * Phase A2: acquires a `scheduled_run` consumer pin so the install
+   * gate (§3.7) blocks while a scheduled run is in flight, matching
+   * the behaviour for OODA cycles.
    */
   async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
     const { agentConfigs, config, log } = this.ctx;
@@ -927,6 +942,22 @@ export class AgentEngine {
       log.debug(`Scheduled run "${schedule.schedule_name}" deferred — SDK busy`);
       return { success: false };
     }
+
+    const releasePin = this.ctx.getConsumerTracker().acquire(
+      "scheduled_run", String(schedule.id),
+    );
+    try {
+      return await this._executeScheduledRunInner(schedule);
+    } finally {
+      releasePin();
+    }
+  }
+
+  private async _executeScheduledRunInner(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
+    const { agentConfigs, config, log } = this.ctx;
+    const sdkBridge = this.ctx.getSdkBridge();
+    const memoryDb = this.ctx.getMemoryDb();
+    if (!sdkBridge || !memoryDb) return { success: false };
 
     // Quota check: don't run if exceeded
     const quota = computeQuotaStatus(memoryDb, config.orchestrator);

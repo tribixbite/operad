@@ -233,7 +233,7 @@ export class SkillManager {
    * cache directory simply persists until next daemon restart can
    * sweep it.
    */
-  uninstall(skillId: string): void {
+  uninstall(skillId: string, opts: { force_revoke?: boolean } = {}): void {
     const skill = this.store.get(skillId);
     if (!skill) {
       throw new SkillError("PROVIDER_NOT_FOUND", `skill not found: ${skillId}`);
@@ -247,6 +247,38 @@ export class SkillManager {
         `Skill uninstall blocked: ${consumers.length} active tool consumer(s).`,
         { consumers },
       );
+    }
+
+    // Phase A2 lease cascade — §3.12. Before removing any tool, check
+    // whether agents hold active leases or scheduled runs reference
+    // it. By default we refuse with TOOL_HAS_ACTIVE_CONSUMERS so the
+    // operator sees what would break; --force-revoke (opts.force_revoke)
+    // revokes the leases + pauses the scheduled runs and records the
+    // cascade in skill_events.detail.
+    const cascade: {
+      leases: Array<{ tool_name: string; lease_id: number; agent_name: string }>;
+      paused_schedules: Array<{ tool_name: string; id: number; schedule_name: string }>;
+    } = { leases: [], paused_schedules: [] };
+    for (const t of skill.tools ?? []) {
+      const leases = this.db.getActiveLeasesForTool(t.toml.name);
+      for (const l of leases) {
+        cascade.leases.push({ tool_name: t.toml.name, lease_id: l.id, agent_name: l.agent_name });
+      }
+    }
+    if (cascade.leases.length > 0 && !opts.force_revoke) {
+      throw new SkillError(
+        "TOOL_HAS_ACTIVE_CONSUMERS",
+        `Skill uninstall blocked: ${cascade.leases.length} active lease(s) reference tools owned by this skill. Re-run with --force-revoke to revoke them.`,
+        { cascade },
+      );
+    }
+    if (opts.force_revoke) {
+      const leaseIds = cascade.leases.map((l) => l.lease_id);
+      if (leaseIds.length > 0) this.db.revokeLeasesByIds(leaseIds);
+      for (const t of skill.tools ?? []) {
+        const paused = this.db.pauseSchedulesMentioningTool(t.toml.name);
+        for (const p of paused) cascade.paused_schedules.push({ tool_name: t.toml.name, ...p });
+      }
     }
 
     if (skill.mcps && skill.mcps.length > 0) {
@@ -263,7 +295,12 @@ export class SkillManager {
     this.unregisterInMemory(skill);
 
     this.store.markUninstalled(skillId);
-    this.store.appendEvent(skillId, "uninstall", { id: skillId });
+    this.store.appendEvent(skillId, "uninstall", {
+      id: skillId,
+      ...(cascade.leases.length > 0 || cascade.paused_schedules.length > 0
+        ? { force_revoke_cascade: cascade }
+        : {}),
+    });
 
     // Best-effort cache delete (A0 has no GC; this is the only cleanup path).
     this.store.removeCacheDir(

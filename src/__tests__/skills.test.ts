@@ -390,6 +390,141 @@ describe("tool autonomy caps (Phase A1)", () => {
   });
 });
 
+// -- A2 ConsumerTracker -----------------------------------------------------
+
+describe("ConsumerTracker (Phase A2)", () => {
+  test("acquire returns release function; list reflects active pins", async () => {
+    const { ConsumerTracker } = await import("../skills/consumer-tracker.js");
+    const t = new ConsumerTracker(null);
+    expect(t.size()).toBe(0);
+    const r1 = t.acquire("agent_cycle");
+    const r2 = t.acquire("scheduled_run", "sched-7");
+    expect(t.size()).toBe(2);
+    expect(t.list().some((x) => x.kind === "scheduled_run" && x.ref_id === "sched-7")).toBe(true);
+    r1();
+    expect(t.size()).toBe(1);
+    r2();
+    expect(t.size()).toBe(0);
+  });
+
+  test("release is idempotent — double-release is safe", async () => {
+    const { ConsumerTracker } = await import("../skills/consumer-tracker.js");
+    const t = new ConsumerTracker(null);
+    const r = t.acquire("workflow_run", "wf-1");
+    r();
+    r();   // no-op
+    expect(t.size()).toBe(0);
+  });
+
+  test("auto-generated ref_id is unique per acquire", async () => {
+    const { ConsumerTracker } = await import("../skills/consumer-tracker.js");
+    const t = new ConsumerTracker(null);
+    t.acquire("rest_request");
+    t.acquire("rest_request");
+    expect(t.size()).toBe(2);
+  });
+});
+
+// -- A2 lease cascade --------------------------------------------------------
+
+describe("lease cascade (Phase A2)", () => {
+  function withLeases(): { sql: Database; db: any } {
+    const sql = new Database(":memory:");
+    sql.exec(`
+      CREATE TABLE tool_leases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        goal_id INTEGER,
+        max_executions INTEGER, executions_used INTEGER DEFAULT 0,
+        expires_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE agent_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT, schedule_name TEXT, cron_expr TEXT,
+        interval_minutes INTEGER, prompt TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, max_budget_usd REAL,
+        last_run_at INTEGER, next_run_at INTEGER,
+        total_cost_usd REAL DEFAULT 0, run_count INTEGER DEFAULT 0,
+        consecutive_failures INTEGER DEFAULT 0, created_by TEXT,
+        created_at INTEGER
+      );
+    `);
+    return { sql, db: null }; // db wired below by tests
+  }
+
+  test("getActiveLeasesForTool returns only active leases", async () => {
+    const { sql } = withLeases();
+    const now = Math.floor(Date.now() / 1000);
+    sql.prepare(`INSERT INTO tool_leases (agent_name, tool_name, status, created_at)
+                 VALUES (?, ?, ?, ?)`).run("agent-a", "shared_tool", "active", now);
+    sql.prepare(`INSERT INTO tool_leases (agent_name, tool_name, status, created_at)
+                 VALUES (?, ?, ?, ?)`).run("agent-b", "shared_tool", "revoked", now);
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const active = db.getActiveLeasesForTool("shared_tool");
+    expect(active).toHaveLength(1);
+    expect(active[0].agent_name).toBe("agent-a");
+    sql.close();
+  });
+
+  test("revokeLeasesByIds flips status to revoked", async () => {
+    const { sql } = withLeases();
+    const now = Math.floor(Date.now() / 1000);
+    const r1 = sql.prepare(`INSERT INTO tool_leases (agent_name, tool_name, status, created_at)
+                            VALUES (?, ?, 'active', ?)`).run("a", "t", now);
+    const r2 = sql.prepare(`INSERT INTO tool_leases (agent_name, tool_name, status, created_at)
+                            VALUES (?, ?, 'active', ?)`).run("b", "t", now);
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const n = db.revokeLeasesByIds([Number(r1.lastInsertRowid), Number(r2.lastInsertRowid)]);
+    expect(n).toBe(2);
+    const active = db.getActiveLeasesForTool("t");
+    expect(active).toHaveLength(0);
+    sql.close();
+  });
+
+  test("pauseSchedulesMentioningTool disables matching schedules", async () => {
+    const { sql } = withLeases();
+    sql.prepare(`INSERT INTO agent_schedules
+                 (schedule_name, prompt, enabled, created_at)
+                 VALUES (?, ?, 1, ?)`).run(
+      "nightly", "run a0_echo with the latest commit", Math.floor(Date.now() / 1000),
+    );
+    sql.prepare(`INSERT INTO agent_schedules
+                 (schedule_name, prompt, enabled, created_at)
+                 VALUES (?, ?, 1, ?)`).run(
+      "unrelated", "report disk usage", Math.floor(Date.now() / 1000),
+    );
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const paused = db.pauseSchedulesMentioningTool("a0_echo");
+    expect(paused).toHaveLength(1);
+    expect(paused[0].schedule_name).toBe("nightly");
+    // Verify the row is actually disabled.
+    const enabledFlags = sql.prepare(
+      `SELECT schedule_name, enabled FROM agent_schedules ORDER BY id`,
+    ).all() as Array<{ schedule_name: string; enabled: number }>;
+    expect(enabledFlags.find((r) => r.schedule_name === "nightly")?.enabled).toBe(0);
+    expect(enabledFlags.find((r) => r.schedule_name === "unrelated")?.enabled).toBe(1);
+    sql.close();
+  });
+
+  test("revokeLeasesByIds is no-op on empty array", async () => {
+    const { sql } = withLeases();
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    expect(db.revokeLeasesByIds([])).toBe(0);
+    sql.close();
+  });
+});
+
 // -- store smoke test (in-memory DB, basic insert/list roundtrip) -----------
 
 describe("SkillStore round-trip", () => {

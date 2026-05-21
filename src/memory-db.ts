@@ -2078,6 +2078,63 @@ export class MemoryDb {
     return result.changes;
   }
 
+  /**
+   * Find active leases for a specific tool name. Used by the skill
+   * uninstall path to surface affected agents before removing the
+   * tool (§3.12 lease cascade).
+   */
+  getActiveLeasesForTool(toolName: string): Array<{
+    id: number; agent_name: string; goal_id: number | null;
+    expires_at: number | null;
+  }> {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    return db.prepare(
+      `SELECT id, agent_name, goal_id, expires_at
+       FROM tool_leases
+       WHERE tool_name = ? AND status = 'active'
+         AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC`,
+    ).all(toolName, now) as any;
+  }
+
+  /**
+   * Revoke active leases by id. Used by --force-revoke when the
+   * skill uninstall/update would orphan agents.
+   */
+  revokeLeasesByIds(ids: number[]): number {
+    if (ids.length === 0) return 0;
+    const db = this.requireDb();
+    const placeholders = ids.map(() => "?").join(",");
+    const result = db.prepare(
+      `UPDATE tool_leases SET status = 'revoked'
+       WHERE id IN (${placeholders}) AND status = 'active'`,
+    ).run(...ids);
+    return result.changes;
+  }
+
+  /**
+   * Pause schedules whose prompt mentions a removed tool. Returns
+   * the count of paused schedules. Matches case-insensitively on the
+   * tool name appearing anywhere in the prompt — a coarse signal but
+   * the prompt is the only place a scheduled-run plan references a
+   * tool by name.
+   */
+  pauseSchedulesMentioningTool(toolName: string): Array<{ id: number; schedule_name: string }> {
+    const db = this.requireDb();
+    // SQLite LIKE is case-insensitive only for ASCII; sufficient here.
+    const rows = db.prepare(
+      `SELECT id, schedule_name FROM agent_schedules
+       WHERE enabled = 1 AND LOWER(prompt) LIKE ?`,
+    ).all(`%${toolName.toLowerCase()}%`) as any[];
+    if (rows.length === 0) return [];
+    db.prepare(
+      `UPDATE agent_schedules SET enabled = 0
+       WHERE id IN (${rows.map(() => "?").join(",")})`,
+    ).run(...rows.map((r) => r.id));
+    return rows;
+  }
+
   /** Get active leases for an agent */
   getActiveLeases(agentName: string): Array<{
     id: number; tool_name: string; goal_id: number | null;
