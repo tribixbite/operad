@@ -1661,6 +1661,107 @@ export class RestHandler {
           return { status: 405, data: { error: "Method not allowed" } };
         }
 
+        case "skills": {
+          // Skill marketplace REST surface — mirrors the IPC commands.
+          // GET    /api/skills                  → list installed
+          // GET    /api/skills/<id>             → full manifest
+          // POST   /api/skills/install          → { provider, locator,
+          //                                          version?, force_take_ownership? }
+          // POST   /api/skills/<id>/uninstall   → { force_revoke? }
+          // GET    /api/skills/events           → recent events timeline
+          const mgr = this.ctx.getSkillManager();
+          if (!mgr) {
+            return {
+              status: 503,
+              data: { error: "Skill marketplace not enabled. Restart daemon with --enable-skills-preview." },
+            };
+          }
+          const subAction = segments[2] ?? "";
+
+          if (method === "GET" && !name) {
+            const provider = queryParams.get("provider") ?? undefined;
+            return { status: 200, data: mgr.list(provider as any) };
+          }
+          if (method === "GET" && name === "events") {
+            if (!memoryDb) return { status: 503, data: { error: "memoryDb not initialised" } };
+            const limit = parseInt(queryParams.get("limit") ?? "50", 10);
+            const rows = memoryDb.requireDb().prepare(
+              `SELECT id, skill_id, event_type, detail, occurred_at
+                 FROM skill_events ORDER BY occurred_at DESC LIMIT ?`,
+            ).all(limit);
+            return { status: 200, data: rows };
+          }
+          if (method === "GET" && name && !subAction) {
+            const s = mgr.get(name);
+            return s
+              ? { status: 200, data: s }
+              : { status: 404, data: { error: "skill not found" } };
+          }
+          if (method === "POST" && name === "install" && body) {
+            const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+            if (!b.provider || !b.locator) {
+              return { status: 400, data: { error: "Missing required fields: provider, locator" } };
+            }
+            try {
+              const r = await mgr.install(
+                String(b.provider) as any,
+                String(b.locator),
+                b.version ? String(b.version) : "latest",
+                { force_take_ownership: Boolean(b.force_take_ownership) },
+              );
+              return { status: 201, data: r };
+            } catch (err) {
+              const e = err as Error & { code?: string; detail?: Record<string, unknown> };
+              return {
+                status: e.code === "INSTALL_BLOCKED_BY_ACTIVE_CONSUMER" ? 409 : 400,
+                data: { error: e.message, code: e.code, detail: e.detail },
+              };
+            }
+          }
+          if (method === "POST" && name && subAction === "uninstall") {
+            const b = body
+              ? ((typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>)
+              : {};
+            try {
+              mgr.uninstall(name, { force_revoke: Boolean(b.force_revoke) });
+              return { status: 200, data: { id: name, ok: true } };
+            } catch (err) {
+              const e = err as Error & { code?: string; detail?: Record<string, unknown> };
+              return {
+                status: e.code === "TOOL_HAS_ACTIVE_CONSUMERS" ? 409 : 400,
+                data: { error: e.message, code: e.code, detail: e.detail },
+              };
+            }
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        case "tool-autonomy": {
+          // GET  /api/tool-autonomy           → all caps + buckets
+          // POST /api/tool-autonomy           → { tool_id, bucket }
+          if (!memoryDb) return { status: 503, data: { error: "memoryDb not initialised" } };
+          if (method === "GET") {
+            return { status: 200, data: memoryDb.listToolAutonomyCaps() };
+          }
+          if (method === "POST" && body) {
+            const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
+            if (!b.tool_id || !b.bucket) {
+              return { status: 400, data: { error: "Missing required fields: tool_id, bucket" } };
+            }
+            try {
+              const r = memoryDb.promoteToolBucket(String(b.tool_id), String(b.bucket));
+              return { status: 200, data: { tool_id: b.tool_id, ...r } };
+            } catch (err) {
+              const e = err as Error & { code?: string };
+              return {
+                status: e.code === "AUTONOMY_CAP_VIOLATION" ? 409 : 400,
+                data: { error: e.message, code: e.code },
+              };
+            }
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
         case "config-overrides": {
           // Surface the user-mutable JSON overlay (sdk + quota knobs)
           // that the dashboard's Settings form uses. The TOML stays the

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Skill / plugin marketplace (preview)** — multi-source aggregator
+  for installing bundles of tools, agents, workflows, MCP servers, and
+  SKILL.md context. Four day-1 providers: `git+url` (escape tier),
+  `claude-marketplace` (`anthropics/*` → trusted, others → community),
+  `mcp-official` (trusted; HTTPS to `registry.modelcontextprotocol.io`
+  with optional SPKI pin), `operad-curated` (trusted; commit-SHA-pinned
+  static index, disabled-by-default until a known-good SHA is committed).
+  Authors publish a Claude-Code plugin repo with an optional
+  `.operad/operad.toml` sidecar — the adapter merges them. Per-tool
+  autonomy caps enforce a source-tier ceiling
+  (`AUTONOMY_CAP_VIOLATION` on over-promotion). Uninstall runs a lease
+  cascade against tool_leases + agent_schedules
+  (`TOOL_HAS_ACTIVE_CONSUMERS`, `--force-revoke` to override). Install
+  gates on a daemon-wide ConsumerTracker (OODA cycles, scheduled runs,
+  workflow runs all acquire pins). Five-store install transaction
+  (SQLite + cache + `~/.claude.json` + `~/.claude/settings.json` +
+  in-memory registries) with reverse-order rollback on partial
+  failure. Behind `--enable-skills-preview` daemon flag in this
+  release; promoted to default-on after the dashboard panel + docs
+  ship. New CLI: `tmx skill add|remove|list|info`,
+  `tmx tool autonomy list|set`. New REST: `/api/skills`,
+  `/api/skills/install`, `/api/skills/<id>/uninstall`,
+  `/api/skills/events`, `/api/tool-autonomy`. 53 new tests (251 total
+  was 206). Full design spec at
+  `docs/superpowers/specs/2026-05-20-skill-marketplace-design.md`;
+  end-user docs at `docs/skills.md`.
 - **Workflow DAG engine** — new `[[workflow]]` TOML section defines DAG task pipelines (`[[workflow.task]]` entries with `id`, `command`, optional `cwd` / `timeout_s` / `needs` / `on`). Engine implements adjacency-list + in-degree topology with DFS cycle detection and Kahn's-algorithm execution; edge `on` semantics (`success` default, `error`, `always`) gate downstream nodes with skip-propagation. Three new SQLite tables (`agent_workflows`, `agent_workflow_runs`, `agent_workflow_run_nodes`) persist definitions + run history. REST: `GET / POST / DELETE / PATCH /api/workflows[/<name>]`, `POST /api/workflows/<name>/run`, `GET /api/workflows/<name>/runs`. Default `TaskRunner` is `child_process.spawn` with timeout + abort signal; the interface is pluggable so tests inject deterministic fakes. Algorithm adopted (in spirit) from Operit's `core/workflow/WorkflowExecutor.kt`, trimmed to operad's needs — ConditionNode/LogicNode/ExtractNode deferred (operad workflows feed shell commands which already branch via exit-code edges). 15 new tests in `src/__tests__/workflow.test.ts`.
 - **Doctor: `git`, `adb`, `sqlite` probes** — `operad doctor` now warns if `git` is missing (branch/commit display will be empty), fails if `[adb] enabled = true` in config but `adb` isn't on PATH (would otherwise hang boot for `connect_timeout_s`), and fails if no SQLite driver is loadable (bun:sqlite when running under bun, otherwise better-sqlite3, otherwise tells you to install bun or rebuild better-sqlite3). The sqlite probe is dual-runtime aware — if doctor runs under node but bun is on PATH, it knows the daemon will spawn under bun and reports OK.
 - **Termux:API circuit breaker logs** — when 3 consecutive `termux-api` calls time out the breaker opens for 30 s and silently dropped calls. It now logs a structured `warn` line on open ("dropping all termux-api calls until service recovers") and an `info` line on close ("service responsive again"). Throttled to once per minute so a sustained outage doesn't spam logs.
