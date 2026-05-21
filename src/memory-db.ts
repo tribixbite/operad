@@ -621,12 +621,18 @@ const SCHEMA_STATEMENTS: string[] = [
     PRIMARY KEY (provider, locator, version)
   )`,
 
-  // Phase A1: tool autonomy ceilings (rows added at install).
+  // Phase A1: per-tool autonomy ceiling + current bucket. Rows are
+  // populated at install from SkillToolEntry.autonomy_cap (which is
+  // derived from the source trust tier — see capForTier). The
+  // `current_bucket` tracks user promotion state; it never exceeds
+  // `max_bucket`. ToolExecutor.promoteToolBucket consults the cap.
   `CREATE TABLE IF NOT EXISTS tool_autonomy_caps (
     tool_id TEXT PRIMARY KEY,
     max_bucket TEXT NOT NULL,
+    current_bucket TEXT NOT NULL DEFAULT 'suggest',
     set_by_provider TEXT,
-    set_at INTEGER NOT NULL
+    set_at INTEGER NOT NULL,
+    updated_at INTEGER
   )`,
 
   `CREATE TABLE IF NOT EXISTS skill_events (
@@ -758,6 +764,11 @@ export class MemoryDb {
     ensureColumn("agent_runs", "prompt", "TEXT");
     ensureColumn("agent_runs", "response_text", "TEXT");
     ensureColumn("agent_runs", "thinking_text", "TEXT");
+    // 0.4.9 — Phase A1 tool autonomy: per-tool current_bucket + updated_at.
+    // Tables created in 0.4.8 + A0 lack these columns; without them the
+    // promotion path errors with "no such column".
+    ensureColumn("tool_autonomy_caps", "current_bucket", "TEXT NOT NULL DEFAULT 'suggest'");
+    ensureColumn("tool_autonomy_caps", "updated_at", "INTEGER");
   }
 
   /** Close the database */
@@ -2094,4 +2105,124 @@ export class MemoryDb {
     ).run(now);
     return result.changes;
   }
+
+  // ── Tool autonomy caps (Phase A1) ──────────────────────────────────────
+  // Per-tool ceiling + current-bucket state for skill-installed tools.
+  // Pre-existing tools (no row) implicitly run at `autonomous` to
+  // preserve the round-1 status quo — the cap only constrains tools
+  // that came from a skill install.
+
+  /** Look up the autonomy cap row for a tool. Null if no row exists. */
+  getToolAutonomyCap(toolId: string): {
+    max_bucket: string;
+    current_bucket: string;
+    set_by_provider: string | null;
+    set_at: number;
+    updated_at: number | null;
+  } | null {
+    const db = this.requireDb();
+    const row = db.prepare(
+      `SELECT max_bucket, current_bucket, set_by_provider, set_at, updated_at
+         FROM tool_autonomy_caps WHERE tool_id = ?`,
+    ).get(toolId) as any;
+    return row ?? null;
+  }
+
+  /** All cap rows — used by dashboard + CLI listing. */
+  listToolAutonomyCaps(): Array<{
+    tool_id: string;
+    max_bucket: string;
+    current_bucket: string;
+    set_by_provider: string | null;
+  }> {
+    const db = this.requireDb();
+    return db.prepare(
+      `SELECT tool_id, max_bucket, current_bucket, set_by_provider
+         FROM tool_autonomy_caps`,
+    ).all() as any[];
+  }
+
+  /**
+   * Set the cap + initial current bucket. Used at skill install. If the
+   * cap row already exists, the row is UPDATED — the cross-tier
+   * always-more-restrictive rule (§3.4) is enforced by the SkillManager
+   * caller, not here; this method blindly writes whatever is passed.
+   */
+  setToolAutonomyCap(
+    toolId: string,
+    maxBucket: string,
+    currentBucket: string,
+    setByProvider: string | null,
+  ): void {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(
+      `INSERT INTO tool_autonomy_caps
+         (tool_id, max_bucket, current_bucket, set_by_provider, set_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tool_id) DO UPDATE SET
+         max_bucket = excluded.max_bucket,
+         current_bucket = excluded.current_bucket,
+         set_by_provider = excluded.set_by_provider,
+         updated_at = excluded.updated_at`,
+    ).run(toolId, maxBucket, currentBucket, setByProvider, now, now);
+  }
+
+  /** Remove a cap row. Used at skill uninstall. Idempotent. */
+  deleteToolAutonomyCap(toolId: string): void {
+    const db = this.requireDb();
+    db.prepare(`DELETE FROM tool_autonomy_caps WHERE tool_id = ?`).run(toolId);
+  }
+
+  /**
+   * Promote (or demote) a tool's current bucket. Returns the new row;
+   * throws if `target` exceeds `max_bucket`. The bucket comparison uses
+   * the canonical ordering observe < suggest < supervised < trusted <
+   * autonomous (matches the existing AutonomyLevel order in tools.ts).
+   *
+   * Tools with no cap row (pre-existing, non-skill-installed) implicitly
+   * have max=autonomous; any promotion is allowed and a row is created
+   * lazily to record the user choice.
+   */
+  promoteToolBucket(toolId: string, target: string): {
+    max_bucket: string;
+    current_bucket: string;
+  } {
+    const db = this.requireDb();
+    const existing = this.getToolAutonomyCap(toolId);
+    const cap = existing?.max_bucket ?? "autonomous";
+    if (BUCKET_RANK[target] === undefined) {
+      throw new Error(`unknown bucket: ${target}`);
+    }
+    if (BUCKET_RANK[target] > BUCKET_RANK[cap]) {
+      const err = new Error(
+        `AUTONOMY_CAP_VIOLATION: cannot promote '${toolId}' to '${target}'; capped at '${cap}'`,
+      );
+      (err as any).code = "AUTONOMY_CAP_VIOLATION";
+      throw err;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (existing) {
+      db.prepare(
+        `UPDATE tool_autonomy_caps SET current_bucket = ?, updated_at = ? WHERE tool_id = ?`,
+      ).run(target, now, toolId);
+    } else {
+      // Lazy row creation for pre-existing tools.
+      db.prepare(
+        `INSERT INTO tool_autonomy_caps
+           (tool_id, max_bucket, current_bucket, set_by_provider, set_at, updated_at)
+         VALUES (?, 'autonomous', ?, NULL, ?, ?)`,
+      ).run(toolId, target, now, now);
+    }
+    return { max_bucket: cap, current_bucket: target };
+  }
 }
+
+// Canonical bucket ordering — must match AutonomyLevel order in tools.ts.
+const BUCKET_RANK: Record<string, number> = {
+  observe: 0,
+  suggest: 1,
+  supervised: 2,
+  trusted: 3,
+  autonomous: 4,
+};

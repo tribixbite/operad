@@ -311,6 +311,85 @@ describe("adapter readSkillManifests", () => {
   });
 });
 
+// -- A1 autonomy ceiling enforcement -----------------------------------------
+
+describe("tool autonomy caps (Phase A1)", () => {
+  function makeDb() {
+    const sql = new Database(":memory:");
+    sql.exec(`
+      CREATE TABLE tool_autonomy_caps (
+        tool_id TEXT PRIMARY KEY,
+        max_bucket TEXT NOT NULL,
+        current_bucket TEXT NOT NULL DEFAULT 'suggest',
+        set_by_provider TEXT,
+        set_at INTEGER NOT NULL,
+        updated_at INTEGER
+      );
+    `);
+    return sql;
+  }
+
+  test("promoteToolBucket rejects target above the cap", async () => {
+    const sql = makeDb();
+    // Inline MemoryDb shim — only needs requireDb + the new methods.
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    db.setToolAutonomyCap("a0_echo", "suggest", "suggest", "git+url");
+    expect(() => db.promoteToolBucket("a0_echo", "autonomous")).toThrow(/AUTONOMY_CAP_VIOLATION/);
+    sql.close();
+  });
+
+  test("promoteToolBucket allows at-or-below cap", async () => {
+    const sql = makeDb();
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    db.setToolAutonomyCap("a0_echo", "autonomous", "observe", "operad-curated");
+    const r1 = db.promoteToolBucket("a0_echo", "suggest");
+    expect(r1.current_bucket).toBe("suggest");
+    expect(r1.max_bucket).toBe("autonomous");
+    const r2 = db.promoteToolBucket("a0_echo", "autonomous");
+    expect(r2.current_bucket).toBe("autonomous");
+    sql.close();
+  });
+
+  test("promoteToolBucket lazy-creates a row for pre-existing tools (no cap)", async () => {
+    const sql = makeDb();
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    // No row yet — pre-existing tool. Default cap = autonomous.
+    expect(db.getToolAutonomyCap("preexisting_tool")).toBeNull();
+    const r = db.promoteToolBucket("preexisting_tool", "trusted");
+    expect(r.max_bucket).toBe("autonomous");
+    expect(r.current_bucket).toBe("trusted");
+    const row = db.getToolAutonomyCap("preexisting_tool");
+    expect(row?.max_bucket).toBe("autonomous");
+    expect(row?.current_bucket).toBe("trusted");
+    sql.close();
+  });
+
+  test("escape-tier mapping = cap suggest, default observe (regression)", () => {
+    expect(capForTier("escape")).toBe("suggest");
+    expect(defaultBucketForTier("escape")).toBe("observe");
+  });
+
+  test("listToolAutonomyCaps returns set rows", async () => {
+    const sql = makeDb();
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    db.setToolAutonomyCap("t1", "suggest", "suggest", "git+url");
+    db.setToolAutonomyCap("t2", "autonomous", "observe", "operad-curated");
+    const all = db.listToolAutonomyCaps();
+    expect(all).toHaveLength(2);
+    const t1 = all.find((r: any) => r.tool_id === "t1");
+    expect(t1?.max_bucket).toBe("suggest");
+    sql.close();
+  });
+});
+
 // -- store smoke test (in-memory DB, basic insert/list roundtrip) -----------
 
 describe("SkillStore round-trip", () => {

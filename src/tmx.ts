@@ -113,6 +113,9 @@ async function main(): Promise<void> {
     case "skill":
       return runSkill();
 
+    case "tool":
+      return runTool();
+
     // Commands that proxy to daemon via IPC
     case "status":
     case "start":
@@ -740,6 +743,82 @@ ${BOLD}NOTES${RESET}
  * - Bare http(s):// or git@... URL  → provider = "git+url"
  * - `<provider>:<locator>[@version]` → split on first `:`
  */
+/**
+ * `tmx tool autonomy ...` — manage per-tool autonomy caps + current
+ * buckets. Skill-installed tools have caps derived from their source
+ * trust tier; the user can promote within the cap.
+ */
+async function runTool(): Promise<void> {
+  const sub = subArgs[0];
+  const sub2 = subArgs[1];
+  const configPath = getConfigFlag();
+  const client = getClient(configPath);
+
+  if (!sub || sub === "help" || sub === "--help") {
+    console.log(`${BOLD}operad tool${RESET} — manage tool autonomy
+
+${BOLD}SUB-COMMANDS${RESET}
+  ${CYAN}autonomy list${RESET}                       list per-tool autonomy caps
+  ${CYAN}autonomy set <tool-id> <bucket>${RESET}     promote/demote a tool's bucket
+
+${BOLD}BUCKETS${RESET} (low → high)
+  observe < suggest < supervised < trusted < autonomous
+`);
+    return;
+  }
+
+  if (sub === "autonomy" && (!sub2 || sub2 === "help")) {
+    console.log(`${BOLD}operad tool autonomy${RESET}
+
+${BOLD}SUB-COMMANDS${RESET}
+  ${CYAN}list${RESET}                                 list all caps + current buckets
+  ${CYAN}set <tool-id> <bucket>${RESET}              attempt to promote (capped by source tier)
+`);
+    return;
+  }
+
+  const running = await client.isRunning();
+  if (!running) {
+    console.error(`${RED}Daemon not running. Start with: operad stream${RESET}`);
+    process.exit(1);
+  }
+
+  if (sub === "autonomy" && sub2 === "list") {
+    const resp = await client.send({ cmd: "tool.autonomy.list" }, 15_000);
+    if (!resp.ok) { console.error(`${RED}${resp.error}${RESET}`); process.exit(1); }
+    const rows = (resp.data ?? []) as Array<{
+      tool_id: string; max_bucket: string; current_bucket: string;
+      set_by_provider: string | null;
+    }>;
+    if (rows.length === 0) { console.log(`${DIM}(no per-tool caps recorded)${RESET}`); return; }
+    for (const r of rows) {
+      const src = r.set_by_provider ?? "manual";
+      console.log(`${BOLD}${r.tool_id}${RESET}  current=${r.current_bucket} cap=${r.max_bucket} ${DIM}(${src})${RESET}`);
+    }
+    return;
+  }
+
+  if (sub === "autonomy" && sub2 === "set") {
+    const toolId = subArgs[2];
+    const bucket = subArgs[3];
+    if (!toolId || !bucket) {
+      console.error(`${RED}Usage: tmx tool autonomy set <tool-id> <bucket>${RESET}`);
+      process.exit(1);
+    }
+    const resp = await client.send({ cmd: "tool.autonomy.set", tool_id: toolId, bucket }, 15_000);
+    if (!resp.ok) {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    const r = resp.data as { tool_id: string; max_bucket: string; current_bucket: string };
+    console.log(`${GREEN}${r.tool_id}${RESET}  current=${r.current_bucket} cap=${r.max_bucket}`);
+    return;
+  }
+
+  console.error(`${RED}Unknown sub-command: ${sub}${sub2 ? " " + sub2 : ""}${RESET}`);
+  process.exit(1);
+}
+
 function parseSkillLocator(
   raw: string,
 ): { provider: string; locator: string; version?: string } {

@@ -117,6 +117,10 @@ export class IpcHandler {
       case "skill.info":
         return this.handleSkillCommand(cmd);
 
+      case "tool.autonomy.list":
+      case "tool.autonomy.set":
+        return this.handleToolAutonomyCommand(cmd);
+
       case "switchboard_reset": {
         // Reset autonomous features (cognitive/OODA/mindMeld) to opt-in defaults.
         // Keeps master switch, sdkBridge, memoryInjection, and per-agent overrides.
@@ -181,6 +185,38 @@ export class IpcHandler {
         ok: false,
         error: e.message,
         data: e.code ? { code: e.code, detail: e.detail } : undefined,
+      };
+    }
+  }
+
+  /**
+   * Per-tool autonomy promotion (Phase A1). Direct DB access — the
+   * autonomy table is small and frequently read so we don't proxy
+   * through SkillManager. The promotion path enforces
+   * AUTONOMY_CAP_VIOLATION inside MemoryDb.promoteToolBucket.
+   */
+  private handleToolAutonomyCommand(
+    cmd: Extract<IpcCommand, { cmd: `tool.autonomy.${string}` }>,
+  ): IpcResponse {
+    const db = this.ctx.getMemoryDb();
+    if (!db) {
+      return { ok: false, error: "Memory database not initialized" };
+    }
+    try {
+      if (cmd.cmd === "tool.autonomy.list") {
+        return { ok: true, data: db.listToolAutonomyCaps() };
+      }
+      if (cmd.cmd === "tool.autonomy.set") {
+        const result = db.promoteToolBucket(cmd.tool_id, cmd.bucket);
+        return { ok: true, data: { tool_id: cmd.tool_id, ...result } };
+      }
+      return { ok: false, error: `unhandled tool.autonomy command` };
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      return {
+        ok: false,
+        error: e.message,
+        data: e.code ? { code: e.code } : undefined,
       };
     }
   }

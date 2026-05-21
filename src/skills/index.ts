@@ -287,8 +287,21 @@ export class SkillManager {
   // -- internals -----------------------------------------------------------
 
   private registerInMemory(skill: OperadSkill): void {
+    const { defaultBucketForTier } = require("./types.js") as typeof import("./types.js");
+    const defaultBucket = defaultBucketForTier(skill.trust_tier);
+
     for (const t of skill.tools ?? []) {
       this.opts.toolExecutor.registerTomlTools([t.toml]);
+      // Phase A1: write the autonomy cap row alongside registration.
+      // Default current_bucket = the tier's default bucket; max_bucket
+      // = the tier's cap (already computed in SkillToolEntry by the
+      // adapter via capForTier).
+      this.db.setToolAutonomyCap(
+        t.toml.name,
+        t.autonomy_cap,
+        defaultBucket,
+        skill.source.provider,
+      );
     }
     if (this.opts.workflowEngine) {
       for (const w of skill.workflows ?? []) {
@@ -307,6 +320,7 @@ export class SkillManager {
   private unregisterInMemory(skill: OperadSkill): void {
     for (const t of skill.tools ?? []) {
       this.opts.toolExecutor.unregister(t.toml.name);
+      this.db.deleteToolAutonomyCap(t.toml.name);
     }
     // Workflows: WorkflowEngine.delete by name.
     if (this.opts.workflowEngine) {

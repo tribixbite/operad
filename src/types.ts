@@ -433,7 +433,9 @@ export type IpcCommand =
     }
   | { cmd: "skill.uninstall"; id: string }
   | { cmd: "skill.list"; provider?: string }
-  | { cmd: "skill.info"; id: string };
+  | { cmd: "skill.info"; id: string }
+  | { cmd: "tool.autonomy.list" }
+  | { cmd: "tool.autonomy.set"; tool_id: string; bucket: string };
 
 /** Response from daemon to CLI */
 export interface IpcResponse {
