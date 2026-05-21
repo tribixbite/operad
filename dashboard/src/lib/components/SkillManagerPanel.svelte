@@ -93,7 +93,7 @@
 
   // -- Install --------------------------------------------------------------
 
-  async function handleInstall() {
+  async function handleInstall(acceptCapDowngrade = false) {
     if (!installLocator.trim()) {
       installError = "Locator is required";
       return;
@@ -107,6 +107,7 @@
         locator: installLocator.trim(),
         version: installVersion || undefined,
         force_take_ownership: installForceOwnership,
+        accept_cap_downgrade: acceptCapDowngrade,
       });
       installWarnings = r.warnings ?? [];
       installLocator = "";
@@ -114,7 +115,16 @@
       installForceOwnership = false;
       await refresh();
     } catch (err) {
-      installError = (err as Error).message;
+      const msg = (err as Error).message;
+      installError = msg;
+      // Re-installing the same (provider, locator) at a stricter tier
+      // clamps promoted tools. Offer the retry inline so the user can
+      // confirm without retyping the form.
+      if (/PROVIDER_TIER_DOWNGRADE/.test(msg) && !acceptCapDowngrade) {
+        if (confirm(`${msg}\n\nRetry with --accept-cap-downgrade?`)) {
+          await handleInstall(true);
+        }
+      }
     } finally {
       installing = false;
     }

@@ -1301,6 +1301,7 @@ export async function installSkill(opts: {
   locator: string;
   version?: string;
   force_take_ownership?: boolean;
+  accept_cap_downgrade?: boolean;
 }): Promise<{ skill: SkillSummary; warnings: string[] }> {
   const res = await fetch("/api/skills/install", {
     method: "POST",

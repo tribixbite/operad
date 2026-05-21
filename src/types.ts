@@ -435,6 +435,7 @@ export type IpcCommand =
   | { cmd: "skill.uninstall"; id: string; force_revoke?: boolean }
   | { cmd: "skill.list"; provider?: string }
   | { cmd: "skill.info"; id: string }
+  | { cmd: "skill.events"; limit?: number }
   | { cmd: "tool.autonomy.list" }
   | { cmd: "tool.autonomy.set"; tool_id: string; bucket: string };
 

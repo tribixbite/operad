@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Roadmap doc** — `docs/roadmap.md` enumerates every v1.1+ skill
+  marketplace deferral with spec back-references (IPC/REST/CLI gaps,
+  provider queue, deferred MCP lifecycle modes, supply-chain hardening,
+  Operit-pattern follow-ups, dashboard mobile-pass list).
+- **`tmx skill events [--limit=<n>]`** — CLI mirror of the existing
+  `GET /api/skills/events` REST endpoint, exposes the install/update/
+  uninstall timeline including `autonomy_clamp` cascade entries.
+- **Dashboard cap-downgrade retry path** — `SkillManagerPanel` now
+  catches `PROVIDER_TIER_DOWNGRADE` on install and offers an inline
+  retry with `accept_cap_downgrade`, matching the existing
+  `TOOL_HAS_ACTIVE_CONSUMERS` retry UX on uninstall. `installSkill()`
+  API gains the `accept_cap_downgrade` option.
+
+### Fixed
+- **REST `POST /api/skills/install`** now plumbs `accept_cap_downgrade`
+  through to `SkillManager.install`, so the dashboard and other REST
+  callers can recover from `PROVIDER_TIER_DOWNGRADE`. Previously the
+  field was silently dropped. Status codes broadened to 409 for the
+  full set of recoverable gating refusals
+  (`TOOL_HAS_ACTIVE_CONSUMERS`, `TOOL_NAME_CONFLICT`,
+  `WORKFLOW_NAME_CONFLICT`, `AGENT_NAME_CONFLICT`,
+  `MCP_NAME_USER_OWNED`, `MCP_OWNED_BY_OTHER_DAEMON`,
+  `PROVIDER_TIER_DOWNGRADE`, `AUTONOMY_CAP_VIOLATION`) so clients can
+  distinguish retry-with-flag from "your payload is wrong".
+
 - **Skill marketplace Phase C — concurrent installs via generation
   discipline.** The coarse `INSTALL_BLOCKED_BY_ACTIVE_CONSUMER` gate
   is replaced by per-generation shadow tool maps. When an OODA cycle

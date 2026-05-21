@@ -635,13 +635,17 @@ async function runSkill(): Promise<void> {
 
 ${BOLD}SUB-COMMANDS${RESET}
   ${CYAN}add <locator>${RESET}                    install a skill (e.g. https://github.com/owner/repo@v1.0)
+                                 flags: ${DIM}--force-take-ownership${RESET}  ${DIM}--accept-cap-downgrade${RESET}
   ${CYAN}remove <id>${RESET}                      uninstall by skill id
+                                 flags: ${DIM}--force-revoke${RESET}
   ${CYAN}list [--provider=<p>]${RESET}            list installed skills
   ${CYAN}info <id>${RESET}                        show full manifest for a skill
+  ${CYAN}events [--limit=<n>]${RESET}             recent install/update/uninstall events (default 30)
 
 ${BOLD}NOTES${RESET}
   Requires the daemon to be started with --enable-skills-preview.
-  Day-1 providers: git+url (https/ssh git URLs). More in Phase B.
+  Providers: git+url, claude-marketplace, mcp-official, operad-curated.
+  See docs/skills.md for the failure-mode + trust-tier matrix.
 `);
     return;
   }
@@ -734,6 +738,31 @@ ${BOLD}NOTES${RESET}
       process.exit(1);
     }
     console.log(JSON.stringify(resp.data, null, 2));
+    return;
+  }
+
+  if (sub === "events") {
+    const limitArg = subArgs.find((a) => a.startsWith("--limit="));
+    const limit = limitArg ? parseInt(limitArg.slice("--limit=".length), 10) : 30;
+    const resp = await client.send({ cmd: "skill.events", limit }, 15_000);
+    if (!resp.ok) {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    const events = (resp.data ?? []) as Array<{
+      id: number; skill_id: string | null; event_type: string;
+      detail: string | null; occurred_at: number;
+    }>;
+    if (events.length === 0) {
+      console.log(`${DIM}(no skill events)${RESET}`);
+      return;
+    }
+    for (const e of events) {
+      const ts = new Date(e.occurred_at).toISOString();
+      const sid = e.skill_id ?? `${DIM}—${RESET}`;
+      console.log(`${DIM}${ts}${RESET}  ${BOLD}${e.event_type}${RESET}  ${sid}`);
+      if (e.detail) console.log(`  ${DIM}${e.detail}${RESET}`);
+    }
     return;
   }
 

@@ -115,6 +115,7 @@ export class IpcHandler {
       case "skill.uninstall":
       case "skill.list":
       case "skill.info":
+      case "skill.events":
         return this.handleSkillCommand(cmd);
 
       case "tool.autonomy.list":
@@ -180,6 +181,16 @@ export class IpcHandler {
         return s
           ? { ok: true, data: s }
           : { ok: false, error: `skill not found: ${cmd.id}` };
+      }
+      if (cmd.cmd === "skill.events") {
+        const db = this.ctx.getMemoryDb();
+        if (!db) return { ok: false, error: "memoryDb not initialised" };
+        const limit = Math.max(1, Math.min(500, cmd.limit ?? 30));
+        const rows = db.requireDb().prepare(
+          `SELECT id, skill_id, event_type, detail, occurred_at
+             FROM skill_events ORDER BY occurred_at DESC LIMIT ?`,
+        ).all(limit);
+        return { ok: true, data: rows };
       }
       return { ok: false, error: `unhandled skill command: ${(cmd as { cmd: string }).cmd}` };
     } catch (err) {

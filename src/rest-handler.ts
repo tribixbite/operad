@@ -1666,7 +1666,8 @@ export class RestHandler {
           // GET    /api/skills                  → list installed
           // GET    /api/skills/<id>             → full manifest
           // POST   /api/skills/install          → { provider, locator,
-          //                                          version?, force_take_ownership? }
+          //                                          version?, force_take_ownership?,
+          //                                          accept_cap_downgrade? }
           // POST   /api/skills/<id>/uninstall   → { force_revoke? }
           // GET    /api/skills/events           → recent events timeline
           const mgr = this.ctx.getSkillManager();
@@ -1707,13 +1708,31 @@ export class RestHandler {
                 String(b.provider) as any,
                 String(b.locator),
                 b.version ? String(b.version) : "latest",
-                { force_take_ownership: Boolean(b.force_take_ownership) },
+                {
+                  force_take_ownership: Boolean(b.force_take_ownership),
+                  accept_cap_downgrade: Boolean(b.accept_cap_downgrade),
+                },
               );
               return { status: 201, data: r };
             } catch (err) {
               const e = err as Error & { code?: string; detail?: Record<string, unknown> };
+              // 409 for gating refusals that the caller can resolve by
+              // changing flags (force_revoke, force_take_ownership,
+              // accept_cap_downgrade) — distinct from 400 (malformed
+              // request).
+              const gating = new Set([
+                "INSTALL_BLOCKED_BY_ACTIVE_CONSUMER",
+                "TOOL_HAS_ACTIVE_CONSUMERS",
+                "TOOL_NAME_CONFLICT",
+                "WORKFLOW_NAME_CONFLICT",
+                "AGENT_NAME_CONFLICT",
+                "MCP_NAME_USER_OWNED",
+                "MCP_OWNED_BY_OTHER_DAEMON",
+                "PROVIDER_TIER_DOWNGRADE",
+                "AUTONOMY_CAP_VIOLATION",
+              ]);
               return {
-                status: e.code === "INSTALL_BLOCKED_BY_ACTIVE_CONSUMER" ? 409 : 400,
+                status: gating.has(e.code ?? "") ? 409 : 400,
                 data: { error: e.message, code: e.code, detail: e.detail },
               };
             }

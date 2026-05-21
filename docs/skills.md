@@ -25,9 +25,11 @@ the ceiling.
 ```sh
 tmx skill add <locator>                          # install
 tmx skill add <locator> --force-take-ownership   # claim a hand-written MCP entry
+tmx skill add <locator> --accept-cap-downgrade   # confirm a stricter-tier re-install
 tmx skill remove <skill-id> [--force-revoke]     # uninstall (with lease cascade)
 tmx skill list [--provider=<p>]                  # list installed
 tmx skill info <skill-id>                        # full manifest
+tmx skill events [--limit=<n>]                   # recent install/update/uninstall events
 
 tmx tool autonomy list                           # per-tool caps + current bucket
 tmx tool autonomy set <tool-id> <bucket>         # promote (capped by source tier)
@@ -195,8 +197,12 @@ this rule — that's just an upgrade, no tier change.
   `huggingface-spaces` providers
 - `tmx skill search` across providers
 - `tmx skill update <id>` (per-skill update; bulk `--all` cut)
+- `tmx skill enable <id>` / `tmx skill disable <id>` (partial register/unregister)
 - `--check` on `tmx skill list`
 - Auto-update on a schedule
 - `proxied` and `gateway` MCP lifecycle modes
+- Signed manifests (sigstore / cosign)
+- Skill packs (curated multi-skill bundles)
 
-See the design spec for the full deferred list and rationale.
+See [`docs/roadmap.md`](roadmap.md) for the post-v1 queue and the
+design spec for the full deferral rationale.
