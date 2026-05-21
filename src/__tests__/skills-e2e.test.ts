@@ -302,6 +302,83 @@ describe("Phase E.3 end-to-end install/use/uninstall (git+url + real disk)", () 
     expect(parsed.force_revoke_cascade?.leases?.length).toBeGreaterThanOrEqual(1);
   }, 30_000); // 30s — git clone of a tiny local repo is fast but be safe.
 
+  test("cross-tier downgrade requires --accept-cap-downgrade when a tool is promoted above the new cap", async () => {
+    const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+    // We exercise the rule against git+url provider — it always
+    // returns escape tier. But for a cross-tier test we want one
+    // install at trusted/community and a re-install at escape. We
+    // can't switch tiers within the git+url provider, so simulate by
+    // installing through claude-marketplace at anthropics (trusted),
+    // then re-installing the SAME locator through git+url at escape.
+    // Both providers happily clone the same local fixture so the
+    // version reconciles.
+    //
+    // For brevity, we test the rule at the DB layer using a stub.
+    const { capForTier } = await import("../skills/types.js");
+    expect(capForTier("escape")).toBe("suggest");
+    expect(capForTier("trusted")).toBe("autonomous");
+
+    // Install at trusted via a fresh ToolExecutor + SkillManager.
+    const te2 = new ToolExecutor(memDb, log);
+    const we2 = new WorkflowEngine(memDb, log);
+    const tracker2 = new ConsumerTracker(null);
+    tracker2.bindGeneration(() => te2.getCurrentGeneration(), null);
+
+    // Use git+url for both ends; force the trustTier override via a
+    // tier-override provider wrapper.
+    const trustedProvider: ProviderModule = {
+      ...gitUrlProvider,
+      trustTier: () => "trusted",
+    };
+    const escapeProvider: ProviderModule = {
+      ...gitUrlProvider,
+      trustTier: () => "escape",
+    };
+    const mgr3 = new SkillManager(memDb, log, {
+      providers: {
+        "git+url": trustedProvider,
+        "mcp-official": gitUrlProvider as any,
+        "operad-curated": gitUrlProvider as any,
+        "claude-marketplace": gitUrlProvider as any,
+      } as Record<Provider, ProviderModule>,
+      toolExecutor: te2,
+      workflowEngine: we2,
+      hasActiveConsumers: () => tracker2.list(),
+    });
+
+    const trustedInstall = await mgr3.install("git+url", fixtureRepo, "v0.1.0");
+    expect(trustedInstall.skill.trust_tier).toBe("trusted");
+
+    // Promote the tool to autonomous (allowed under trusted cap).
+    const promoted = memDb.promoteToolBucket("e2e_echo", "autonomous");
+    expect(promoted.current_bucket).toBe("autonomous");
+
+    // Build a fresh manager wired with the escape-tier provider. The
+    // SQLite + ToolExecutor + ConsumerTracker are shared, so the
+    // existing-skill detection in the cross-tier rule still sees the
+    // prior trusted install.
+    const mgr3escape = new SkillManager(memDb, log, {
+      providers: { "git+url": escapeProvider } as Record<Provider, ProviderModule>,
+      toolExecutor: te2,
+      workflowEngine: we2,
+      hasActiveConsumers: () => tracker2.list(),
+    });
+    await expect(mgr3escape.install("git+url", fixtureRepo, "v0.1.0"))
+      .rejects.toThrow(/PROVIDER_TIER_DOWNGRADE/);
+
+    // With the accept flag, install succeeds and clamps the tool.
+    const downgrade = await mgr3escape.install("git+url", fixtureRepo, "v0.1.0", {
+      accept_cap_downgrade: true,
+    });
+    expect(downgrade.warnings.some((w) => w.includes("clamped"))).toBe(true);
+    const capAfter = memDb.getToolAutonomyCap("e2e_echo");
+    expect(capAfter?.max_bucket).toBe("suggest");
+    expect(capAfter?.current_bucket).toBe("suggest");
+
+    // Cleanup.
+    mgr3escape.uninstall(downgrade.skill.id, { force_revoke: true });
+  }, 30_000);
+
   test("Phase C: install with a pin held succeeds; older gen survives until pin released", async () => {
     // Build a fresh tool executor for this test so the generation
     // counter starts clean and the previous test's installs don't

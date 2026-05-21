@@ -138,9 +138,18 @@ async function loadIndex(): Promise<CuratedIndex> {
       `operad-curated is disabled: no commit SHA pinned in this operad build. Set OPERAD_CURATED_COMMIT_SHA env var to enable.`,
     );
   }
-  // Fetch via GitHub's raw content URL pinned to the commit SHA.
-  const url = `https://raw.githubusercontent.com/${INDEX_REPO}/${INDEX_COMMIT_SHA}/index.json`;
-  const body = await httpsGet(url);
+  // The index URL is normally https://raw.githubusercontent.com/<repo>/<sha>/index.json,
+  // but OPERAD_CURATED_INDEX_URL_TEMPLATE lets users (and tests) point at
+  // a mirror or a local file URL. The template supports two
+  // placeholders: {repo} and {sha}.
+  const tpl = process.env.OPERAD_CURATED_INDEX_URL_TEMPLATE
+    ?? `https://raw.githubusercontent.com/{repo}/{sha}/index.json`;
+  const url = tpl
+    .replace("{repo}", INDEX_REPO)
+    .replace("{sha}", INDEX_COMMIT_SHA);
+  const body = url.startsWith("file://")
+    ? readLocalIndex(url)
+    : await httpsGet(url);
   // Sanity: hash check against the SHA — GitHub's raw URL is already
   // commit-SHA-pinned but recomputing the body hash means a CDN
   // compromise can't substitute a tampered index that happens to
@@ -156,6 +165,28 @@ async function loadIndex(): Promise<CuratedIndex> {
   }
   cachedIndex = parsed;
   return parsed;
+}
+
+/**
+ * Read a local file:// URL synchronously. Used when OPERAD_CURATED_INDEX_URL_TEMPLATE
+ * points at a locally-checked-out copy of the curated repo (handy for
+ * testing the provider end-to-end without network access). The
+ * pinned commit SHA isn't verified against the file's git state —
+ * file:// callers are trusted by definition.
+ */
+function readLocalIndex(url: string): string {
+  const path = url.slice("file://".length);
+  // Use node:fs synchronously to keep the loadIndex() signature
+  // identical regardless of transport.
+  const { readFileSync } = require("node:fs") as typeof import("node:fs");
+  try {
+    return readFileSync(path, "utf8");
+  } catch (err) {
+    throw new SkillError(
+      "PROVIDER_FETCH_FAILED",
+      `failed to read local curated index at ${path}: ${(err as Error).message}`,
+    );
+  }
 }
 
 function httpsGet(url: string): Promise<string> {

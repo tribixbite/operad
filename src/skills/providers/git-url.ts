@@ -17,7 +17,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -49,6 +49,22 @@ export const gitUrlProvider: ProviderModule = {
     const targetDir = join(cacheParent, resolvedVersion);
 
     mkdirSync(cacheParent, { recursive: true });
+
+    // If a previous install left this exact version on disk, blow it
+    // away — re-install paths (same locator + version, cross-tier,
+    // forced re-fetch) all need a clean target. The cache is operad-
+    // owned so this is safe; the prior commit SHA was already
+    // captured in SQLite if anyone cares.
+    if (existsSync(targetDir)) {
+      try {
+        rmSync(targetDir, { recursive: true, force: true });
+      } catch (err) {
+        throw new SkillError(
+          "PROVIDER_FETCH_FAILED",
+          `failed to clear pre-existing cache dir ${targetDir}: ${(err as Error).message}`,
+        );
+      }
+    }
 
     try {
       // `git clone --depth 1` with the resolved ref. For commit SHAs

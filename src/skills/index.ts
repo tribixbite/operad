@@ -102,7 +102,15 @@ export class SkillManager {
     provider: Provider,
     locator: string,
     version: string = "latest",
-    opts: { force_take_ownership?: boolean } = {},
+    opts: {
+      force_take_ownership?: boolean;
+      /**
+       * Confirm a cross-tier re-install at a stricter tier when it
+       * would clamp one or more tools' current_bucket. Without this,
+       * the install refuses with PROVIDER_TIER_DOWNGRADE.
+       */
+      accept_cap_downgrade?: boolean;
+    } = {},
   ): Promise<SkillInstallResult> {
     // Step 0: serialize installs daemon-wide. A0 doesn't have per-
     // (provider, locator) mutexes; install is a coarse exclusive
@@ -130,6 +138,57 @@ export class SkillManager {
     const trustTier = providerMod.trustTier(locator);
     const warnings: string[] = [];
 
+    // Cross-tier always-more-restrictive cap rule (spec §3.4).
+    // If a different-tier skill with the same (provider, locator) is
+    // already installed and the NEW tier would tighten the cap below
+    // any tool's current_bucket, refuse with PROVIDER_TIER_DOWNGRADE
+    // unless --accept-cap-downgrade was passed.
+    const existing = this.store.getActive(provider, locator);
+    if (existing && existing.trust_tier !== trustTier) {
+      const { tierRank, capForTier } = require("./types.js") as typeof import("./types.js");
+      const isStricter = tierRank(trustTier) < tierRank(existing.trust_tier);
+      if (isStricter) {
+        const newCap = capForTier(trustTier);
+        // BUCKET_RANK in memory-db.ts is private; re-declare the same
+        // ordering here. Keep in sync with the canonical order used
+        // by promoteToolBucket.
+        const order: Record<string, number> = { observe: 0, suggest: 1, supervised: 2, trusted: 3, autonomous: 4 };
+        const newCapRank = order[newCap];
+        // Find any tool with current_bucket > new cap.
+        const clamped: Array<{ tool: string; from: string; to: string }> = [];
+        for (const t of existing.tools ?? []) {
+          const row = this.db.getToolAutonomyCap(t.toml.name);
+          if (!row) continue;
+          if ((order[row.current_bucket] ?? 0) > newCapRank) {
+            clamped.push({ tool: t.toml.name, from: row.current_bucket, to: newCap });
+          }
+        }
+        if (clamped.length > 0 && !opts.accept_cap_downgrade) {
+          this.opts.toolExecutor.abortGeneration; // (no-op — no gen opened yet)
+          this.installInProgress = false;
+          throw new SkillError(
+            "PROVIDER_TIER_DOWNGRADE",
+            `Cross-tier re-install would clamp ${clamped.length} tool(s) below their current bucket. Re-run with --accept-cap-downgrade to confirm.`,
+            { clamped, existing_tier: existing.trust_tier, new_tier: trustTier },
+          );
+        }
+        if (clamped.length > 0) {
+          // User confirmed: clamp each tool's current bucket to the new cap.
+          for (const c of clamped) {
+            this.db.setToolAutonomyCap(
+              c.tool, newCap, newCap, provider,
+            );
+          }
+          this.store.appendEvent(existing.id, "update", {
+            kind: "autonomy_clamp", clamped, new_tier: trustTier,
+          });
+          warnings.push(
+            `${clamped.length} tool(s) clamped to '${newCap}' due to cross-tier downgrade: ${clamped.map((c) => c.tool).join(", ")}`,
+          );
+        }
+      }
+    }
+
     // Track each side-effect we've completed so the rollback knows
     // how far to unwind.
     const completedSteps: InstallStep[] = [];
@@ -149,6 +208,20 @@ export class SkillManager {
 
       // Step 3: adapter read.
       const manifest = await providerMod.read(fetch.extracted_path);
+
+      // Phase A1+: the adapter's per-tool autonomy_cap comes from
+      // whichever tier the provider's read() hardcoded into the
+      // readSkillManifests call (git+url hardcodes "escape"). But
+      // some providers (claude-marketplace, operad-curated) delegate
+      // to git+url and the ACTUAL tier is computed per-locator by
+      // SkillManager. Override here so the cap matches the real tier.
+      if (manifest.tools) {
+        const { capForTier: capFn } = require("./types.js") as typeof import("./types.js");
+        const correctCap = capFn(trustTier);
+        for (const t of manifest.tools) {
+          t.autonomy_cap = correctCap;
+        }
+      }
 
       // Compile the canonical OperadSkill before any further side
       // effects, so collision detection runs once and atomically.
@@ -341,16 +414,29 @@ export class SkillManager {
     const { defaultBucketForTier } = require("./types.js") as typeof import("./types.js");
     const defaultBucket = defaultBucketForTier(skill.trust_tier);
 
+    const order: Record<string, number> = { observe: 0, suggest: 1, supervised: 2, trusted: 3, autonomous: 4 };
     for (const t of skill.tools ?? []) {
       // Phase C: route into the pending generation (gen) if a
       // transaction is open; otherwise the live one. The
       // registerTomlTools overload threads gen down to register().
       this.opts.toolExecutor.registerTomlTools([t.toml], gen);
       // Phase A1: write the autonomy cap row alongside registration.
+      // Cross-tier rule (§3.4 round-4): if an existing row already
+      // has a current_bucket that's still within the new cap, keep
+      // it — don't silently demote a user-promoted tool back to the
+      // tier default. The cross-tier downgrade path above has
+      // already clamped any rows that would otherwise exceed the
+      // new cap, so anything here is either at-or-below cap.
+      const existingRow = this.db.getToolAutonomyCap(t.toml.name);
+      const capRank = order[t.autonomy_cap];
+      const preserveCurrent = existingRow
+        && (order[existingRow.current_bucket] ?? 0) <= capRank
+        ? existingRow.current_bucket
+        : defaultBucket;
       this.db.setToolAutonomyCap(
         t.toml.name,
         t.autonomy_cap,
-        defaultBucket,
+        preserveCurrent,
         skill.source.provider,
       );
     }
@@ -386,11 +472,20 @@ export class SkillManager {
   }
 
   private detectConflicts(skill: OperadSkill): void {
+    // Treat a re-install of the same (provider, locator) as an
+    // upgrade, not a conflict — the existing skill OWNS these tool
+    // and workflow names, and a fresh install at a new version will
+    // overwrite them via the generation transaction. Only DIFFERENT
+    // skills colliding on a name should refuse.
+    const existing = this.store.getActive(skill.source.provider, skill.source.locator);
+    const sameLogicalSkill = existing !== null;
+
     for (const t of skill.tools ?? []) {
       if (this.opts.toolExecutor.hasTool(t.toml.name)) {
+        if (sameLogicalSkill) continue;
         throw new SkillError(
           "TOOL_NAME_CONFLICT",
-          `tool '${t.toml.name}' already exists`,
+          `tool '${t.toml.name}' already exists (owned by another skill)`,
           { name: t.toml.name },
         );
       }
@@ -398,9 +493,10 @@ export class SkillManager {
     if (this.opts.workflowEngine) {
       for (const w of skill.workflows ?? []) {
         if (this.opts.workflowEngine.get(w.name)) {
+          if (sameLogicalSkill) continue;
           throw new SkillError(
             "WORKFLOW_NAME_CONFLICT",
-            `workflow '${w.name}' already exists`,
+            `workflow '${w.name}' already exists (owned by another skill)`,
             { name: w.name },
           );
         }

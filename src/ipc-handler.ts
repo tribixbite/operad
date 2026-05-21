@@ -158,7 +158,10 @@ export class IpcHandler {
           cmd.provider as import("./skills/types.js").Provider,
           cmd.locator,
           cmd.version,
-          { force_take_ownership: cmd.force_take_ownership },
+          {
+            force_take_ownership: cmd.force_take_ownership,
+            accept_cap_downgrade: cmd.accept_cap_downgrade,
+          },
         );
         return { ok: true, data: result };
       }

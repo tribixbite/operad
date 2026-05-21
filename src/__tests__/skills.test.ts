@@ -737,6 +737,48 @@ describe("SkillGc sweeper (Phase E.1)", () => {
     sql.close();
   });
 
+  test("pass-2 prunes ToolExecutor generations that no SQL row + no pin references", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600;
+    // SQL row gone — represents a fully-uninstalled + already-swept
+    // generation that lingers only in ToolExecutor.generations.
+    sql.prepare(`INSERT INTO skills
+        (id, provider, locator, version, manifest_json, installed_at,
+         fetched_archive_sha256, tombstoned)
+      VALUES (?, ?, ?, ?, '{}', ?, 'x', 1)`).run(
+      "git+url:r@v1", "git+url", "r", "v1", old,
+    );
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES (?, ?, ?, ?)`).run(
+      "git+url", "r", "v1", old,
+    );
+
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+    const { SkillStore } = await import("../skills/store.js");
+    const { ToolExecutor } = await import("../tools.js");
+    const te = new ToolExecutor(db, log);
+    // Manually create an orphan generation that has no SQL backing.
+    const orphanGen = te.beginGenerationTransaction();
+    te.commitGeneration(orphanGen);
+    // Open one more so currentGen advances past orphanGen.
+    const next = te.beginGenerationTransaction();
+    te.commitGeneration(next);
+    expect(te.listGenerations()).toContain(orphanGen);
+
+    const store = new SkillStore(db, log);
+    const { SkillGc } = await import("../skills/gc.js");
+    const gc = new SkillGc(db, log, store, { sweep_interval_ms: 60 * 60 * 1000 });
+    gc.bindToolExecutor(te);
+    gc.runPass2();
+    // Orphan gen pruned because no skill_active_version + no
+    // skill_generation_refs reference it.
+    expect(te.listGenerations()).not.toContain(orphanGen);
+    sql.close();
+  });
+
   test("pass-2 leaves rows pinned by active generation refs alone", async () => {
     const sql = makeGcEnv();
     const old = Math.floor(Date.now() / 1000) - 2 * 3600;

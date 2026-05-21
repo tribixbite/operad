@@ -1401,6 +1401,10 @@ export class Daemon {
           this.skillGc = new SkillGc(
             this.memoryDb, this.log, this.skillManager.store,
           );
+          // Phase C: pass-2 also prunes in-memory generations
+          // (the per-gen tool maps that are no longer SQL-active
+          // and no longer pinned).
+          this.skillGc.bindToolExecutor(this.toolExecutor);
           this.skillGc.start();
 
           this.log.info("Skill marketplace initialized (preview)");

@@ -148,20 +148,55 @@ set <id> autonomous` against an escape-tier tool returns
 | Variable | Purpose |
 |---|---|
 | `OPERAD_MCP_OFFICIAL_SPKI_PINS` | Comma-separated base64 SPKI hashes for the MCP registry. Empty string disables the pin; unset falls through to standard TLS verification with a warning. |
-| `OPERAD_CURATED_COMMIT_SHA` | Pinned commit SHA of `operad-stream/skills` index repo. Empty (default) disables the `operad-curated` provider. |
+| `OPERAD_CURATED_COMMIT_SHA` | Pinned commit SHA of the curated index repo. Empty (default) disables the `operad-curated` provider. |
+| `OPERAD_CURATED_INDEX_URL_TEMPLATE` | Override URL template for the curated index (e.g. for a mirror or `file://` path during testing). Supports `{repo}` + `{sha}` placeholders. Defaults to `https://raw.githubusercontent.com/{repo}/{sha}/index.json`. |
+
+## Concurrent installs (Phase C)
+
+Installs no longer block on active consumers. When an OODA cycle,
+scheduled run, REST/IPC tool call, or workflow run holds a pin, the
+install transaction creates generation N+1 in parallel, atomically
+swaps the live pointer on commit, and leaves generation N resident
+until the pinned consumer releases. The Background GC sweeper drops
+unreferenced generations + their tool maps on the next interval.
+
+In practice this means **you can `tmx skill add` while a long-running
+agent cycle or schedule is mid-flight**. The in-flight caller keeps
+seeing the pre-install tool surface; the next caller sees the new one.
+
+The old coarse `INSTALL_BLOCKED_BY_ACTIVE_CONSUMER` refusal is gone.
+The remaining gates are:
+
+- `TOOL_HAS_ACTIVE_CONSUMERS` — persistent leases on tools the skill
+  owns. Use `--force-revoke` to clear them.
+- `AUTONOMY_CAP_VIOLATION` — promotion target exceeds the source-tier
+  cap.
+- `PROVIDER_TIER_DOWNGRADE` — re-installing the same `(provider,
+  locator)` at a stricter trust tier would clamp a promoted tool's
+  current bucket. Use `--accept-cap-downgrade` to confirm.
+
+## Cross-tier re-install (Phase C)
+
+Re-installing the same `(provider, locator)` at a different trust
+tier:
+
+| Old → New tier | Cap behaviour |
+|---|---|
+| same-tier | no-op |
+| more permissive (e.g. `community → trusted`) | cap relaxed, current_bucket unchanged |
+| stricter (e.g. `trusted → escape`) | cap tightened; tools above new cap clamped to new cap, requires `--accept-cap-downgrade` confirmation; cascade event recorded under `skill_events.detail.kind = "autonomy_clamp"` |
+
+The same-`(provider, locator)`-different-version path doesn't trigger
+this rule — that's just an upgrade, no tier change.
 
 ## What's not in v1 (deferred)
 
 - `smithery`, `github-topic`, `awesome-list`, `tessl`,
   `huggingface-spaces` providers
-- Cross-tier always-more-restrictive cap downgrade UX
-  (`--accept-cap-downgrade`)
 - `tmx skill search` across providers
 - `tmx skill update <id>` (per-skill update; bulk `--all` cut)
 - `--check` on `tmx skill list`
 - Auto-update on a schedule
-- Generation pinning + two-phase cache GC tombstone (Phase C)
-- Dashboard `SkillManager.svelte` panel
 - `proxied` and `gateway` MCP lifecycle modes
 
 See the design spec for the full deferred list and rationale.

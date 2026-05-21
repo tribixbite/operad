@@ -25,9 +25,11 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { MemoryDb } from "../memory-db.js";
 import type { Logger } from "../log.js";
+import type { ToolExecutor } from "../tools.js";
 import { SkillStore } from "./store.js";
 
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+/** Lazy — see same rationale in claude-json.ts / settings-json.ts. */
+function settingsPath(): string { return join(homedir(), ".claude", "settings.json"); }
 const DEFAULT_TTL_HOURS = 168; // 7 days per §3.14
 const DEFAULT_RETAIN_PER_PAIR = 3;
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour — also the two-phase delay
@@ -65,6 +67,15 @@ export class SkillGc {
   private ttlSec: number;
   private retainPerPair: number;
   private intervalMs: number;
+  /**
+   * Optional ToolExecutor for in-memory generation pruning. When
+   * present, pass-2 also calls toolExecutor.pruneGeneration(n) after
+   * the SQL row is gone, dropping the per-generation tool map from
+   * memory. Without this, old generations leak until daemon restart
+   * (bounded by install rate × map size — small in practice but
+   * proper to clean up).
+   */
+  private toolExecutor: ToolExecutor | null = null;
 
   constructor(
     private db: MemoryDb,
@@ -75,6 +86,11 @@ export class SkillGc {
     this.ttlSec = (opts.cache_ttl_hours ?? DEFAULT_TTL_HOURS) * 3600;
     this.retainPerPair = opts.retain_per_pair ?? DEFAULT_RETAIN_PER_PAIR;
     this.intervalMs = opts.sweep_interval_ms ?? SWEEP_INTERVAL_MS;
+  }
+
+  /** Wire the ToolExecutor so pass-2 can prune in-memory generations. */
+  bindToolExecutor(te: ToolExecutor): void {
+    this.toolExecutor = te;
   }
 
   /** Begin periodic sweeping. Calls sweep() once immediately. */
@@ -252,7 +268,47 @@ export class SkillGc {
     } catch (err) {
       this.log.warn(`GC pass-2 query failed: ${(err as Error).message}`);
     }
+
+    // Phase C in-memory pruning. After the SQL+disk cleanup, drop any
+    // tool-executor generations that no longer have a backing
+    // skill_active_version row AND no skill_generation_refs pin. The
+    // current (live) generation is implicitly protected by
+    // pruneGeneration's own guard.
+    if (this.toolExecutor && deleted.length > 0) {
+      this.pruneOrphanGenerations();
+    }
     return deleted;
+  }
+
+  /**
+   * Drop every ToolExecutor generation that no SQL row + no pin
+   * references. Called after pass-2 because that's where rows
+   * disappear. Best-effort — failures are logged not raised.
+   */
+  private pruneOrphanGenerations(): void {
+    if (!this.toolExecutor) return;
+    const db = this.db.requireDb();
+    try {
+      const activeRows = db.prepare(
+        `SELECT DISTINCT generation FROM skill_active_version`,
+      ).all() as Array<{ generation: number }>;
+      const pinnedRows = db.prepare(
+        `SELECT DISTINCT generation FROM skill_generation_refs`,
+      ).all() as Array<{ generation: number }>;
+      const keep = new Set<number>([
+        ...activeRows.map((r) => r.generation),
+        ...pinnedRows.map((r) => r.generation),
+        this.toolExecutor.getCurrentGeneration(),
+      ]);
+      for (const gen of this.toolExecutor.listGenerations()) {
+        if (!keep.has(gen)) {
+          const pruned = this.toolExecutor.pruneGeneration(gen);
+          if (pruned) this.log.debug(`GC pruned in-memory generation ${gen}`);
+        }
+      }
+    } catch (err) {
+      this.log.warn(`GC pruneOrphanGenerations failed: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -261,9 +317,9 @@ export class SkillGc {
    * Claude Code is currently referencing.
    */
   private readSettingsSkillRefs(): Set<string> {
-    if (!existsSync(SETTINGS_PATH)) return new Set();
+    if (!existsSync(settingsPath())) return new Set();
     try {
-      const parsed = JSON.parse(readFileSync(SETTINGS_PATH, "utf8")) as Record<string, unknown>;
+      const parsed = JSON.parse(readFileSync(settingsPath(), "utf8")) as Record<string, unknown>;
       const skills = Array.isArray(parsed.skills) ? parsed.skills : [];
       return new Set(
         skills.filter((s): s is string => typeof s === "string"),

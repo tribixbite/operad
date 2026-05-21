@@ -430,6 +430,7 @@ export type IpcCommand =
       locator: string;
       version?: string;
       force_take_ownership?: boolean;
+      accept_cap_downgrade?: boolean;
     }
   | { cmd: "skill.uninstall"; id: string; force_revoke?: boolean }
   | { cmd: "skill.list"; provider?: string }

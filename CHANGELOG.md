@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Skill marketplace Phase C — concurrent installs via generation
+  discipline.** The coarse `INSTALL_BLOCKED_BY_ACTIVE_CONSUMER` gate
+  is replaced by per-generation shadow tool maps. When an OODA cycle
+  / scheduled run / workflow / REST call holds a ConsumerTracker
+  pin, the install transaction creates generation N+1 in parallel,
+  atomically swaps the live pointer on commit, and leaves generation
+  N resident until the pin releases. The background GC sweeper drops
+  unreferenced generations + their tool maps on the next interval.
+  ToolExecutor gains beginGenerationTransaction / commitGeneration /
+  abortGeneration / pruneGeneration; ConsumerTracker.acquire() returns
+  a PinHandle carrying the snapshotted generation; long-running
+  callers pass `pin.generation` to `toolExecutor.execute(..., gen)`
+  so concurrent installs don't tear the registry under their run.
+  Cross-tier re-install rule: stricter tier clamps the cap + requires
+  `--accept-cap-downgrade` if any tool's current bucket would exceed
+  the new cap; cascade is recorded under
+  `skill_events.detail.kind = autonomy_clamp`. New typed errors:
+  `PROVIDER_TIER_DOWNGRADE`. `OPERAD_CURATED_INDEX_URL_TEMPLATE` env
+  var lets mirrors / local file paths replace the GitHub raw URL.
+  4 crash-injection tests added in `skills-crash.test.ts` validate
+  the §3.15 5-store rollback contract under fault injection at
+  fetch + read; 263 tests total (was 256). End-user docs in
+  `docs/skills.md` updated with the new concurrent-install
+  guarantee.
+
 - **Skill / plugin marketplace (preview)** — multi-source aggregator
   for installing bundles of tools, agents, workflows, MCP servers, and
   SKILL.md context. Four day-1 providers: `git+url` (escape tier),

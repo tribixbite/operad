@@ -659,6 +659,7 @@ ${BOLD}NOTES${RESET}
       process.exit(1);
     }
     const force = subArgs.includes("--force-take-ownership");
+    const acceptCapDowngrade = subArgs.includes("--accept-cap-downgrade");
     // Plain http(s) or ssh URL → git+url provider. Future providers
     // will use a `provider:locator` form (e.g. `mcp-official:exa`).
     const { provider, locator: parsedLocator, version } = parseSkillLocator(locator);
@@ -669,6 +670,7 @@ ${BOLD}NOTES${RESET}
         locator: parsedLocator,
         version,
         force_take_ownership: force,
+        accept_cap_downgrade: acceptCapDowngrade,
       },
       300_000,
     );
