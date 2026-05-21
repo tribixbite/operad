@@ -393,26 +393,28 @@ describe("tool autonomy caps (Phase A1)", () => {
 // -- A2 ConsumerTracker -----------------------------------------------------
 
 describe("ConsumerTracker (Phase A2)", () => {
-  test("acquire returns release function; list reflects active pins", async () => {
+  test("acquire returns PinHandle; list reflects active pins", async () => {
     const { ConsumerTracker } = await import("../skills/consumer-tracker.js");
     const t = new ConsumerTracker(null);
     expect(t.size()).toBe(0);
-    const r1 = t.acquire("agent_cycle");
-    const r2 = t.acquire("scheduled_run", "sched-7");
+    const p1 = t.acquire("agent_cycle");
+    const p2 = t.acquire("scheduled_run", "sched-7");
     expect(t.size()).toBe(2);
     expect(t.list().some((x) => x.kind === "scheduled_run" && x.ref_id === "sched-7")).toBe(true);
-    r1();
+    // PinHandle.generation defaults to 0 when no generation supplier wired
+    expect(p1.generation).toBe(0);
+    p1.release();
     expect(t.size()).toBe(1);
-    r2();
+    p2.release();
     expect(t.size()).toBe(0);
   });
 
   test("release is idempotent — double-release is safe", async () => {
     const { ConsumerTracker } = await import("../skills/consumer-tracker.js");
     const t = new ConsumerTracker(null);
-    const r = t.acquire("workflow_run", "wf-1");
-    r();
-    r();   // no-op
+    const p = t.acquire("workflow_run", "wf-1");
+    p.release();
+    p.release();   // no-op
     expect(t.size()).toBe(0);
   });
 
@@ -422,6 +424,23 @@ describe("ConsumerTracker (Phase A2)", () => {
     t.acquire("rest_request");
     t.acquire("rest_request");
     expect(t.size()).toBe(2);
+  });
+
+  test("bindGeneration wires snapshot supplier; acquire snapshots current gen", async () => {
+    const { ConsumerTracker } = await import("../skills/consumer-tracker.js");
+    const t = new ConsumerTracker(null);
+    let currentGen = 5;
+    t.bindGeneration(() => currentGen);
+    const p1 = t.acquire("workflow_run", "wf-A");
+    expect(p1.generation).toBe(5);
+    currentGen = 7;
+    const p2 = t.acquire("workflow_run", "wf-B");
+    expect(p2.generation).toBe(7);
+    // p1 still snapshots gen 5 — the live pointer moved on but the
+    // pinned run keeps its older view.
+    expect(p1.generation).toBe(5);
+    p1.release();
+    p2.release();
   });
 });
 

@@ -55,6 +55,7 @@ import { gitUrlProvider } from "../skills/providers/git-url.js";
 import { ConsumerTracker } from "../skills/consumer-tracker.js";
 import type { Provider, ProviderModule } from "../skills/types.js";
 import { ToolExecutor } from "../tools.js";
+// WorkflowEngine import already done above (re-used in Phase C test).
 import { WorkflowEngine } from "../workflow.js";
 
 // -- Fixtures --------------------------------------------------------------
@@ -301,28 +302,50 @@ describe("Phase E.3 end-to-end install/use/uninstall (git+url + real disk)", () 
     expect(parsed.force_revoke_cascade?.leases?.length).toBeGreaterThanOrEqual(1);
   }, 30_000); // 30s — git clone of a tiny local repo is fast but be safe.
 
-  test("INSTALL_BLOCKED_BY_ACTIVE_CONSUMER fires when a pin is held", async () => {
-    // Re-install for this test.
-    await mgr.install("git+url", fixtureRepo, "v0.1.0");
-
-    const tracker2 = new ConsumerTracker(null);
-    const release = tracker2.acquire("agent_cycle", "ooda-1");
-
-    // Build a fresh mgr that uses tracker2 so we can hold a pin.
+  test("Phase C: install with a pin held succeeds; older gen survives until pin released", async () => {
+    // Build a fresh tool executor for this test so the generation
+    // counter starts clean and the previous test's installs don't
+    // pollute hasTool checks.
     const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+    const te2 = new ToolExecutor(memDb, log);
+    const we2 = new WorkflowEngine(memDb, log);
+    const tracker2 = new ConsumerTracker(null);
+    // Wire the tracker to te2's generation supplier — Phase C contract.
+    tracker2.bindGeneration(() => te2.getCurrentGeneration(), null);
+
     const mgr2 = new SkillManager(memDb, log, {
       providers: { "git+url": gitUrlProvider } as Record<Provider, ProviderModule>,
-      toolExecutor,
-      workflowEngine,
+      toolExecutor: te2,
+      workflowEngine: we2,
       hasActiveConsumers: () => tracker2.list(),
     });
 
-    await expect(mgr2.install("git+url", fixtureRepo, "v0.1.0"))
-      .rejects.toThrow(/INSTALL_BLOCKED_BY_ACTIVE_CONSUMER/);
+    // First install — establishes generation N.
+    const r1 = await mgr2.install("git+url", fixtureRepo, "v0.1.0");
+    const genAfterFirst = te2.getCurrentGeneration();
+    expect(te2.hasTool("e2e_echo")).toBe(true);
+    expect(te2.hasTool("e2e_echo", genAfterFirst)).toBe(true);
 
-    release();
-    // Cleanup the row we just installed.
-    const installed = mgr.list();
-    for (const s of installed) mgr.uninstall(s.id, { force_revoke: true });
+    // Acquire a pin BEFORE the second install — the pin snapshots
+    // the current gen (N). The agent that holds this pin will keep
+    // seeing the v1 tool surface.
+    const pin = tracker2.acquire("agent_cycle", "ooda-1");
+    expect(pin.generation).toBe(genAfterFirst);
+
+    // Uninstall the skill while the pin is held. Phase C: this MUST
+    // succeed (no INSTALL_BLOCKED_BY_ACTIVE_CONSUMER). The tool is
+    // removed from the live generation but stays in the pinned older
+    // generation.
+    mgr2.uninstall(r1.skill.id, { force_revoke: true });
+
+    // Live: tool gone.
+    expect(te2.hasTool("e2e_echo")).toBe(false);
+
+    // Pinned older generation: tool still visible. This is the
+    // round-3 reviewer's "atomic at DB layer but NOT at runtime layer"
+    // fix made real.
+    expect(te2.hasTool("e2e_echo", pin.generation)).toBe(true);
+
+    pin.release();
   }, 30_000);
 });

@@ -114,15 +114,12 @@ export class SkillManager {
       );
     }
 
-    // Step 1: active-consumer gate (§3.7 — A0 coarse refusal).
-    const consumers = this.opts.hasActiveConsumers();
-    if (consumers.length > 0) {
-      throw new SkillError(
-        "INSTALL_BLOCKED_BY_ACTIVE_CONSUMER",
-        `Skill install blocked: ${consumers.length} active tool consumer(s). Wait for them to finish, then retry.`,
-        { consumers },
-      );
-    }
+    // Phase C: the A0/A2 coarse INSTALL_BLOCKED_BY_ACTIVE_CONSUMER
+    // refusal is gone. Active consumers pin a generation snapshot at
+    // their acquire time; the install transaction creates generation
+    // N+1 in a pending state, swaps the live pointer on commit, and
+    // leaves N alive (with pinned tools) until the GC sweeper drops
+    // it. See spec §3.7.
 
     const providerMod = this.opts.providers[provider];
     if (!providerMod) {
@@ -137,6 +134,12 @@ export class SkillManager {
     // how far to unwind.
     const completedSteps: InstallStep[] = [];
     let skill: OperadSkill | null = null;
+    // Phase C: open a generation transaction NOW so registerInMemory
+    // writes into the pending generation rather than the live one.
+    // commitGeneration runs at step-8 success; abortGeneration in
+    // rollback drops the pending gen + its tool entries.
+    const pendingGen = this.opts.toolExecutor.beginGenerationTransaction();
+    completedSteps.push({ kind: "generation", gen: pendingGen });
 
     try {
       // Step 2: provider fetch + extract.
@@ -198,13 +201,17 @@ export class SkillManager {
         completedSteps.push({ kind: "settings_json", paths: skill.skill_mds.map((s) => s.bundle_path) });
       }
 
-      // Step 7: in-memory registries.
-      this.registerInMemory(skill);
+      // Step 7: in-memory registries — write into the pending
+      // generation so the live one stays serving in-flight consumers
+      // until the commit.
+      this.registerInMemory(skill, pendingGen);
       completedSteps.push({ kind: "register" });
 
-      // Step 8: SQLite COMMIT.
-      // Generation counter is unused in A0; pass 0.
-      this.store.commitInstall(skill, /* generation */ 0);
+      // Step 8: SQLite COMMIT + atomic generation swap. From this
+      // point new lookups resolve at pendingGen; existing pinned
+      // callers continue at their snapshotted older gen.
+      this.store.commitInstall(skill, pendingGen);
+      this.opts.toolExecutor.commitGeneration(pendingGen);
       completedSteps.push({ kind: "sqlite" });
 
       this.store.appendEvent(skill.id, "install", {
@@ -239,16 +246,13 @@ export class SkillManager {
       throw new SkillError("PROVIDER_NOT_FOUND", `skill not found: ${skillId}`);
     }
 
-    // Active-consumer gate also applies to uninstalls.
-    const consumers = this.opts.hasActiveConsumers();
-    if (consumers.length > 0) {
-      throw new SkillError(
-        "INSTALL_BLOCKED_BY_ACTIVE_CONSUMER",
-        `Skill uninstall blocked: ${consumers.length} active tool consumer(s).`,
-        { consumers },
-      );
-    }
-
+    // Phase C: dropped the coarse INSTALL_BLOCKED_BY_ACTIVE_CONSUMER
+    // gate. Uninstall removes the tool from the live generation only;
+    // pinned older generations still see it, so in-flight callers
+    // complete cleanly. The lease cascade below remains the real
+    // protection — if any agent holds a lease on a tool this skill
+    // owns, uninstall still refuses (or --force-revoke).
+    //
     // Phase A2 lease cascade — §3.12. Before removing any tool, check
     // whether agents hold active leases or scheduled runs reference
     // it. By default we refuse with TOOL_HAS_ACTIVE_CONSUMERS so the
@@ -292,7 +296,17 @@ export class SkillManager {
       writeSettingsJson({ remove: skill.skill_mds.map((s) => s.bundle_path) });
     }
 
-    this.unregisterInMemory(skill);
+    // Phase C: open a generation transaction so pinned older
+    // consumers keep seeing this skill's tools until they release.
+    // The new generation = clone(live) MINUS this skill's tools.
+    const pendingGen = this.opts.toolExecutor.beginGenerationTransaction();
+    try {
+      this.unregisterInMemory(skill, pendingGen);
+      this.opts.toolExecutor.commitGeneration(pendingGen);
+    } catch (err) {
+      this.opts.toolExecutor.abortGeneration(pendingGen);
+      throw err;
+    }
 
     this.store.markUninstalled(skillId);
     this.store.appendEvent(skillId, "uninstall", {
@@ -323,16 +337,16 @@ export class SkillManager {
 
   // -- internals -----------------------------------------------------------
 
-  private registerInMemory(skill: OperadSkill): void {
+  private registerInMemory(skill: OperadSkill, gen?: number): void {
     const { defaultBucketForTier } = require("./types.js") as typeof import("./types.js");
     const defaultBucket = defaultBucketForTier(skill.trust_tier);
 
     for (const t of skill.tools ?? []) {
-      this.opts.toolExecutor.registerTomlTools([t.toml]);
+      // Phase C: route into the pending generation (gen) if a
+      // transaction is open; otherwise the live one. The
+      // registerTomlTools overload threads gen down to register().
+      this.opts.toolExecutor.registerTomlTools([t.toml], gen);
       // Phase A1: write the autonomy cap row alongside registration.
-      // Default current_bucket = the tier's default bucket; max_bucket
-      // = the tier's cap (already computed in SkillToolEntry by the
-      // adapter via capForTier).
       this.db.setToolAutonomyCap(
         t.toml.name,
         t.autonomy_cap,
@@ -354,9 +368,13 @@ export class SkillManager {
     // manifest_json column and Phase A1 will wire seedSpecializations.
   }
 
-  private unregisterInMemory(skill: OperadSkill): void {
+  private unregisterInMemory(skill: OperadSkill, gen?: number): void {
     for (const t of skill.tools ?? []) {
-      this.opts.toolExecutor.unregister(t.toml.name);
+      // Phase C: route to the right generation. For uninstall via the
+      // happy path, gen is the (live) currentGen — but the same tool
+      // may also exist in older pinned generations, which we leave
+      // alone so in-flight runs keep working.
+      this.opts.toolExecutor.unregister(t.toml.name, gen);
       this.db.deleteToolAutonomyCap(t.toml.name);
     }
     // Workflows: WorkflowEngine.delete by name.
@@ -406,7 +424,11 @@ export class SkillManager {
         if (step.kind === "sqlite" && skill) {
           this.store.rollbackInstall(skill);
         } else if (step.kind === "register" && skill) {
-          this.unregisterInMemory(skill);
+          // Phase C: unregister from the pending generation, NOT live.
+          // Find the generation step (always first if present) and use
+          // it; fall back to live for legacy installs.
+          const genStep = completedSteps.find((s): s is Extract<InstallStep, { kind: "generation" }> => s.kind === "generation");
+          this.unregisterInMemory(skill, genStep?.gen);
         } else if (step.kind === "settings_json") {
           writeSettingsJson({ remove: step.paths });
         } else if (step.kind === "claude_json") {
@@ -420,6 +442,10 @@ export class SkillManager {
               this.log.warn(`Rollback cache rm failed at ${dir}: ${(e as Error).message}`);
             }
           }
+        } else if (step.kind === "generation") {
+          // Drop the pending generation. Idempotent — if commit
+          // already swapped it to live, abortGeneration is a no-op.
+          this.opts.toolExecutor.abortGeneration(step.gen);
         }
       } catch (err) {
         // Recovery itself failed — log a structured event so the user
@@ -445,6 +471,7 @@ export class SkillManager {
 // -- Step descriptors for rollback ----------------------------------------
 
 type InstallStep =
+  | { kind: "generation"; gen: number }
   | { kind: "fetch"; cacheParent: string; version: string }
   | { kind: "claude_json"; mcp_names: string[] }
   | { kind: "settings_json"; paths: string[] }

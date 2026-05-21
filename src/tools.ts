@@ -135,9 +135,28 @@ const CATEGORY_LEVEL: Record<ToolCategory, number> = {
 /**
  * Central tool registry and executor.
  * Manages tool registration, validation, permission checking, and execution.
+ *
+ * Phase C generation discipline:
+ *   • The registry holds N >= 1 generation-tagged tool maps. Most of
+ *     the time N=1: install/uninstall mutate the only map and the
+ *     single live pointer advances.
+ *   • Skill install acquires a generation transaction (clone the live
+ *     map, apply delta into the clone, atomic-swap the live pointer
+ *     on commit). Old generations stay resident as long as a
+ *     ConsumerTracker pin references them; the GC sweeper drops
+ *     unreferenced generations at the next interval.
+ *   • Lookups accept an optional generation arg; default is "live".
+ *     Callers that hold a pin pass their snapshotted generation so
+ *     mid-flight runs see a stable tool surface across a concurrent
+ *     skill install.
  */
 export class ToolExecutor {
-  private tools = new Map<string, ToolDef>();
+  /** Generation-keyed shadow maps. `generations.get(currentGen)` is "live". */
+  private generations = new Map<number, Map<string, ToolDef>>();
+  /** Highest generation ever produced — monotonic; never reused. */
+  private currentGen = 0;
+  /** Pending uncommitted generations (in-flight beginGenerationTransaction). */
+  private pending = new Set<number>();
   private providers: ToolProvider[] = [];
   private db: MemoryDb;
   private log: Logger;
@@ -145,31 +164,98 @@ export class ToolExecutor {
   constructor(db: MemoryDb, log: Logger) {
     this.db = db;
     this.log = log;
+    this.generations.set(0, new Map());
     this.registerBuiltinTools();
   }
 
-  /** Register a tool definition */
-  register(tool: ToolDef): void {
-    if (this.tools.has(tool.name)) {
-      this.log.warn(`Tool "${tool.name}" already registered, overwriting`);
-    }
-    // Default source to builtin if not specified
-    if (!tool.source) tool.source = "builtin";
-    this.tools.set(tool.name, tool);
+  /**
+   * Direct accessor for the current "live" generation. Used by
+   * ConsumerTracker.acquire() to snapshot at pin time.
+   */
+  getCurrentGeneration(): number {
+    return this.currentGen;
+  }
+
+  /** All generation ids that still hold a tool map (live + pinned). */
+  listGenerations(): number[] {
+    return Array.from(this.generations.keys()).sort((a, b) => a - b);
   }
 
   /**
-   * Unregister a tool by name. Used by the skill marketplace to roll
-   * back partial installs (§3.15 step-5 compensation) and to apply
-   * uninstalls. Idempotent; returns true if the tool existed.
+   * Begin a generation transaction. Clones the live map into a new
+   * generation N+1 (or current_max+1 if there are pending ones).
+   * Returns the new generation number — caller must call either
+   * `commitGeneration(n)` or `abortGeneration(n)`.
    */
-  unregister(name: string): boolean {
-    return this.tools.delete(name);
+  beginGenerationTransaction(): number {
+    const newGen = Math.max(this.currentGen, ...this.pending) + 1;
+    const liveMap = this.generations.get(this.currentGen)!;
+    this.generations.set(newGen, new Map(liveMap));
+    this.pending.add(newGen);
+    return newGen;
   }
 
-  /** Quick existence check — used by the skill conflict pre-flight. */
-  hasTool(name: string): boolean {
-    return this.tools.has(name);
+  /** Atomic flip — the new generation becomes "live". */
+  commitGeneration(gen: number): void {
+    if (!this.pending.has(gen)) {
+      throw new Error(`commitGeneration: ${gen} not pending`);
+    }
+    this.pending.delete(gen);
+    this.currentGen = gen;
+  }
+
+  /** Discard a pending generation (rollback path). */
+  abortGeneration(gen: number): void {
+    if (!this.pending.has(gen)) return; // idempotent
+    this.pending.delete(gen);
+    this.generations.delete(gen);
+  }
+
+  /**
+   * Garbage-collect a generation map. Caller MUST verify no
+   * ConsumerTracker pin references it before calling. Refuses to
+   * delete the live generation. Idempotent.
+   */
+  pruneGeneration(gen: number): boolean {
+    if (gen === this.currentGen) return false;
+    if (this.pending.has(gen)) return false;
+    return this.generations.delete(gen);
+  }
+
+  /**
+   * Register a tool into the live generation OR into a specific
+   * pending generation (passed in `gen`). Builtin registrations
+   * at constructor time and provider-driven boot registrations both
+   * write to the live (currentGen) map directly; skill installs
+   * write into a pending transaction.
+   */
+  register(tool: ToolDef, gen?: number): void {
+    const target = gen ?? this.currentGen;
+    const map = this.generations.get(target);
+    if (!map) throw new Error(`register: unknown generation ${target}`);
+    if (map.has(tool.name)) {
+      this.log.warn(`Tool "${tool.name}" already registered (gen ${target}), overwriting`);
+    }
+    if (!tool.source) tool.source = "builtin";
+    map.set(tool.name, tool);
+  }
+
+  /**
+   * Unregister a tool by name from the live generation or a specific
+   * pending one. Used by skill uninstall and rollback paths.
+   * Idempotent; returns true if the tool existed in the target gen.
+   */
+  unregister(name: string, gen?: number): boolean {
+    const target = gen ?? this.currentGen;
+    const map = this.generations.get(target);
+    if (!map) return false;
+    return map.delete(name);
+  }
+
+  /** Quick existence check at the live (or specified) generation. */
+  hasTool(name: string, gen?: number): boolean {
+    const map = this.generations.get(gen ?? this.currentGen);
+    return map?.has(name) ?? false;
   }
 
   /**
@@ -202,8 +288,14 @@ export class ToolExecutor {
   /**
    * Register tools from TOML [[tool]] config sections.
    * Each tool is a shell command with parameter substitution.
+   *
+   * Phase C: the optional `gen` argument routes the registration
+   * into a specific generation map. Boot-time tool config
+   * registrations go to the live generation (gen=undefined);
+   * skill-installs route to a pending generation so the live map
+   * stays unchanged for in-flight consumers until the commit.
    */
-  registerTomlTools(tools: TomlToolConfig[]): void {
+  registerTomlTools(tools: TomlToolConfig[], gen?: number): void {
     for (const t of tools) {
       if (!t.name || !t.command) {
         this.log.warn(`TOML tool missing name or command, skipping`);
@@ -258,18 +350,20 @@ export class ToolExecutor {
             };
           }
         },
-      });
+      }, gen);
     }
   }
 
-  /** Get a tool by name */
-  getTool(name: string): ToolDef | undefined {
-    return this.tools.get(name);
+  /** Get a tool by name. Defaults to the live generation. */
+  getTool(name: string, gen?: number): ToolDef | undefined {
+    const map = this.generations.get(gen ?? this.currentGen);
+    return map?.get(name);
   }
 
-  /** Get all registered tools */
-  getAllTools(): ToolDef[] {
-    return Array.from(this.tools.values());
+  /** Get all registered tools at the given generation (default: live). */
+  getAllTools(gen?: number): ToolDef[] {
+    const map = this.generations.get(gen ?? this.currentGen);
+    return map ? Array.from(map.values()) : [];
   }
 
   /** Get tools filtered by source */
@@ -330,15 +424,24 @@ export class ToolExecutor {
   }
 
   /**
-   * Execute a tool by name with validated parameters.
-   * Logs execution to the audit trail.
+   * Execute a tool by name with validated parameters. Logs execution
+   * to the audit trail.
+   *
+   * Phase C: the optional `gen` argument resolves the tool against a
+   * specific generation snapshot. Long-running callers (OODA cycles,
+   * scheduled runs, workflow runs) snapshot their generation at
+   * pin-acquire time and pass it here so a concurrent skill install
+   * can't pull the rug. When omitted, defaults to the live generation
+   * — appropriate for one-shot REST/IPC tool calls that don't span
+   * the install transaction window.
    */
   async execute(
     toolName: string,
     params: Record<string, unknown>,
     ctx: ToolContext,
+    gen?: number,
   ): Promise<ToolResult> {
-    const tool = this.tools.get(toolName);
+    const tool = this.getTool(toolName, gen);
     if (!tool) {
       return {
         success: false,

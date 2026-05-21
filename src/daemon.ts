@@ -1345,6 +1345,16 @@ export class Daemon {
       // marketplace-design.md §9.
       if (this.skillsPreviewEnabled && this.toolExecutor) {
         try {
+          // Phase C: bind the consumer tracker to the toolExecutor's
+          // generation supplier so pin.acquire() snapshots the
+          // current generation + persists to skill_generation_refs.
+          // The GC pass-2 sweeper reads that table to know what's
+          // still pinned across daemon restarts.
+          this.consumerTracker.bindGeneration(
+            () => this.toolExecutor!.getCurrentGeneration(),
+            this.memoryDb,
+          );
+
           const { SkillManager } = await import("./skills/index.js");
           const { gitUrlProvider } = await import("./skills/providers/git-url.js");
           const { mcpOfficialProvider } = await import("./skills/providers/mcp-official.js");

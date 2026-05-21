@@ -215,8 +215,15 @@ export class AgentEngine {
     log.info("Running OODA cycle for master-controller");
     this.ctx.broadcast("ooda_status", { running: true });
 
-    // Phase A2 consumer pin — released in finally below.
-    const releasePin = this.ctx.getConsumerTracker().acquire("agent_cycle");
+    // Phase A2 consumer pin — released in finally below. The
+    // returned handle carries the snapshotted ToolExecutor generation
+    // (Phase C); we don't currently route it through the SDK-driven
+    // OODA path because the SDK owns its own tool invocation, but
+    // future direct toolExecutor.execute calls in this method should
+    // pass `pin.generation` as the trailing arg to honour the
+    // snapshot.
+    const pin = this.ctx.getConsumerTracker().acquire("agent_cycle");
+    const releasePin = pin.release;
 
     try {
       const masterAgent = agentConfigs.find((a) => a.name === "master-controller");
@@ -943,13 +950,13 @@ export class AgentEngine {
       return { success: false };
     }
 
-    const releasePin = this.ctx.getConsumerTracker().acquire(
+    const pin = this.ctx.getConsumerTracker().acquire(
       "scheduled_run", String(schedule.id),
     );
     try {
       return await this._executeScheduledRunInner(schedule);
     } finally {
-      releasePin();
+      pin.release();
     }
   }
 
