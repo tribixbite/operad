@@ -628,6 +628,134 @@ describe("operad-curated provider", () => {
   });
 });
 
+// -- E.1 GC sweeper --------------------------------------------------------
+
+describe("SkillGc sweeper (Phase E.1)", () => {
+  function makeGcEnv() {
+    const sql = new Database(":memory:");
+    sql.exec(`
+      CREATE TABLE skills (
+        id TEXT PRIMARY KEY, name TEXT, description TEXT,
+        provider TEXT NOT NULL, locator TEXT NOT NULL, version TEXT NOT NULL,
+        fetched_url TEXT, fetched_commit_sha TEXT,
+        fetched_archive_sha256 TEXT, fetched_at INTEGER,
+        trust_tier TEXT, enabled INTEGER, tombstoned INTEGER DEFAULT 0,
+        manifest_json TEXT, installed_at INTEGER NOT NULL,
+        UNIQUE(provider, locator, version)
+      );
+      CREATE TABLE skill_active_version (
+        provider TEXT, locator TEXT, version TEXT, generation INTEGER,
+        PRIMARY KEY (provider, locator)
+      );
+      CREATE TABLE skill_generation_refs (
+        generation INTEGER, ref_kind TEXT, ref_id TEXT,
+        acquired_at INTEGER, PRIMARY KEY (generation, ref_kind, ref_id)
+      );
+      CREATE TABLE skill_cache_pending_delete (
+        provider TEXT, locator TEXT, version TEXT, marked_at INTEGER,
+        PRIMARY KEY (provider, locator, version)
+      );
+    `);
+    return sql;
+  }
+
+  test("pass-1 marks tombstoned rows beyond the retain-floor", async () => {
+    const sql = makeGcEnv();
+    const now = Math.floor(Date.now() / 1000);
+    // 4 tombstoned versions for the same (provider, locator) — newest
+    // 3 protected, oldest swept.
+    for (let i = 0; i < 4; i++) {
+      sql.prepare(`INSERT INTO skills
+          (id, provider, locator, version, manifest_json, installed_at,
+           fetched_archive_sha256, tombstoned)
+        VALUES (?, ?, ?, ?, '{}', ?, 'x', 1)`).run(
+        `git+url:r@v${i}`, "git+url", "r", `v${i}`, now - i * 100,
+      );
+    }
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+    const { SkillStore } = await import("../skills/store.js");
+    const store = new SkillStore(db, log);
+    const { SkillGc } = await import("../skills/gc.js");
+    const gc = new SkillGc(db, log, store, { retain_per_pair: 3 });
+    const { marked } = gc.runOnce("manual");
+    expect(marked.length).toBeGreaterThanOrEqual(1);
+    // Verify only the oldest version got marked.
+    const pending = sql.prepare(`SELECT version FROM skill_cache_pending_delete`).all() as any[];
+    expect(pending.map((p) => p.version).sort()).toEqual(["v3"]);
+    sql.close();
+  });
+
+  test("pass-2 deletes rows whose pending entry is older than the interval", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600; // 2h ago
+    sql.prepare(`INSERT INTO skills
+        (id, provider, locator, version, manifest_json, installed_at,
+         fetched_archive_sha256, tombstoned)
+      VALUES (?, ?, ?, ?, '{}', ?, 'x', 1)`).run(
+      "git+url:r@v1", "git+url", "r", "v1", old,
+    );
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES (?, ?, ?, ?)`).run(
+      "git+url", "r", "v1", old,
+    );
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+    const { SkillStore } = await import("../skills/store.js");
+    const store = new SkillStore(db, log);
+    const { SkillGc } = await import("../skills/gc.js");
+    const gc = new SkillGc(db, log, store, { sweep_interval_ms: 60 * 60 * 1000 });
+    const deleted = gc.runPass2();
+    expect(deleted).toHaveLength(1);
+    const remaining = sql.prepare(`SELECT count(*) AS n FROM skills`).get() as any;
+    expect(remaining.n).toBe(0);
+    const remPending = sql.prepare(`SELECT count(*) AS n FROM skill_cache_pending_delete`).get() as any;
+    expect(remPending.n).toBe(0);
+    sql.close();
+  });
+
+  test("pass-2 leaves rows pinned by active generation refs alone", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600;
+    sql.prepare(`INSERT INTO skills
+        (id, provider, locator, version, manifest_json, installed_at,
+         fetched_archive_sha256, tombstoned)
+      VALUES (?, ?, ?, ?, '{}', ?, 'x', 0)`).run(
+      "git+url:r@v1", "git+url", "r", "v1", old,
+    );
+    sql.prepare(`INSERT INTO skill_active_version
+        (provider, locator, version, generation) VALUES (?, ?, ?, ?)`).run(
+      "git+url", "r", "v1", 7,
+    );
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES (?, ?, ?, ?)`).run(
+      "git+url", "r", "v1", old,
+    );
+    // Phase C pin held against generation 7.
+    sql.prepare(`INSERT INTO skill_generation_refs
+        (generation, ref_kind, ref_id, acquired_at) VALUES (?, ?, ?, ?)`).run(
+      7, "workflow_run", "wf-99", Math.floor(Date.now() / 1000),
+    );
+    const { MemoryDb } = await import("../memory-db.js");
+    const db = Object.create(MemoryDb.prototype);
+    db.requireDb = () => sql;
+    const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+    const { SkillStore } = await import("../skills/store.js");
+    const store = new SkillStore(db, log);
+    const { SkillGc } = await import("../skills/gc.js");
+    const gc = new SkillGc(db, log, store, { sweep_interval_ms: 60 * 60 * 1000 });
+    const deleted = gc.runPass2();
+    expect(deleted).toHaveLength(0);
+    const stillThere = sql.prepare(`SELECT count(*) AS n FROM skills`).get() as any;
+    expect(stillThere.n).toBe(1);
+    sql.close();
+  });
+});
+
 // -- store smoke test (in-memory DB, basic insert/list roundtrip) -----------
 
 describe("SkillStore round-trip", () => {

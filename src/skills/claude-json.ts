@@ -47,8 +47,13 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { SkillError, type SkillMcpEntry } from "./types.js";
 
-const CLAUDE_JSON_PATH = join(homedir(), ".claude.json");
-const LOCK_PATH = join(homedir(), ".claude.json.lock");
+/**
+ * `~/.claude.json` and its lockfile, resolved lazily so test harnesses
+ * that override $HOME after module import see the new path. Production
+ * code calls these once per write; the cost is a function call.
+ */
+function claudeJsonPath(): string { return join(homedir(), ".claude.json"); }
+function lockPath(): string { return join(homedir(), ".claude.json.lock"); }
 
 /**
  * What we record in `~/.claude.json.operad_managed.<name>` so the writer
@@ -97,7 +102,7 @@ export interface ClaudeJsonWriteOpts {
  */
 export function writeClaudeJson(opts: ClaudeJsonWriteOpts): void {
   ensureFileExists();
-  withFlock(LOCK_PATH, () => attemptWrite(opts, /* retriesLeft */ 1));
+  withFlock(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
 }
 
 /**
@@ -110,8 +115,8 @@ function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): void {
 
   // Re-stat just before rename. We want to catch any write that
   // landed between our read and our planned rename.
-  const post = statSync(CLAUDE_JSON_PATH, { bigint: true });
-  const postSha = sha256Of(readFileSync(CLAUDE_JSON_PATH));
+  const post = statSync(claudeJsonPath(), { bigint: true });
+  const postSha = sha256Of(readFileSync(claudeJsonPath()));
   if (post.mtimeNs !== snap.mtime_ns || postSha !== snap.sha256) {
     if (retriesLeft > 0) {
       attemptWrite(opts, retriesLeft - 1);
@@ -120,7 +125,7 @@ function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): void {
     throw new SkillError(
       "CLAUDE_JSON_RACED",
       "~/.claude.json was rewritten by another process between operad's read and write. Retry the install after closing the conflicting client.",
-      { path: CLAUDE_JSON_PATH },
+      { path: claudeJsonPath() },
     );
   }
 
@@ -226,8 +231,8 @@ function serializeMcpEntry(entry: SkillMcpEntry): Record<string, unknown> {
 }
 
 function readSnapshot(): ReadSnapshot {
-  const body = readFileSync(CLAUDE_JSON_PATH);
-  const st = statSync(CLAUDE_JSON_PATH, { bigint: true });
+  const body = readFileSync(claudeJsonPath());
+  const st = statSync(claudeJsonPath(), { bigint: true });
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(body.toString()) as Record<string, unknown>;
@@ -235,22 +240,22 @@ function readSnapshot(): ReadSnapshot {
     throw new SkillError(
       "CLAUDE_JSON_MALFORMED",
       `Failed to parse ~/.claude.json: ${(err as Error).message}. operad will not touch a malformed file; please fix it manually before retrying.`,
-      { path: CLAUDE_JSON_PATH },
+      { path: claudeJsonPath() },
     );
   }
   return { parsed, mtime_ns: st.mtimeNs, sha256: sha256Of(body) };
 }
 
 function writeAtomic(obj: Record<string, unknown>): void {
-  const tmp = `${CLAUDE_JSON_PATH}.operad-tmp.${process.pid}`;
+  const tmp = `${claudeJsonPath()}.operad-tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
-  renameSync(tmp, CLAUDE_JSON_PATH);
+  renameSync(tmp, claudeJsonPath());
 }
 
 function ensureFileExists(): void {
-  if (!existsSync(CLAUDE_JSON_PATH)) {
-    mkdirSync(dirname(CLAUDE_JSON_PATH), { recursive: true });
-    writeFileSync(CLAUDE_JSON_PATH, JSON.stringify({}, null, 2), { mode: 0o600 });
+  if (!existsSync(claudeJsonPath())) {
+    mkdirSync(dirname(claudeJsonPath()), { recursive: true });
+    writeFileSync(claudeJsonPath(), JSON.stringify({}, null, 2), { mode: 0o600 });
   }
 }
 

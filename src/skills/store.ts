@@ -18,15 +18,14 @@ import {
   sanitizeLocator,
 } from "./types.js";
 
-/** Root for all skill cache directories. */
-export const SKILLS_CACHE_ROOT = join(
-  homedir(),
-  ".local",
-  "share",
-  "operad",
-  "skills",
-  "cache",
-);
+/**
+ * Root for all skill cache directories. Computed lazily because some
+ * test harnesses override $HOME after this module is imported — a
+ * top-level `const` evaluation would capture the pre-override path.
+ */
+export function skillsCacheRoot(): string {
+  return join(homedir(), ".local", "share", "operad", "skills", "cache");
+}
 
 /**
  * Row shape returned by the read queries. `manifest_json` is parsed
@@ -58,8 +57,11 @@ interface ActiveVersionRow {
 }
 
 export class SkillStore {
+  private cacheRoot: string;
+
   constructor(private db: MemoryDb, private log: Logger) {
-    mkdirSync(SKILLS_CACHE_ROOT, { recursive: true, mode: 0o700 });
+    this.cacheRoot = skillsCacheRoot();
+    mkdirSync(this.cacheRoot, { recursive: true, mode: 0o700 });
   }
 
   /**
@@ -67,7 +69,7 @@ export class SkillStore {
    * land on disk. Includes sanitization to prevent path traversal.
    */
   cacheDir(provider: Provider, locator: string, version: string): string {
-    return join(SKILLS_CACHE_ROOT, provider, sanitizeLocator(locator), version);
+    return join(this.cacheRoot, provider, sanitizeLocator(locator), version);
   }
 
   /**
@@ -76,7 +78,7 @@ export class SkillStore {
    * (typically `<cacheParent>/<version>/`).
    */
   cacheParent(provider: Provider, locator: string): string {
-    return join(SKILLS_CACHE_ROOT, provider, sanitizeLocator(locator));
+    return join(this.cacheRoot, provider, sanitizeLocator(locator));
   }
 
   /**

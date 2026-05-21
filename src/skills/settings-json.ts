@@ -29,8 +29,13 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { SkillError } from "./types.js";
 
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
-const LOCK_PATH = join(homedir(), ".claude", "settings.json.lock");
+/**
+ * Lazy paths — same rationale as claude-json's. Test harnesses
+ * override $HOME after module import, so a top-level `const` would
+ * capture the pre-override path.
+ */
+function settingsPath(): string { return join(homedir(), ".claude", "settings.json"); }
+function lockPath(): string { return join(homedir(), ".claude", "settings.json.lock"); }
 
 export interface SettingsJsonWriteOpts {
   /** Absolute bundle paths to add. */
@@ -47,15 +52,15 @@ interface ReadSnapshot {
 
 export function writeSettingsJson(opts: SettingsJsonWriteOpts): void {
   ensureFileExists();
-  withLockfile(LOCK_PATH, () => attemptWrite(opts, /* retriesLeft */ 1));
+  withLockfile(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
 }
 
 function attemptWrite(opts: SettingsJsonWriteOpts, retriesLeft: number): void {
   const snap = readSnapshot();
   const next = applyEdits(snap.parsed, opts);
 
-  const post = statSync(SETTINGS_PATH, { bigint: true });
-  const postSha = sha256Of(readFileSync(SETTINGS_PATH));
+  const post = statSync(settingsPath(), { bigint: true });
+  const postSha = sha256Of(readFileSync(settingsPath()));
   if (post.mtimeNs !== snap.mtime_ns || postSha !== snap.sha256) {
     if (retriesLeft > 0) {
       attemptWrite(opts, retriesLeft - 1);
@@ -64,7 +69,7 @@ function attemptWrite(opts: SettingsJsonWriteOpts, retriesLeft: number): void {
     throw new SkillError(
       "CLAUDE_JSON_RACED",
       "~/.claude/settings.json was rewritten by another process between operad's read and write. Retry the install after closing the conflicting client.",
-      { path: SETTINGS_PATH },
+      { path: settingsPath() },
     );
   }
 
@@ -94,8 +99,8 @@ export function applyEdits(
 }
 
 function readSnapshot(): ReadSnapshot {
-  const body = readFileSync(SETTINGS_PATH);
-  const st = statSync(SETTINGS_PATH, { bigint: true });
+  const body = readFileSync(settingsPath());
+  const st = statSync(settingsPath(), { bigint: true });
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(body.toString()) as Record<string, unknown>;
@@ -103,22 +108,22 @@ function readSnapshot(): ReadSnapshot {
     throw new SkillError(
       "CLAUDE_JSON_MALFORMED",
       `Failed to parse ~/.claude/settings.json: ${(err as Error).message}.`,
-      { path: SETTINGS_PATH },
+      { path: settingsPath() },
     );
   }
   return { parsed, mtime_ns: st.mtimeNs, sha256: sha256Of(body) };
 }
 
 function writeAtomic(obj: Record<string, unknown>): void {
-  const tmp = `${SETTINGS_PATH}.operad-tmp.${process.pid}`;
+  const tmp = `${settingsPath()}.operad-tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
-  renameSync(tmp, SETTINGS_PATH);
+  renameSync(tmp, settingsPath());
 }
 
 function ensureFileExists(): void {
-  if (!existsSync(SETTINGS_PATH)) {
-    mkdirSync(dirname(SETTINGS_PATH), { recursive: true });
-    writeFileSync(SETTINGS_PATH, JSON.stringify({}, null, 2), { mode: 0o600 });
+  if (!existsSync(settingsPath())) {
+    mkdirSync(dirname(settingsPath()), { recursive: true });
+    writeFileSync(settingsPath(), JSON.stringify({}, null, 2), { mode: 0o600 });
   }
 }
 

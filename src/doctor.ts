@@ -40,6 +40,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResul
 
   results.push(...checkPlatformSpecific(platformId));
   results.push(await checkDatabase(platformId));
+  results.push(...checkSkillMarketplace());
 
   return results;
 }
@@ -886,4 +887,172 @@ function checkAndroidProtections(): CheckResult[] {
   }
 
   return results;
+}
+
+// ── Skill marketplace probes ──────────────────────────────────────────────
+//
+// All probes here are `warn` not `fail`: the marketplace is a preview
+// surface gated behind --enable-skills-preview, so a broken state
+// shouldn't block daemon boot. Surfacing the issue early lets users
+// fix it before they hit it at install time.
+
+function checkSkillMarketplace(): CheckResult[] {
+  const results: CheckResult[] = [];
+  results.push(checkClaudeJsonConsistency());
+  results.push(checkDaemonIdLocation());
+  results.push(checkClaudeCodeForSkillMds());
+  return results;
+}
+
+/**
+ * Validate the `operad_managed` array in ~/.claude.json against the
+ * mcpServers map: every operad_managed name should have a matching
+ * mcpServers entry. Orphans are GC'd on next install, but a doctor
+ * warning surfaces the drift early.
+ */
+function checkClaudeJsonConsistency(): CheckResult {
+  const path = join(homedir(), ".claude.json");
+  if (!existsSync(path)) {
+    return {
+      name: "skills.claude_json",
+      status: "ok",
+      message: "~/.claude.json absent (will be created on first MCP install)",
+    };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const mcpServers = (parsed.mcpServers as Record<string, unknown>) ?? {};
+    const operadManaged = (parsed.operad_managed as Record<string, unknown>) ?? {};
+    const orphans: string[] = [];
+    for (const name of Object.keys(operadManaged)) {
+      if (!(name in mcpServers)) orphans.push(name);
+    }
+    if (orphans.length === 0) {
+      const count = Object.keys(operadManaged).length;
+      return {
+        name: "skills.claude_json",
+        status: "ok",
+        message: `~/.claude.json clean (${count} operad-managed entries)`,
+      };
+    }
+    return {
+      name: "skills.claude_json",
+      status: "warn",
+      message: `~/.claude.json has ${orphans.length} orphan operad_managed entries: ${orphans.join(", ")}`,
+      fix: "These will be GC'd on the next skill install. To clean immediately, run any `tmx skill add` / `tmx skill remove` command.",
+    };
+  } catch (err) {
+    return {
+      name: "skills.claude_json",
+      status: "warn",
+      message: `~/.claude.json parse failed: ${(err as Error).message}`,
+      fix: "Fix the JSON manually. operad refuses to touch a malformed claude.json (CLAUDE_JSON_MALFORMED).",
+    };
+  }
+}
+
+/**
+ * Confirm the daemon_id is provisioned at a per-machine path, not in
+ * a sync-prone location. The skills/daemon-id.ts precedence is
+ * $XDG_RUNTIME_DIR → $PREFIX/var/lib (Termux) → ~/.local/share
+ * fallback. The fallback is exactly what Syncthing syncs by default.
+ */
+function checkDaemonIdLocation(): CheckResult {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  const prefix = process.env.PREFIX;
+  const candidates = [
+    xdg && xdg.startsWith("/") ? join(xdg, "operad", "daemon-id") : null,
+    prefix && prefix.includes("com.termux") ? join(prefix, "var", "lib", "operad", "daemon-id") : null,
+    join(homedir(), ".local", "share", "operad", "daemon-id"),
+  ].filter(Boolean) as string[];
+
+  const existing = candidates.find((p) => existsSync(p));
+  if (!existing) {
+    return {
+      name: "skills.daemon_id",
+      status: "ok",
+      message: "daemon-id not yet provisioned (will be created on first SkillManager boot)",
+    };
+  }
+  const isSyncFallback = existing.startsWith(join(homedir(), ".local", "share"));
+  if (!isSyncFallback) {
+    return {
+      name: "skills.daemon_id",
+      status: "ok",
+      message: `daemon-id at ${existing} (per-machine, safe)`,
+    };
+  }
+  return {
+    name: "skills.daemon_id",
+    status: "warn",
+    message: `daemon-id stored at ${existing} — this path syncs by default under most dotfile tools`,
+    fix: "Add 'operad/daemon-id' to your Syncthing / chezmoi / Mutagen exclusion list to prevent two-daemon ownership conflicts in ~/.claude.json. Alternatively, set $XDG_RUNTIME_DIR or run inside Termux for an automatically per-machine path.",
+  };
+}
+
+/**
+ * If skills with SKILL.md bundles are installed, verify that the
+ * Claude Code version on PATH is >= 2.0 (the threshold at which the
+ * `skills` array in ~/.claude/settings.json is supported per the
+ * spec §3.8).
+ */
+function checkClaudeCodeForSkillMds(): CheckResult {
+  // Cheap heuristic: if ~/.claude/settings.json has skills[], assume
+  // someone is using the feature. Probe for `claude --version`.
+  const settingsPath = join(homedir(), ".claude", "settings.json");
+  if (!existsSync(settingsPath)) {
+    return {
+      name: "skills.claude_code_skill_md",
+      status: "ok",
+      message: "No ~/.claude/settings.json yet — SKILL.md delivery untested",
+    };
+  }
+  let hasSkillMds = false;
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    hasSkillMds = Array.isArray(parsed.skills) && (parsed.skills as unknown[]).length > 0;
+  } catch {
+    // Don't surface malformed settings here; checkClaudeJsonConsistency
+    // already covers the broader theme.
+  }
+  if (!hasSkillMds) {
+    return {
+      name: "skills.claude_code_skill_md",
+      status: "ok",
+      message: "No SKILL.md bundles registered — version check skipped",
+    };
+  }
+  const result = spawnSync("claude", ["--version"], { encoding: "utf8", timeout: 3000 });
+  if (result.error || result.status !== 0) {
+    return {
+      name: "skills.claude_code_skill_md",
+      status: "warn",
+      message: "claude CLI not on PATH but SKILL.md bundles are registered — Claude Code won't see them",
+      fix: "Install Claude Code: npm i -g @anthropic-ai/claude-code (>= 2.0).",
+    };
+  }
+  // Parse the version line; expects "X.Y.Z" or similar.
+  const stdout = (result.stdout ?? "").toString();
+  const versionMatch = stdout.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+  if (!versionMatch) {
+    return {
+      name: "skills.claude_code_skill_md",
+      status: "warn",
+      message: `claude --version returned unparseable output: ${stdout.trim().slice(0, 80)}`,
+    };
+  }
+  const major = parseInt(versionMatch[1], 10);
+  if (major < 2) {
+    return {
+      name: "skills.claude_code_skill_md",
+      status: "warn",
+      message: `Claude Code v${major}.${versionMatch[2]}.${versionMatch[3]} < 2.0; SKILL.md skills[] field not supported`,
+      fix: "Upgrade Claude Code: npm i -g @anthropic-ai/claude-code@latest",
+    };
+  }
+  return {
+    name: "skills.claude_code_skill_md",
+    status: "ok",
+    message: `Claude Code v${major}.${versionMatch[2]}.${versionMatch[3]} supports SKILL.md delivery`,
+  };
 }

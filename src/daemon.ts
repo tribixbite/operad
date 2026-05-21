@@ -178,6 +178,7 @@ export class Daemon {
   private scheduleEngine: ScheduleEngine | null = null;
   private workflowEngine: import("./workflow.js").WorkflowEngine | null = null;
   private skillManager: import("./skills/index.js").SkillManager | null = null;
+  private skillGc: import("./skills/gc.js").SkillGc | null = null;
   private consumerTracker: import("./skills/consumer-tracker.js").ConsumerTracker;
   /**
    * Whether the skill marketplace is enabled. Set from the
@@ -607,6 +608,11 @@ export class Daemon {
       this.scheduleEngine.stop();
       this.scheduleEngine = null;
     }
+    if (this.skillGc) {
+      this.skillGc.stop();
+      this.skillGc = null;
+    }
+    this.consumerTracker?.shutdown();
 
     // Cancel pending auto-tabs and auto-restart timers
     if (this.autoTabsTimer) {
@@ -1378,6 +1384,15 @@ export class Daemon {
               ];
             },
           });
+          // Background cache sweeper (§3.14). Runs hourly. Honours
+          // both the retain-per-pair floor and ~/.claude/settings.json
+          // skill refs to avoid GC'ing in-use SKILL.md bundles.
+          const { SkillGc } = await import("./skills/gc.js");
+          this.skillGc = new SkillGc(
+            this.memoryDb, this.log, this.skillManager.store,
+          );
+          this.skillGc.start();
+
           this.log.info("Skill marketplace initialized (preview)");
         } catch (err) {
           this.log.error(`Skill marketplace init failed: ${err}`);
