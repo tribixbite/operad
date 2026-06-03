@@ -657,9 +657,24 @@ export class RestHandler {
           }
         }
         case "conversation": {
-          if (!name) return { status: 400, data: { error: "Session name required" } };
-          const convPath = this.ctx.resolveSessionPath(name);
-          if (!convPath) return { status: 400, data: { error: `Session '${name}' has no path` } };
+          // Two resolution modes:
+          //  - by operad session name (live sessions): resolveSessionPath.
+          //  - by explicit `?path=` (history view, e.g. the Prompt Library
+          //    opening a conversation for a project that has no running
+          //    session). The path maps to its mangled ~/.claude/projects dir
+          //    inside getConversationPage — local, read-only history.
+          const pathParam = queryParams.get("path");
+          const convPath = pathParam
+            ? pathParam
+            : name
+              ? this.ctx.resolveSessionPath(name)
+              : null;
+          if (!convPath) {
+            return {
+              status: 400,
+              data: { error: pathParam ? "Invalid path" : `Session '${name}' has no path` },
+            };
+          }
           const beforeUuid = queryParams.get("before") ?? undefined;
           const convLimit = parseInt(queryParams.get("limit") ?? "20", 10);
           const sessionIdParam = queryParams.get("session_id") ?? undefined;

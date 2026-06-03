@@ -306,6 +306,22 @@
         {:else if session.claude_status === "working"}
           <span class="claude-badge working" title="Actively working">busy</span>
         {/if}
+        <!--
+          Autostart pin (⭐). Lives at the right edge of the name cell —
+          NOT in the action cluster — so the lifecycle buttons (stop /
+          restart / go / pause …) stay on a single line instead of
+          wrapping. Filled = this session auto-boots; outline = it won't.
+          Persisted, so it's the explicit handle on "which projects start
+          themselves".
+        -->
+        <button
+          class="star-pin"
+          class:pinned={session.autostart}
+          onclick={(e) => handleToggleAutostart(e, session)}
+          title={session.autostart ? "Autostart on (tap to unpin)" : "Autostart off (tap to pin)"}
+          aria-label={session.autostart ? "Unpin from autostart" : "Pin to autostart"}
+          aria-pressed={session.autostart}
+        >{session.autostart ? "★" : "☆"}</button>
       </div>
     </td>
     <td class="td-rss">
@@ -315,21 +331,6 @@
     </td>
     <td class="td-actions" onclick={(e) => e.stopPropagation()}>
       <div class="actions-wrap">
-      <!--
-        Autostart pin (⭐). Filled = this session auto-boots on daemon
-        start; outline = it won't. Persisted, so it's the explicit handle
-        on "which of these projects start themselves" — the fix for an
-        inactive list where every row looked the same. Kept leftmost so
-        the pin state reads at a glance across the column.
-      -->
-      <button
-        class="btn-icon star"
-        class:pinned={session.autostart}
-        onclick={(e) => handleToggleAutostart(e, session)}
-        title={session.autostart ? "Autostart on (tap to unpin)" : "Autostart off (tap to pin)"}
-        aria-label={session.autostart ? "Unpin from autostart" : "Pin to autostart"}
-        aria-pressed={session.autostart}
-      >{session.autostart ? "★" : "☆"}</button>
       {#if session.launch_package}
         <button
           class="btn-icon launch"
@@ -724,6 +725,8 @@
   }
   .session-name:hover { text-decoration: underline; }
   .session-name:active { color: var(--accent-purple); }
+  /* Allow the name to shrink/ellipsize so the trailing ★ pin stays in view. */
+  .name-wrap .session-name { min-width: 0; flex-shrink: 1; }
   /*
    * Runtime badge — inline tag identifying non-claude agents. Hidden
    * on the default claude case so the row stays uncluttered. Per-
@@ -807,22 +810,36 @@
   /* Muted button for pause */
   .td-actions :global(.btn-icon.muted) { color: var(--text-muted); }
   .td-actions :global(.btn-icon.muted:hover) { background: rgba(255, 255, 255, 0.08); }
-  /* Autostart pin (★). Dim outline when off, accent-yellow when pinned. */
-  .actions-wrap :global(.btn-icon.star) {
+  /*
+   * Autostart pin (★) — sits at the right edge of the name cell
+   * (margin-left:auto pushes it past the name/badges, just left of the
+   * RSS column). Keeping it out of the action cluster is what stops the
+   * lifecycle buttons wrapping to a second line.
+   */
+  .star-pin {
+    margin-left: auto;
+    flex-shrink: 0;
+    width: 1.5rem;
+    height: 1.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: none;
+    border-radius: 4px;
     color: var(--text-muted);
-    opacity: 0.6;
-    font-size: 0.95rem;
+    opacity: 0.55;
+    font-size: 1rem;
     line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
+    transition: color 0.15s, opacity 0.15s, background 0.15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
-  .actions-wrap :global(.btn-icon.star:hover) {
-    opacity: 1;
-    color: var(--accent-yellow);
-    background: rgba(210, 153, 34, 0.12);
-  }
-  .actions-wrap :global(.btn-icon.star.pinned) {
-    color: var(--accent-yellow);
-    opacity: 1;
-  }
+  .star-pin:hover { opacity: 1; color: var(--accent-yellow); background: rgba(210, 153, 34, 0.12); }
+  .star-pin.pinned { color: var(--accent-yellow); opacity: 1; }
 
   /* Mobile compact */
   @media (max-width: 768px) {

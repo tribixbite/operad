@@ -33,6 +33,18 @@ All notable changes to this project will be documented in this file.
   API gains the `accept_cap_downgrade` option.
 
 ### Fixed
+- **Session action buttons no longer wrap to a second line.** The autostart
+  ★ pin moved out of the action cluster to the right edge of the name cell,
+  so the lifecycle buttons (stop / restart / go / pause …) stay on one row.
+- **Prompt Library "open" now shows the conversation for any project —
+  even ones with no running session — and scrolls to the prompt.** The
+  viewer loads history directly by project path + `session_id` (new
+  `?path=` mode on `/api/conversation`) instead of spawning a session,
+  then pages back to the anchored prompt and highlights it. The drawer's
+  prompt input is roomier (multi-line, scrollable) and supports slash
+  commands; when the project has a live session it sends there, otherwise
+  it shows a read-only "start this project to reply" hint instead of a
+  dead input.
 - **Prompt Library "open" arrow targets the right conversation.** The
   open-conversation arrow now passes the prompt's originating Claude
   `session_id` through to the conversation viewer, so it loads the exact

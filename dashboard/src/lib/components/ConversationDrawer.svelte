@@ -15,8 +15,24 @@
      * that exact conversation instead of the project's most-recent one.
      */
     initialSessionId?: string | null;
+    /**
+     * Optional project path for history-only opens (a project with no live
+     * session). Passed to the viewer so it loads by path; also flips the
+     * drawer into history mode (no SDK Live toggle).
+     */
+    projectPath?: string | null;
+    /** Optional epoch-ms of a prompt to anchor/scroll to in the viewer. */
+    anchorTimestamp?: number | null;
   }
-  let { sessionName, onclose, initialSessionId = null }: Props = $props();
+  let {
+    sessionName, onclose, initialSessionId = null,
+    projectPath = null, anchorTimestamp = null,
+  }: Props = $props();
+
+  /** A live operad session backs this drawer (enables the SDK Live tab). */
+  const hasLiveSession = $derived(
+    !!store.daemon?.sessions.find((s) => s.name === sessionName),
+  );
 
   /** Whether live SDK streaming is enabled */
   let liveMode = $state(false);
@@ -275,15 +291,17 @@
     <div class="drawer-header">
       <h3 class="drawer-title">{sessionName}</h3>
       <div class="drawer-controls">
-        <button
-          class="live-toggle"
-          class:live-active={liveMode}
-          onclick={toggleLive}
-          title={liveMode ? "Disconnect SDK stream" : "Connect SDK stream"}
-        >
-          <svg class="live-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg>
-          Live
-        </button>
+        {#if hasLiveSession}
+          <button
+            class="live-toggle"
+            class:live-active={liveMode}
+            onclick={toggleLive}
+            title={liveMode ? "Disconnect SDK stream" : "Connect SDK stream"}
+          >
+            <svg class="live-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg>
+            Live
+          </button>
+        {/if}
         <button class="drawer-close" onclick={onclose} title="Close (Esc)"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
       </div>
     </div>
@@ -386,7 +404,7 @@
         </div>
       {:else}
         <!-- Historical conversation viewer (existing) -->
-        <ConversationViewer {sessionName} {initialSessionId} />
+        <ConversationViewer {sessionName} {initialSessionId} {projectPath} {anchorTimestamp} />
       {/if}
     </div>
   </div>

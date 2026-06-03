@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt, openSession } from "$lib/api";
+  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt } from "$lib/api";
   import { store } from "$lib/store.svelte";
   import type { PromptSearchResult, PromptEntry } from "$lib/types";
   import ConversationDrawer from "./ConversationDrawer.svelte";
@@ -208,7 +208,6 @@
    * conversation showed whatever conversation happened to be newest.
    */
   let drawerSessionId = $state<string | null>(null);
-  let openingSession = $state<string | null>(null); // prompt id mid-open
 
   function findSessionForPath(path: string): string | null {
     const sessions = store.daemon?.sessions ?? [];
@@ -216,43 +215,23 @@
     return match?.name ?? null;
   }
 
-  async function handleOpenPrompt(prompt: PromptEntry) {
-    // The prompt's originating Claude session — seeds the drawer so it
-    // opens the right conversation, then anchors on this prompt.
+  /** Project path + anchor for the drawer's history-by-path load. */
+  let drawerPath = $state<string | null>(null);
+  let drawerAnchorTs = $state<number | null>(null);
+
+  /**
+   * Open the conversation a prompt came from in the drawer — directly from
+   * its project's history, anchored to the prompt. No session is spawned:
+   * the viewer loads by (path, session_id) so it works even for projects
+   * that aren't currently running. If a live session DOES exist for the
+   * path, the drawer picks it up (enabling replies + the Live tab); the
+   * display label falls back to the project basename otherwise.
+   */
+  function handleOpenPrompt(prompt: PromptEntry) {
     drawerSessionId = prompt.sessionId ?? null;
-    // 1) Already-tracked session for this project? Open its drawer.
-    const existing = findSessionForPath(prompt.project);
-    if (existing) {
-      drawerSession = existing;
-      return;
-    }
-    // 2) Otherwise open a fresh session for the project (cmdOpen reuses
-    // any existing registry entry — see src/session-commands.ts:cmdOpen)
-    // and try the drawer once it appears in status.
-    openingSession = prompt.id;
-    try {
-      await openSession(prompt.project);
-      // status refresh is automatic via the SSE store; poll briefly for the
-      // session to register, then attach.
-      const start = Date.now();
-      while (Date.now() - start < 5000) {
-        await new Promise((r) => setTimeout(r, 250));
-        const found = findSessionForPath(prompt.project);
-        if (found) {
-          drawerSession = found;
-          break;
-        }
-      }
-      if (!drawerSession) {
-        copyFeedback = "Opened — refresh to view conversation";
-        setTimeout(() => { copyFeedback = null; }, 2000);
-      }
-    } catch (err) {
-      copyFeedback = `Open failed: ${(err as Error).message}`;
-      setTimeout(() => { copyFeedback = null; }, 2500);
-    } finally {
-      openingSession = null;
-    }
+    drawerPath = prompt.project;
+    drawerAnchorTs = prompt.timestamp ?? null;
+    drawerSession = findSessionForPath(prompt.project) ?? projectBasename(prompt.project);
   }
 
   // -- Download ---------------------------------------------------------------
@@ -443,12 +422,9 @@
               <button
                 class="prompt-action-btn"
                 onclick={(e) => { e.stopPropagation(); handleOpenPrompt(prompt); }}
-                disabled={openingSession === prompt.id}
                 title={`Open conversation in ${projectBasename(prompt.project)}`}
                 aria-label="Open conversation"
-              >{openingSession === prompt.id
-                ? "…"
-                : "›"}</button>
+              >›</button>
             {/if}
             <!-- Star toggle (kept) -->
             <button
@@ -468,7 +444,9 @@
         <ConversationDrawer
           sessionName={drawerSession}
           initialSessionId={drawerSessionId}
-          onclose={() => { drawerSession = null; drawerSessionId = null; }}
+          projectPath={drawerPath}
+          anchorTimestamp={drawerAnchorTs}
+          onclose={() => { drawerSession = null; drawerSessionId = null; drawerPath = null; drawerAnchorTs = null; }}
         />
       {/if}
 

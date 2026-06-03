@@ -14,8 +14,45 @@
      * to disambiguate two operad sessions sharing one project path.
      */
     initialSessionId?: string | null;
+    /**
+     * Optional absolute project path. When set, the conversation is loaded
+     * directly from that project's history — even if no operad session is
+     * running for it (the Prompt Library "open" flow). Without it, loading
+     * goes through the operad session name.
+     */
+    projectPath?: string | null;
+    /**
+     * Optional epoch-ms of a specific prompt to anchor on. After load, the
+     * viewer pages back (capped) until it finds the matching user message,
+     * then scrolls to and highlights it instead of jumping to the bottom.
+     */
+    anchorTimestamp?: number | null;
   }
-  let { sessionName, initialSessionId = null }: Props = $props();
+  let {
+    sessionName,
+    initialSessionId = null,
+    projectPath = null,
+    anchorTimestamp = null,
+  }: Props = $props();
+
+  /**
+   * The operad session this conversation can be SENT to. When opened from a
+   * session row, that's `sessionName`. When opened by project path (history
+   * view), find a running session sharing the path — null if none, in which
+   * case the input is a read-only hint (you can view, not reply).
+   */
+  const sendTarget = $derived.by(() => {
+    if (projectPath) {
+      const s = store.daemon?.sessions.find(
+        (x) => x.path === projectPath && (x.status === "running" || x.status === "degraded"),
+      );
+      return s?.name ?? null;
+    }
+    return sessionName;
+  });
+
+  /** Entry uuid to highlight (the anchored prompt). */
+  let highlightUuid = $state<string | null>(null);
 
   let page: ConversationPage | null = $state(null);
   let loading = $state(true);
@@ -54,9 +91,9 @@
     "add error handling to",
   ];
 
-  /** Claude status from SSE store */
+  /** Claude status from SSE store (of the session we'd send to) */
   const claudeStatus = $derived(
-    store.daemon?.sessions.find(s => s.name === sessionName)?.claude_status ?? null
+    store.daemon?.sessions.find(s => s.name === sendTarget)?.claude_status ?? null
   );
 
   /** Format timestamp to short time string */
@@ -92,20 +129,62 @@
     try {
       page = await fetchConversation(sessionName, {
         session_id: sessionId || undefined,
+        path: projectPath || undefined,
         limit: 20,
       });
       if (!selectedSessionId && page.session_id) {
         selectedSessionId = page.session_id;
       }
-      requestAnimationFrame(() => {
-        if (scrollContainer) {
-          scrollContainer.scrollTop = scrollContainer.scrollHeight;
-        }
-      });
+      // When anchoring on a specific prompt, page back to it and scroll
+      // there; otherwise jump to the latest message as usual.
+      if (anchorTimestamp) {
+        await anchorToPrompt();
+      } else {
+        requestAnimationFrame(() => {
+          if (scrollContainer) {
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+          }
+        });
+      }
     } catch (e: any) {
       error = e.message;
     } finally {
       loading = false;
+    }
+  }
+
+  /**
+   * Page backwards (capped) until the user message nearest `anchorTimestamp`
+   * is loaded, then scroll to and highlight it. Bounded so a deep prompt in
+   * a huge conversation can't trigger unbounded fetching — if not found
+   * within the cap we leave the viewer at the oldest loaded message.
+   */
+  async function anchorToPrompt() {
+    if (!anchorTimestamp) return;
+    const MAX_PAGES = 8;
+    let pages = 0;
+    const target = anchorTimestamp;
+    const found = () =>
+      (page?.entries ?? []).find(
+        (e) => e.type === "user" && Math.abs(new Date(e.timestamp).getTime() - target) < 2000,
+      );
+    let match = found();
+    while (!match && page?.has_more && pages < MAX_PAGES) {
+      await loadMore();
+      pages++;
+      match = found();
+    }
+    if (match) {
+      highlightUuid = match.uuid;
+      requestAnimationFrame(() => {
+        const el = scrollContainer?.querySelector(`[data-uuid="${match!.uuid}"]`) as HTMLElement | null;
+        el?.scrollIntoView({ block: "center" });
+      });
+    } else {
+      // Not found within the cap — fall back to the bottom (latest).
+      requestAnimationFrame(() => {
+        if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      });
     }
   }
 
@@ -115,6 +194,7 @@
     try {
       const older = await fetchConversation(sessionName, {
         session_id: selectedSessionId || undefined,
+        path: projectPath || undefined,
         before: page.oldest_uuid,
         limit: 20,
       });
@@ -137,10 +217,10 @@
 
   async function sendPrompt() {
     const text = promptText.trim();
-    if (!text || sending) return;
+    if (!text || sending || !sendTarget) return;
     sending = true;
     try {
-      await sendToSession(sessionName, text);
+      await sendToSession(sendTarget, text);
       // Add to recall history (keep last 50)
       sentMessages = [...sentMessages.filter(m => m !== text), text].slice(-50);
       try {
@@ -313,7 +393,7 @@
 
       {#each page.entries as entry (entry.uuid)}
         {#if entry.type === "user"}
-          <div class="msg msg-user">
+          <div class="msg msg-user" data-uuid={entry.uuid} class:msg-highlight={highlightUuid === entry.uuid}>
             <div class="msg-content user-content">{entry.content}</div>
             <div class="msg-meta">{fmtTime(entry.timestamp)}</div>
           </div>
@@ -389,15 +469,19 @@
 
   <!-- Prompt input bar -->
   <div class="prompt-bar">
-    {#if claudeStatus === "working"}
+    {#if !sendTarget}
+      <!-- History-only view (project has no running session). Viewing
+           works; replying needs a live session. -->
+      <div class="prompt-disabled">Read-only history — start this project to reply</div>
+    {:else if claudeStatus === "working"}
       <div class="prompt-disabled">Working...</div>
     {:else}
       <textarea
         class="prompt-input"
-        placeholder="Send a message..."
+        placeholder="Send a message (/ for slash commands)…"
         bind:value={promptText}
         onkeydown={handleKeydown}
-        rows="1"
+        rows="2"
         disabled={sending}
       ></textarea>
       <button
@@ -518,6 +602,17 @@
   .msg { max-width: 90%; }
   .msg-user {
     align-self: flex-end;
+  }
+  /* Anchored prompt (opened from the Prompt Library) — briefly ringed so
+   * the user sees which message they jumped to. */
+  .msg-highlight .user-content {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+    animation: anchor-pulse 2s ease-out;
+  }
+  @keyframes anchor-pulse {
+    0% { outline-color: var(--accent-yellow); }
+    100% { outline-color: var(--accent-blue); }
   }
   .msg-assistant, .msg-tool-result {
     align-self: flex-start;
@@ -686,9 +781,12 @@
     border-radius: 6px;
     padding: 0.375rem 0.5rem;
     resize: none;
-    min-height: 1.75rem;
-    max-height: 5rem;
-    line-height: 1.3;
+    /* Roomier multi-line input that scrolls past ~6 lines instead of
+     * clamping at a cramped single row. */
+    min-height: 2.75rem;
+    max-height: 9rem;
+    overflow-y: auto;
+    line-height: 1.4;
     field-sizing: content;
   }
   .prompt-input:focus { outline: none; border-color: var(--accent-blue); }

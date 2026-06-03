@@ -604,14 +604,19 @@ export async function fetchSessionTokens(name: string): Promise<ProjectTokenUsag
 /** Fetch paginated conversation entries for a session */
 export async function fetchConversation(
   name: string,
-  opts?: { before?: string; limit?: number; session_id?: string },
+  opts?: { before?: string; limit?: number; session_id?: string; path?: string },
 ): Promise<ConversationPage> {
   const params = new URLSearchParams();
   if (opts?.before) params.set("before", opts.before);
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.session_id) params.set("session_id", opts.session_id);
+  // When loading by explicit project path (history view for a project with
+  // no live session), pass `path` and use a placeholder name segment — the
+  // server resolves the path directly and ignores the name.
+  if (opts?.path) params.set("path", opts.path);
+  const seg = name || "_";
   const qs = params.toString();
-  const res = await fetch(`/api/conversation/${encodeURIComponent(name)}${qs ? `?${qs}` : ""}`);
+  const res = await fetch(`/api/conversation/${encodeURIComponent(seg)}${qs ? `?${qs}` : ""}`);
   return checkedJson(res);
 }
 
