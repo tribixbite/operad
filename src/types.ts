@@ -318,6 +318,14 @@ export interface SessionState {
   last_output: string | null;
   /** Claude session status: "working" (mid-task), "waiting" (prompt visible), null (non-claude/unknown) */
   claude_status: "working" | "waiting" | null;
+  /**
+   * Claude conversation (JSONL UUID) this session is bound to at runtime,
+   * discovered by the live-JSONL binder. Only set when 2+ sessions share a
+   * project path and need disambiguating; null otherwise (the viewer then
+   * falls back to config.session_id or the project's most-recent
+   * conversation). Persisted so it survives daemon restarts.
+   */
+  bound_jsonl_id?: string | null;
 }
 
 /**

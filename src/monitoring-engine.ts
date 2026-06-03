@@ -23,6 +23,8 @@ import {
 } from "./notifications.js";
 import {
   getConversationDelta,
+  bindProjectConversations,
+  type BindableSession,
 } from "./claude-session.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { MemoryMonitor } from "./memory.js";
@@ -159,6 +161,9 @@ export class MonitoringEngine {
     // Auto-suspend/resume based on memory pressure
     this.autoSuspendOnPressure(sysMem?.pressure ?? "normal");
 
+    // Bind each session to its own conversation when 2+ share a path
+    this.bindClaudeConversations();
+
     // Push conversation deltas for claude sessions (live streaming)
     this.pushConversationDeltas();
 
@@ -234,6 +239,68 @@ export class MonitoringEngine {
     const statusResp = this.ctx.cmdStatus();
     if (statusResp.ok) {
       dashboard.pushEvent("state", statusResp.data);
+    }
+  }
+
+  /**
+   * Bind each running claude session to the specific conversation JSONL it
+   * owns, so two operad sessions sharing one project path open distinct
+   * conversations in the viewer.
+   *
+   * Only paths with **2+ running claude sessions** are bound — a lone
+   * session needs no disambiguation (the viewer falls back to its
+   * config.session_id or the project's most-recent conversation, which
+   * also auto-follows a new `cc`). Single sessions get any stale binding
+   * cleared so they don't pin to an old conversation.
+   *
+   * Steady-state cost is near-zero: bindings are sticky, so once placed the
+   * pure pass reads no JSONL heads on subsequent polls.
+   */
+  bindClaudeConversations(): void {
+    // Group running claude sessions by project path.
+    const byPath = new Map<string, BindableSession[]>();
+    const existingByPath = new Map<string, Record<string, string>>();
+    for (const cfg of this.ctx.config.sessions) {
+      if (cfg.type !== "claude" || !cfg.path) continue;
+      const s = this.ctx.state.getSession(cfg.name);
+      if (!s || s.status !== "running") continue;
+      const list = byPath.get(cfg.path) ?? [];
+      list.push({
+        name: cfg.name,
+        startedAtMs: s.uptime_start ? Date.parse(s.uptime_start) : 0,
+        resumeId: cfg.session_id ?? null,
+      });
+      byPath.set(cfg.path, list);
+      if (s.bound_jsonl_id) {
+        const ex = existingByPath.get(cfg.path) ?? {};
+        ex[cfg.name] = s.bound_jsonl_id;
+        existingByPath.set(cfg.path, ex);
+      }
+    }
+
+    for (const [path, sessions] of byPath) {
+      if (sessions.length < 2) {
+        // Lone session — clear any stale binding so the viewer follows the
+        // most-recent conversation (or its resume id).
+        const only = sessions[0];
+        if (only) {
+          const cur = this.ctx.state.getSession(only.name);
+          if (cur?.bound_jsonl_id) this.ctx.state.setBoundJsonl(only.name, null);
+        }
+        continue;
+      }
+      try {
+        const bindings = bindProjectConversations(
+          path, sessions, existingByPath.get(path) ?? {},
+        );
+        for (const s of sessions) {
+          // Apply each session's binding (or leave null until its `cc`
+          // creates a conversation we can place).
+          this.ctx.state.setBoundJsonl(s.name, bindings[s.name] ?? null);
+        }
+      } catch {
+        // Non-fatal — leave existing bindings in place.
+      }
     }
   }
 

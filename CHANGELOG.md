@@ -39,10 +39,15 @@ All notable changes to this project will be documented in this file.
   historical conversation the prompt came from instead of the project's
   most-recently-active one.
 - **Two operad sessions sharing a project path no longer cross-load
-  conversations.** `SessionState` now carries the session's bound
-  `session_id`; the conversation drawer passes it so each session opens
-  its own conversation. (Residual: two fresh `cc` sessions with no bound
-  id still share the project default — see `docs/roadmap.md`.)
+  conversations.** A live-JSONL binder runs each monitoring poll: for any
+  project with 2+ running claude sessions it pairs each session to the
+  distinct conversation it created (resumed sessions → their resume id;
+  fresh `cc` sessions → the conversation that began at/after the session
+  started, matched in start order). The binding is sticky, persisted in
+  `state.json` (`bound_jsonl_id`), and surfaced as `SessionState.session_id`
+  so the conversation drawer opens each session's own conversation — even
+  two fresh `cc` instances of the same project. Lone sessions stay unbound
+  and follow the project's most-recent conversation as before.
 - **Sessions table separators align.** The `Session` and actions cells no
   longer set `display:flex` directly on the `<td>` (which dropped the cell
   out of table-row height sync and stepped the collapsed border-top);

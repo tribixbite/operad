@@ -49,6 +49,7 @@ export function newSessionState(name: string): SessionState {
     auto_suspended: false,
     last_output: null,
     claude_status: null,
+    bound_jsonl_id: null,
   };
 }
 
@@ -290,6 +291,19 @@ export class StateManager {
       });
     }
     return newDaemonState();
+  }
+
+  /**
+   * Bind (or clear, with null) the Claude conversation JSONL a session is
+   * tracking. Set by the live-JSONL binder when 2+ sessions share a project
+   * path. Persisted so the binding survives daemon restarts; a no-op when
+   * the value is unchanged to avoid needless writes from the poll loop.
+   */
+  setBoundJsonl(name: string, jsonlId: string | null): void {
+    const s = this.state.sessions[name];
+    if (!s || s.bound_jsonl_id === jsonlId) return;
+    s.bound_jsonl_id = jsonlId;
+    this.persist();
   }
 
   // -- Autostart pins ---------------------------------------------------------

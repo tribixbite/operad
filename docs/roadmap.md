@@ -79,20 +79,6 @@ The Operit review (commit `4c2b20c`+) ported the DAG workflow engine. Items not 
 
 ---
 
-## Dashboard / session UX
-
-- **Per-session live JSONL binding (full fix for duplicate-project conversations).**
-  The conversation viewer now targets a session's bound `session_id` when
-  one is known (resumed/named instances) — so two operad sessions sharing
-  a project path open distinct conversations. The residual case is **two
-  fresh `cc` sessions of the same project**: neither has a bound
-  `session_id`, so both still resolve to the project's most-recent JSONL.
-  The full fix is to have the daemon watch each session's project dir and
-  bind the JSONL it creates (by creation time after session start) to that
-  operad session, then surface it as `SessionState.session_id`. Tracked in
-  `src/claude-session.ts` (`resolveActiveJsonl`) + `session-commands.ts`
-  status assembly.
-
 ## Quality of life
 
 - **`tmx doctor` JSON output**: structured output mode for CI pipelines.

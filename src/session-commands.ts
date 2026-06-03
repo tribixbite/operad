@@ -152,12 +152,12 @@ export class SessionCommands {
             // (TOML/recency-resolved, then overlaid with the user's
             // persisted pin). Sessions with no config entry never autostart.
             autostart: cfg?.enabled ?? false,
-            // Claude session_id (JSONL UUID) bound to this session, when one
-            // is recorded (resumed/named instances). Lets the conversation
-            // viewer target the exact conversation — disambiguating two
-            // operad sessions that share one project path. Null for fresh
-            // `cc` instances whose session_id isn't bound yet.
-            session_id: cfg?.session_id ?? null,
+            // Claude session_id (JSONL UUID) the conversation viewer should
+            // open for this session. Prefer the runtime live-JSONL binding
+            // (set when 2+ sessions share a project path), then the config
+            // resume id, else null (viewer uses the project's most-recent
+            // conversation). This is what disambiguates same-path sessions.
+            session_id: s.bound_jsonl_id ?? cfg?.session_id ?? null,
             // Android package whose launcher activity the dashboard's "Launch
             // app" button should fire. Surfaces here so the UI can decide
             // whether to render the icon without re-fetching config.

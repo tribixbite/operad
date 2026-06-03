@@ -135,6 +135,139 @@ export function resolveActiveJsonl(projectPath: string): JsonlFileInfo | null {
   return files[0];
 }
 
+// -- Session ↔ conversation binding ------------------------------------------
+
+/**
+ * Read the timestamp of a conversation's FIRST entry — i.e. when the
+ * conversation was created. Stable (unlike mtime, which advances as the
+ * conversation grows), so it's the right key for pairing a fresh `cc`
+ * session to the JSONL it created. Returns epoch ms, or null when the
+ * file is empty/unreadable or has no parseable timestamp in its head.
+ */
+export function readConversationStartTime(jsonlPath: string): number | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(jsonlPath, "r");
+    // 8 KB is plenty to cover the first few entries even with a long
+    // summary line; we only need the first one carrying a timestamp.
+    const buf = Buffer.alloc(8192);
+    const bytes = readSync(fd, buf, 0, buf.length, 0);
+    const head = buf.toString("utf-8", 0, bytes);
+    for (const line of head.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as { timestamp?: string };
+        if (entry.timestamp) {
+          const ms = Date.parse(entry.timestamp);
+          if (!Number.isNaN(ms)) return ms;
+        }
+      } catch { /* partial last line / non-JSON — try the next */ }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) try { closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
+/** One operad claude session that needs a conversation bound to it. */
+export interface BindableSession {
+  name: string;
+  /** Session uptime_start as epoch ms (0 if unknown). */
+  startedAtMs: number;
+  /** config.session_id — a resume target binds directly to this id. */
+  resumeId?: string | null;
+}
+
+/** A candidate conversation for pairing (id + creation time). */
+export interface ConversationCandidate {
+  id: string;
+  startMs: number;
+}
+
+/**
+ * PURE pairing: bind each session of ONE project to a distinct
+ * conversation. Order of precedence:
+ *   1. Sticky — keep a prior binding if its file still exists.
+ *   2. Resume — a session with a `resumeId` binds to that conversation.
+ *   3. Fresh — remaining sessions, in start order, each claim the
+ *      earliest-created unclaimed conversation that began at/after the
+ *      session started (minus a grace window for clock skew between
+ *      `uptime_start` and the conversation's first entry).
+ *
+ * Separated from disk IO so the pairing logic is unit-testable. Returns
+ * name → conversation id (only sessions that got a binding are present).
+ */
+export function pairSessionsToConversations(
+  sessions: BindableSession[],
+  candidates: ConversationCandidate[],
+  existing: Record<string, string>,
+  graceMs = 60_000,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  const claimed = new Set<string>();
+  const valid = new Map(candidates.map((c) => [c.id, c]));
+
+  // 1. Sticky bindings that still point at a live, unclaimed conversation.
+  for (const s of sessions) {
+    const prev = existing[s.name];
+    if (prev && valid.has(prev) && !claimed.has(prev)) {
+      result[s.name] = prev;
+      claimed.add(prev);
+    }
+  }
+  // 2. Resume targets.
+  for (const s of sessions) {
+    if (result[s.name]) continue;
+    if (s.resumeId && valid.has(s.resumeId) && !claimed.has(s.resumeId)) {
+      result[s.name] = s.resumeId;
+      claimed.add(s.resumeId);
+    }
+  }
+  // 3. Fresh sessions paired by start order with unclaimed conversations.
+  const unbound = sessions
+    .filter((s) => !result[s.name])
+    .sort((a, b) => a.startedAtMs - b.startedAtMs);
+  if (unbound.length > 0) {
+    const free = candidates
+      .filter((c) => !claimed.has(c.id))
+      .sort((a, b) => a.startMs - b.startMs);
+    for (const s of unbound) {
+      const idx = free.findIndex((c) => c.startMs >= s.startedAtMs - graceMs);
+      if (idx >= 0) {
+        const [pick] = free.splice(idx, 1);
+        result[s.name] = pick.id;
+        claimed.add(pick.id);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * IO wrapper around {@link pairSessionsToConversations}: resolves the
+ * project's JSONL files (reading each candidate's creation time only when
+ * there are unbound sessions to place) and returns the name → id map.
+ */
+export function bindProjectConversations(
+  projectPath: string,
+  sessions: BindableSession[],
+  existing: Record<string, string>,
+  graceMs = 60_000,
+): Record<string, string> {
+  const files = resolveJsonlFiles(projectPath);
+  if (files.length === 0) return {};
+  const candidates: ConversationCandidate[] = files.map((f) => ({
+    id: f.id,
+    // mtime as a cheap default; the precise first-entry time is only read
+    // for genuinely-unbound candidates inside the pure pass via the map
+    // below. We pre-read all here since the file set per project is small.
+    startMs: readConversationStartTime(f.path) ?? f.mtime,
+  }));
+  return pairSessionsToConversations(sessions, candidates, existing, graceMs);
+}
+
 // -- Token usage streaming ---------------------------------------------------
 
 /** LRU cache for token usage results — keyed by path+mtime+size */
