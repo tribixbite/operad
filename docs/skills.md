@@ -78,6 +78,34 @@ my-plugin/
     operad.toml                      # operad-specific tools/agents/workflows/mcps
 ```
 
+A minimal `skills/<name>/SKILL.md` (the Anthropic Agent Skills standard —
+operad installs it verbatim into `~/.claude/settings.json`'s `skills[]`):
+
+```markdown
+---
+name: rust-quality
+description: Use when reviewing or hardening a Rust crate — runs rustfmt + clippy and explains failures.
+metadata:
+  operad:
+    autonomy_default: suggest
+---
+
+# Rust quality pass
+
+When the user asks to review or clean up a Rust crate:
+
+1. Run `cargo fmt --check` and surface any diff.
+2. Run `cargo clippy --all-targets` and group warnings by lint.
+3. Propose fixes; never apply them without confirmation.
+
+Scripts live under `scripts/`; invoke them with the crate root as CWD.
+```
+
+The YAML frontmatter `name` + `description` are the standard fields Claude
+Code reads. The `metadata.operad.*` block is operad's optional extension
+namespace (ignored by stock Claude Code) — anything operad-specific goes
+there so the same repo stays a valid Claude-Code plugin.
+
 `.operad/operad.toml` schema:
 
 ```toml

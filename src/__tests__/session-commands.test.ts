@@ -84,6 +84,13 @@ function makeHarness(initial: SessionConfig[]): Harness {
     registry,
     state,
     log: silentLog(),
+    // Minimal name/path resolvers used by cmdSetAutostart + friends.
+    resolveName(name: string) {
+      return config.sessions.find((s) => s.name === name)?.name ?? null;
+    },
+    resolveSessionPath(name: string) {
+      return config.sessions.find((s) => s.name === name)?.path ?? null;
+    },
     async startSession(name: string) {
       startCalls.push(name);
       // Simulate the real start path: mark the session running so subsequent
@@ -289,5 +296,46 @@ describe("cmdDedupe — winner selection + dry_run", () => {
     const data = resp.data as { groups_with_duplicates: number; plans: unknown[] };
     expect(data.groups_with_duplicates).toBe(0);
     expect(data.plans).toEqual([]);
+  });
+});
+
+// --- cmdSetAutostart — ⭐ pin persistence ------------------------------------
+
+describe("cmdSetAutostart — autostart pins", () => {
+  test("unpinning a config session disables it and persists the override", async () => {
+    const path = makeProjectPath("alpha");
+    h = makeHarness([makeSession("alpha", path, { enabled: true })]);
+
+    const resp = await h.cmds.cmdSetAutostart("alpha", false);
+    expect(resp.ok).toBe(true);
+    expect((resp.data as { autostart: boolean }).autostart).toBe(false);
+    // Live config flag flipped …
+    expect(h.config.sessions.find((s) => s.name === "alpha")?.enabled).toBe(false);
+    // … and the override persisted for the next boot.
+    expect(h.state.getAutostartOverrides().alpha).toBe(false);
+  });
+
+  test("re-pinning a previously unpinned session re-enables it", async () => {
+    const path = makeProjectPath("beta");
+    h = makeHarness([makeSession("beta", path, { enabled: true })]);
+
+    await h.cmds.cmdSetAutostart("beta", false);
+    const resp = await h.cmds.cmdSetAutostart("beta", true);
+    expect(resp.ok).toBe(true);
+    expect(h.config.sessions.find((s) => s.name === "beta")?.enabled).toBe(true);
+    expect(h.state.getAutostartOverrides().beta).toBe(true);
+  });
+
+  test("closing a session clears its autostart override", async () => {
+    const path = makeProjectPath("gamma");
+    h = makeHarness([makeSession("gamma", path, { enabled: true })]);
+    h.state.forceStatus("gamma", "stopped");
+
+    await h.cmds.cmdSetAutostart("gamma", false);
+    expect(h.state.getAutostartOverrides().gamma).toBe(false);
+
+    await h.cmds.cmdClose("gamma");
+    // Override gone — a future same-named session won't inherit the pin.
+    expect("gamma" in h.state.getAutostartOverrides()).toBe(false);
   });
 });

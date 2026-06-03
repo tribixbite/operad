@@ -9,8 +9,14 @@
   interface Props {
     sessionName: string;
     onclose: () => void;
+    /**
+     * Optional Claude session_id (JSONL UUID) to open directly. When set
+     * (e.g. the Prompt Library "open" arrow), the historical viewer loads
+     * that exact conversation instead of the project's most-recent one.
+     */
+    initialSessionId?: string | null;
   }
-  let { sessionName, onclose }: Props = $props();
+  let { sessionName, onclose, initialSessionId = null }: Props = $props();
 
   /** Whether live SDK streaming is enabled */
   let liveMode = $state(false);
@@ -380,7 +386,7 @@
         </div>
       {:else}
         <!-- Historical conversation viewer (existing) -->
-        <ConversationViewer {sessionName} />
+        <ConversationViewer {sessionName} {initialSessionId} />
       {/if}
     </div>
   </div>

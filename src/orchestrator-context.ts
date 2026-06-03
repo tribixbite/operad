@@ -194,6 +194,7 @@ export interface CmdDelegates {
   cmdTabs: (names?: string[]) => IpcResponse;
   cmdOpen: (path: string, name?: string, autoGo?: boolean, priority?: number, forceNew?: boolean) => Promise<IpcResponse>;
   cmdClose: (name: string) => Promise<IpcResponse>;
+  cmdSetAutostart: (name: string, enabled: boolean) => Promise<IpcResponse>;
   cmdDedupe: (dryRun?: boolean) => Promise<IpcResponse>;
   cmdForceCleanup: (name: string) => Promise<IpcResponse>;
   cmdRecent: (count?: number) => IpcResponse;

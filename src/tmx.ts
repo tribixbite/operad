@@ -1196,6 +1196,24 @@ async function runIpcCommand(): Promise<void> {
       }
       cmd = { cmd: "close", name: subArgs[0] };
       break;
+    case "autostart": {
+      // operad autostart <name> [on|off]  — toggle the ⭐ pin (default on).
+      if (!subArgs[0]) {
+        console.error(`Usage: operad autostart <name> [on|off]`);
+        process.exit(1);
+      }
+      const flag = (subArgs[1] ?? "on").toLowerCase();
+      if (!["on", "off", "true", "false", "1", "0"].includes(flag)) {
+        console.error(`Usage: operad autostart <name> [on|off]`);
+        process.exit(1);
+      }
+      cmd = {
+        cmd: "autostart",
+        name: subArgs[0],
+        enabled: flag === "on" || flag === "true" || flag === "1",
+      };
+      break;
+    }
     case "dedupe":
       // Drop suffixed duplicate registry/config entries for paths where multiple
       // names map to the same project. Use --dry-run to preview.

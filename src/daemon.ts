@@ -321,6 +321,7 @@ export class Daemon {
       cmdTabs: (names) => this.sessionCommands.cmdTabs(names),
       cmdOpen: (path, name, autoGo, priority, forceNew) => this.sessionCommands.cmdOpen(path, name, autoGo, priority, forceNew),
       cmdClose: (name) => this.sessionCommands.cmdClose(name),
+      cmdSetAutostart: (name, enabled) => this.sessionCommands.cmdSetAutostart(name, enabled),
       cmdDedupe: (dryRun) => this.sessionCommands.cmdDedupe(dryRun),
       cmdForceCleanup: (name) => this.sessionCommands.cmdForceCleanup(name),
       cmdRecent: (count) => this.sessionCommands.cmdRecent(count),
@@ -1264,6 +1265,16 @@ export class Daemon {
   private resolveBootSessions(): void {
     // Delegated to session-resolver.ts (pure function, all deps passed in)
     resolveBootSessions(this.config, this.registry, this.state, this.log);
+    // Apply persisted ⭐ autostart pins over the recency/TOML-resolved
+    // `enabled` flags so the user's explicit choices win and survive
+    // daemon restarts. A pin only takes effect for sessions that exist in
+    // the resolved config (pinning an ad-hoc session adds it to config via
+    // cmdSetAutostart, so by the next boot it's present here).
+    const overrides = this.state.getAutostartOverrides();
+    for (const [name, enabled] of Object.entries(overrides)) {
+      const cfg = this.config.sessions.find((s) => s.name === name);
+      if (cfg) cfg.enabled = enabled;
+    }
   }
 
   // -- Dashboard HTTP server ---------------------------------------------------

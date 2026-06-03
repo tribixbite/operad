@@ -190,6 +190,11 @@ export async function restartSession(name: string): Promise<void> {
   await checkedPost(`/api/restart/${encodeURIComponent(name)}`);
 }
 
+/** Pin or unpin a session for autostart (⭐). Persisted across restarts. */
+export async function setSessionAutostart(name: string, enabled: boolean): Promise<void> {
+  await checkedPost(`/api/autostart/${encodeURIComponent(name)}`, JSON.stringify({ enabled }));
+}
+
 /** Send "go" to a Claude session */
 export async function goSession(name: string): Promise<void> {
   await checkedPost(`/api/go/${encodeURIComponent(name)}`);

@@ -7,12 +7,34 @@
  * like). Regressions here would silently break startup for one runtime
  * while leaving the others working.
  */
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type { SessionConfig } from "../types.js";
 import { getRuntime, listRuntimes } from "../runtimes/index.js";
 import { claudeRuntime } from "../runtimes/claude.js";
 import { opencodeRuntime } from "../runtimes/opencode.js";
 import { codexRuntime } from "../runtimes/codex.js";
+
+/**
+ * Create a throwaway Claude conversation JSONL so the claude adapter's
+ * "does this conversation still exist?" guard sees a real file. Mirrors
+ * claude-session.ts's manglePath + PROJECTS_DIR layout. Returns the
+ * project path to feed into the SessionConfig and a cleanup fn.
+ */
+function seedConversation(uuid: string): { projectPath: string; cleanup: () => void } {
+  // Unique project path so the mangled dir can't collide with a real one.
+  const projectPath = `/tmp/operad-runtime-test-${uuid}`;
+  const mangled = projectPath.replace(/[^a-zA-Z0-9]/g, "-");
+  const dir = join(homedir(), ".claude", "projects", mangled);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${uuid}.jsonl`), `{"type":"summary"}\n`);
+  return { projectPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+const cleanups: Array<() => void> = [];
+afterAll(() => { for (const c of cleanups) c(); });
 
 function makeConfig(overrides: Partial<SessionConfig> = {}): SessionConfig {
   return {
@@ -58,10 +80,23 @@ describe("claude adapter", () => {
     expect(claudeRuntime.startupCommand(makeConfig())).toBe("cc");
   });
 
-  test("emits --resume with a valid UUID", () => {
+  test("emits --resume with a valid UUID when the conversation exists", () => {
     const uuid = "11a565bd-b74e-4e5c-a563-7032963954bf";
-    const cmd = claudeRuntime.startupCommand(makeConfig({ session_id: uuid }));
+    const { projectPath, cleanup } = seedConversation(uuid);
+    cleanups.push(cleanup);
+    const cmd = claudeRuntime.startupCommand(makeConfig({ session_id: uuid, path: projectPath }));
     expect(cmd).toBe(`claude --resume ${uuid} --dangerously-skip-permissions`);
+  });
+
+  test("falls back to `cc` when the conversation no longer exists on disk", () => {
+    // Stale session_id (resumed on another machine / history pruned) —
+    // `claude --resume` would abort with "No conversation found", so the
+    // adapter must start fresh instead.
+    const uuid = "22b676ce-c85f-4f6d-b674-8143a74a65cf";
+    const cmd = claudeRuntime.startupCommand(
+      makeConfig({ session_id: uuid, path: "/tmp/operad-runtime-test-nonexistent" }),
+    );
+    expect(cmd).toBe("cc");
   });
 
   test("falls back to `cc` when session_id is malformed (defence in depth)", () => {

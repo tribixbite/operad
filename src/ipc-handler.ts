@@ -81,6 +81,9 @@ export class IpcHandler {
       case "close":
         return this.ctx.cmdClose(cmd.name);
 
+      case "autostart":
+        return this.ctx.cmdSetAutostart(cmd.name, cmd.enabled);
+
       case "dedupe":
         return this.ctx.cmdDedupe(cmd.dry_run);
 

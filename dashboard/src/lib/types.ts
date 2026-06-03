@@ -27,6 +27,19 @@ export interface SessionState {
   /** True when this session is defined in the user's operad.toml [[session]]. */
   from_config?: boolean;
   /**
+   * Whether this session will auto-boot on daemon start (the effective
+   * `enabled` flag, overlaid with the user's persisted ⭐ pin). Drives the
+   * autostart star toggle + badge in the session table.
+   */
+  autostart?: boolean;
+  /**
+   * Claude session_id (JSONL UUID) bound to this session when known
+   * (resumed/named instances). The conversation viewer passes it so two
+   * operad sessions sharing one project path open distinct conversations.
+   * Null for fresh `cc` instances with no bound id yet.
+   */
+  session_id?: string | null;
+  /**
    * Android package whose launcher activity the dashboard's "Launch app"
    * button should fire. Set in TOML via `launch_package = "..."`. Null when
    * the session has no associated user-facing Android app.

@@ -186,6 +186,21 @@ export class RestHandler {
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           resp = await this.ctx.cmdStop(name);
           break;
+        case "autostart": {
+          // POST /api/autostart/<name>  { enabled: boolean }
+          // Toggle the session's ⭐ autostart pin (persisted).
+          if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          if (!name) return { status: 400, data: { error: "Session name required" } };
+          let enabled = true;
+          try {
+            const parsed = (typeof body === "string" ? JSON.parse(body) : body) as { enabled?: boolean };
+            enabled = parsed?.enabled !== false; // default to pin (true)
+          } catch {
+            return { status: 400, data: { error: "Invalid JSON body" } };
+          }
+          resp = await this.ctx.cmdSetAutostart(name, enabled);
+          break;
+        }
         case "restart":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           resp = await this.ctx.cmdRestart(name);

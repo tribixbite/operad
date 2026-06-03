@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Autostart pins (⭐) for sessions.** Each session row in the dashboard
+  gets a star toggle that pins/unpins it for auto-boot. The choice is
+  persisted in `state.json` (`autostart_overrides`) and applied over the
+  recency/TOML-resolved `enabled` flag on the next daemon boot, so the
+  autostart set is now an explicit, trackable handle instead of being
+  inferred from recency — fixing the "120 inactive projects all look the
+  same" confusion. New `SessionState.autostart` wire field,
+  `POST /api/autostart/<name> { enabled }` REST route, `autostart` IPC
+  command, and `operad autostart <name> [on|off]` CLI. Closing a session
+  clears its pin.
+- **Prompt Library: tap to expand.** In the home-page library, tapping a
+  prompt row now expands its clamped two-line preview to the full text
+  (and tap again to collapse) — no need to open the conversation just to
+  read a long prompt.
 - **Roadmap doc** — `docs/roadmap.md` enumerates every v1.1+ skill
   marketplace deferral with spec back-references (IPC/REST/CLI gaps,
   provider queue, deferred MCP lifecycle modes, supply-chain hardening,
@@ -19,6 +33,26 @@ All notable changes to this project will be documented in this file.
   API gains the `accept_cap_downgrade` option.
 
 ### Fixed
+- **Prompt Library "open" arrow targets the right conversation.** The
+  open-conversation arrow now passes the prompt's originating Claude
+  `session_id` through to the conversation viewer, so it loads the exact
+  historical conversation the prompt came from instead of the project's
+  most-recently-active one.
+- **Two operad sessions sharing a project path no longer cross-load
+  conversations.** `SessionState` now carries the session's bound
+  `session_id`; the conversation drawer passes it so each session opens
+  its own conversation. (Residual: two fresh `cc` sessions with no bound
+  id still share the project default — see `docs/roadmap.md`.)
+- **Sessions table separators align.** The `Session` and actions cells no
+  longer set `display:flex` directly on the `<td>` (which dropped the cell
+  out of table-row height sync and stepped the collapsed border-top);
+  the flex layout moved to inner wrappers so every row's horizontal rule
+  is a single straight line.
+- **No more dead `--resume` on a missing conversation.** The Claude
+  runtime adapter now verifies the bound `session_id`'s JSONL exists on
+  disk before emitting `claude --resume <id>`; a stale id (resumed on
+  another machine, pruned history) falls back to a fresh `cc` instead of
+  leaving the pane at a "No conversation found" error.
 - **REST `POST /api/skills/install`** now plumbs `accept_cap_downgrade`
   through to `SkillManager.install`, so the dashboard and other REST
   callers can recover from `PROVIDER_TIER_DOWNGRADE`. Previously the

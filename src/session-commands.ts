@@ -147,6 +147,17 @@ export class SessionCommands {
             // dashboard group "registered" (config-defined) sessions above
             // ad-hoc/discovered ones in the inactive list.
             from_config: !!cfg,
+            // Whether this session will auto-boot. Drives the dashboard's ⭐
+            // autostart pin/badge. Reflects the effective `enabled` flag
+            // (TOML/recency-resolved, then overlaid with the user's
+            // persisted pin). Sessions with no config entry never autostart.
+            autostart: cfg?.enabled ?? false,
+            // Claude session_id (JSONL UUID) bound to this session, when one
+            // is recorded (resumed/named instances). Lets the conversation
+            // viewer target the exact conversation — disambiguating two
+            // operad sessions that share one project path. Null for fresh
+            // `cc` instances whose session_id isn't bound yet.
+            session_id: cfg?.session_id ?? null,
             // Android package whose launcher activity the dashboard's "Launch
             // app" button should fire. Surfaces here so the UI can decide
             // whether to render the icon without re-fetching config.
@@ -729,8 +740,60 @@ export class SessionCommands {
     // Remove session state so it vanishes from dashboard immediately
     this.ctx.state.removeSession(resolved);
 
+    // Drop any persisted autostart pin so a future same-named session
+    // doesn't inherit a stale ⭐ choice.
+    this.ctx.state.clearAutostartOverride(resolved);
+
     this.ctx.log.info(`Closed session '${resolved}'`, { session: resolved });
     return { ok: true, data: `Closed '${resolved}'` };
+  }
+
+  /**
+   * Set (or clear) a session's ⭐ autostart pin. Pinning forces the
+   * session to auto-boot on the next daemon start and immediately flips
+   * its live `enabled` flag; un-pinning keeps it from auto-booting. The
+   * choice is persisted in state.json so it survives restarts.
+   *
+   * For a tracked session that has no config entry yet (an ad-hoc /
+   * discovered session the user wants to start auto-booting), we
+   * materialise a minimal claude config from its resolved path — mirroring
+   * cmdOpen's registration — so the pin has something to act on.
+   */
+  async cmdSetAutostart(name: string, enabled: boolean): Promise<IpcResponse> {
+    const resolved = this.ctx.resolveName(name) ?? name;
+    let cfg = this.ctx.config.sessions.find((s) => s.name === resolved);
+
+    if (!cfg) {
+      // No config entry — only meaningful to pin (enabled=true). For
+      // un-pin there's nothing to disable, so just record the override.
+      if (enabled) {
+        const path = this.ctx.resolveSessionPath(resolved);
+        if (!path) {
+          return {
+            ok: false,
+            error: `Cannot pin '${name}' for autostart — no project path is known for it`,
+          };
+        }
+        cfg = {
+          name: resolved, type: "claude", path, command: undefined,
+          auto_go: false, priority: 50, depends_on: [], headless: false,
+          env: {}, health: undefined, max_restarts: 3, restart_backoff_s: 5,
+          enabled: true, bare: false,
+        };
+        this.ctx.config.sessions.push(cfg);
+        this.ctx.state.initFromConfig(this.ctx.config.sessions);
+        this.ctx.registry.add({ name: resolved, path, priority: 50, auto_go: false });
+      }
+    } else {
+      cfg.enabled = enabled;
+    }
+
+    this.ctx.state.setAutostartOverride(resolved, enabled);
+    this.ctx.log.info(
+      `${enabled ? "Pinned" : "Unpinned"} session '${resolved}' for autostart`,
+      { session: resolved },
+    );
+    return { ok: true, data: { name: resolved, autostart: enabled } };
   }
 
   /** Recent command — parse history.jsonl for recently active projects */

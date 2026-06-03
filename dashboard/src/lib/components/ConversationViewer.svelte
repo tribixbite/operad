@@ -7,14 +7,23 @@
   /** Session name (operad) to load conversation for */
   interface Props {
     sessionName: string;
+    /**
+     * Optional Claude session_id (JSONL UUID) to load directly instead of
+     * the project's most-recently-active conversation. Set when opening a
+     * specific historical conversation (e.g. from the Prompt Library) or
+     * to disambiguate two operad sessions sharing one project path.
+     */
+    initialSessionId?: string | null;
   }
-  let { sessionName }: Props = $props();
+  let { sessionName, initialSessionId = null }: Props = $props();
 
   let page: ConversationPage | null = $state(null);
   let loading = $state(true);
   let loadingMore = $state(false);
   let error: string | null = $state(null);
-  let selectedSessionId = $state("");
+  // Seed from the optional prop so the first load targets the requested
+  // conversation; the session picker can still switch afterwards.
+  let selectedSessionId = $state(initialSessionId ?? "");
   let scrollContainer: HTMLElement | undefined = $state(undefined);
 
   // Prompt input state
@@ -247,7 +256,9 @@
       const stored = localStorage.getItem(RECALL_STORAGE_KEY);
       if (stored) sentMessages = JSON.parse(stored);
     } catch { /* ignore */ }
-    loadConversation();
+    // Seed the first load with the requested session_id (if any) so the
+    // viewer opens the exact conversation rather than the project default.
+    loadConversation(initialSessionId || undefined);
   });
 </script>
 

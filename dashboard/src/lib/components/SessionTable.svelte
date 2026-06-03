@@ -2,7 +2,7 @@
   import {
     startSession, stopSession, restartSession, goSession,
     openTab, closeSession, suspendSession, resumeSession,
-    fetchSdkStatus, launchApp, forceCleanupSession,
+    fetchSdkStatus, launchApp, forceCleanupSession, setSessionAutostart,
   } from "$lib/api";
   import { store, refreshStatus } from "$lib/store.svelte";
   import type { DaemonStatus, SessionState, SdkBridgeStatus } from "$lib/types";
@@ -17,6 +17,8 @@
   let actionError: string | null = $state(null);
   /** Session name for the conversation drawer (null = closed) */
   let drawerSession: string | null = $state(null);
+  /** Bound Claude session_id for the drawer — disambiguates same-path sessions */
+  let drawerSessionId: string | null = $state(null);
   /** Search filter for sessions */
   let sessionFilter = $state("");
   /** SDK bridge status (which session is LIVE) */
@@ -230,9 +232,32 @@
     }
   }
 
-  function openDrawer(e: Event, name: string) {
+  /**
+   * Toggle a session's ⭐ autostart pin. Optimistic — flips the local
+   * flag immediately, persists via REST, and reverts on failure. The
+   * persisted pin makes the session auto-boot (or not) on the next daemon
+   * start, giving the user an explicit handle on the autostart set rather
+   * than guessing from recency.
+   */
+  async function handleToggleAutostart(e: Event, session: SessionState) {
     e.stopPropagation();
-    drawerSession = name;
+    actionError = null;
+    const next = !session.autostart;
+    try {
+      await setSessionAutostart(session.name, next);
+      await refreshStatus();
+    } catch (err) {
+      actionError = `Autostart toggle failed for ${session.name}: ${(err as Error).message}`;
+    }
+  }
+
+  function openDrawer(e: Event, session: SessionState) {
+    e.stopPropagation();
+    drawerSession = session.name;
+    // Pass the session's bound Claude session_id (when known) so the
+    // drawer opens THIS session's conversation rather than the project's
+    // most-recent one — the fix for two same-path sessions colliding.
+    drawerSessionId = session.session_id ?? null;
   }
 
   /** Lock body scroll when drawer is open to prevent background scrolling */
@@ -249,29 +274,39 @@
 {#snippet sessionRow(session: SessionState)}
   <tr class="session-row" onclick={() => toggleExpand(session.name)}>
     <td class="td-name">
-      <span class="dot {dotCls(session.status, session.suspended)}"></span>
-      <button
-        class="session-name"
-        onclick={(e) => handleOpenTab(e, session.name, session.launch_package)}
-        title={session.launch_package
-          ? `Show ${session.name} on screen (launches ${session.launch_package})`
-          : "Open in Termux tab"}
-      >{session.name}</button>
       <!--
-        Runtime badge — only shown for non-claude agents so the row stays
-        uncluttered on the dominant case. session.type is one of
-        claude / opencode / codex / daemon / service; we hide it for
-        claude (default) and for daemon/service (which aren't agent
-        runtimes, the user already knows from the lack of a chat icon).
+        Inner flex wrapper. The flex layout lives here, NOT on the <td>:
+        a `display:flex` table-cell drops out of the table's row-height
+        sync and its collapsed border-top renders at a different y than
+        the sibling cells, stepping the horizontal separator. Keeping the
+        <td> a real table-cell (vertical-align:middle) keeps every row's
+        separator a single straight line.
       -->
-      {#if session.type === "opencode" || session.type === "codex"}
-        <span class="runtime-badge {session.type}" title={`${session.type} runtime`}>{session.type}</span>
-      {/if}
-      {#if session.claude_status === "waiting"}
-        <span class="claude-badge waiting" title="Waiting for input">idle</span>
-      {:else if session.claude_status === "working"}
-        <span class="claude-badge working" title="Actively working">busy</span>
-      {/if}
+      <div class="name-wrap">
+        <span class="dot {dotCls(session.status, session.suspended)}"></span>
+        <button
+          class="session-name"
+          onclick={(e) => handleOpenTab(e, session.name, session.launch_package)}
+          title={session.launch_package
+            ? `Show ${session.name} on screen (launches ${session.launch_package})`
+            : "Open in Termux tab"}
+        >{session.name}</button>
+        <!--
+          Runtime badge — only shown for non-claude agents so the row stays
+          uncluttered on the dominant case. session.type is one of
+          claude / opencode / codex / daemon / service; we hide it for
+          claude (default) and for daemon/service (which aren't agent
+          runtimes, the user already knows from the lack of a chat icon).
+        -->
+        {#if session.type === "opencode" || session.type === "codex"}
+          <span class="runtime-badge {session.type}" title={`${session.type} runtime`}>{session.type}</span>
+        {/if}
+        {#if session.claude_status === "waiting"}
+          <span class="claude-badge waiting" title="Waiting for input">idle</span>
+        {:else if session.claude_status === "working"}
+          <span class="claude-badge working" title="Actively working">busy</span>
+        {/if}
+      </div>
     </td>
     <td class="td-rss">
       {#if session.rss_mb != null}
@@ -279,6 +314,22 @@
       {/if}
     </td>
     <td class="td-actions" onclick={(e) => e.stopPropagation()}>
+      <div class="actions-wrap">
+      <!--
+        Autostart pin (⭐). Filled = this session auto-boots on daemon
+        start; outline = it won't. Persisted, so it's the explicit handle
+        on "which of these projects start themselves" — the fix for an
+        inactive list where every row looked the same. Kept leftmost so
+        the pin state reads at a glance across the column.
+      -->
+      <button
+        class="btn-icon star"
+        class:pinned={session.autostart}
+        onclick={(e) => handleToggleAutostart(e, session)}
+        title={session.autostart ? "Autostart on (tap to unpin)" : "Autostart off (tap to pin)"}
+        aria-label={session.autostart ? "Unpin from autostart" : "Pin to autostart"}
+        aria-pressed={session.autostart}
+      >{session.autostart ? "★" : "☆"}</button>
       {#if session.launch_package}
         <button
           class="btn-icon launch"
@@ -291,7 +342,7 @@
         {#if sdkStatus?.attached && sdkStatus.sessionName === session.name}
           <span class="live-badge" title="SDK stream active"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="13" r="1.5" fill="currentColor" stroke="none"/><path d="M5 10.5a3.5 3 0 0 1 6 0"/><path d="M2.5 7.5a6 5 0 0 1 11 0"/></svg></span>
         {/if}
-        <button class="btn-icon chat" onclick={(e) => openDrawer(e, session.name)} title="Conversation"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3H14V11H9L6 14V11H2Z"/></svg></button>
+        <button class="btn-icon chat" onclick={(e) => openDrawer(e, session)} title="Conversation"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3H14V11H9L6 14V11H2Z"/></svg></button>
       {/if}
       {#if session.status === "running" || session.status === "degraded"}
         <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
@@ -323,6 +374,7 @@
         ><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12L7 8L3 4"/><path d="M9 12L13 8L9 4"/></svg></button>
         <button class="btn-icon danger" onclick={(e) => handleClose(e, session.name)} title="Remove"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4L12 12M12 4L4 12"/></svg></button>
       {/if}
+      </div>
     </td>
   </tr>
   {#if expandedSession === session.name}
@@ -440,7 +492,8 @@
 {#if drawerSession}
   <ConversationDrawer
     sessionName={drawerSession}
-    onclose={() => drawerSession = null}
+    initialSessionId={drawerSessionId}
+    onclose={() => { drawerSession = null; drawerSessionId = null; }}
   />
 {/if}
 
@@ -587,9 +640,15 @@
     vertical-align: middle;
   }
   .td-name {
+    /* Real table-cell (not flex) so its collapsed border-top stays on the
+     * same baseline as the RSS/actions cells. Flex lives on .name-wrap. */
+    vertical-align: middle;
+  }
+  .name-wrap {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    min-width: 0;
   }
   .td-rss {
     text-align: right;
@@ -603,6 +662,11 @@
   .unit { color: var(--text-muted); margin-left: 1px; }
   .td-actions {
     text-align: right;
+    /* Stays a real table-cell; the flex row lives on .actions-wrap so the
+     * cell's border-top aligns with the other columns. */
+    vertical-align: middle;
+  }
+  .actions-wrap {
     /*
      * Display the action buttons as a flex row that wraps when too
      * many icons crowd the cell — crucial on phone viewports where 6
@@ -618,7 +682,7 @@
     align-items: center;
   }
   /* Drop the legacy margin-left now that gap handles spacing. */
-  .td-actions :global(.btn-icon) { margin-left: 0; }
+  .actions-wrap :global(.btn-icon) { margin-left: 0; }
   .td-expand {
     padding: 0.25rem 0.375rem 0.75rem;
     border-top: none;
@@ -743,6 +807,22 @@
   /* Muted button for pause */
   .td-actions :global(.btn-icon.muted) { color: var(--text-muted); }
   .td-actions :global(.btn-icon.muted:hover) { background: rgba(255, 255, 255, 0.08); }
+  /* Autostart pin (★). Dim outline when off, accent-yellow when pinned. */
+  .actions-wrap :global(.btn-icon.star) {
+    color: var(--text-muted);
+    opacity: 0.6;
+    font-size: 0.95rem;
+    line-height: 1;
+  }
+  .actions-wrap :global(.btn-icon.star:hover) {
+    opacity: 1;
+    color: var(--accent-yellow);
+    background: rgba(210, 153, 34, 0.12);
+  }
+  .actions-wrap :global(.btn-icon.star.pinned) {
+    color: var(--accent-yellow);
+    opacity: 1;
+  }
 
   /* Mobile compact */
   @media (max-width: 768px) {
@@ -772,7 +852,7 @@
      */
     .th-rss { width: 3rem; }
     .th-actions { width: 124px; }
-    .td-actions { gap: 0.125rem; }
+    .actions-wrap { gap: 0.125rem; }
     .session-row td { padding: 0.375rem 0.25rem; }
     .session-name { font-size: 0.6875rem; }
     .td-rss { font-size: 0.625rem; }

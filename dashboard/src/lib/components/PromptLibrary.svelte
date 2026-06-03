@@ -38,6 +38,20 @@
   let offset = $state(0);
   let copyFeedback = $state<string | null>(null);
 
+  /**
+   * Prompt ids the user has tapped to expand. In the home-page library
+   * (no `onselect`) a row's text is clamped to two lines; tapping it
+   * toggles the full, untruncated prompt so long prompts are readable
+   * without leaving the page. Keyed by prompt id.
+   */
+  let expandedIds = $state(new Set<string>());
+
+  function toggleExpand(id: string) {
+    if (expandedIds.has(id)) expandedIds.delete(id);
+    else expandedIds.add(id);
+    expandedIds = new Set(expandedIds);
+  }
+
   const PAGE_SIZE = 20;
 
   /** All unique projects from prompt history (loaded once from API) */
@@ -186,6 +200,14 @@
    * of this component. The drawer unsubscribes / cleans up on close.
    */
   let drawerSession = $state<string | null>(null);
+  /**
+   * Claude session_id (JSONL UUID) the opened prompt belongs to. Passed
+   * to the ConversationDrawer so it loads the EXACT historical
+   * conversation the prompt came from — not just the project's most
+   * recently active session. Without this, opening a prompt from an old
+   * conversation showed whatever conversation happened to be newest.
+   */
+  let drawerSessionId = $state<string | null>(null);
   let openingSession = $state<string | null>(null); // prompt id mid-open
 
   function findSessionForPath(path: string): string | null {
@@ -195,6 +217,9 @@
   }
 
   async function handleOpenPrompt(prompt: PromptEntry) {
+    // The prompt's originating Claude session — seeds the drawer so it
+    // opens the right conversation, then anchors on this prompt.
+    drawerSessionId = prompt.sessionId ?? null;
     // 1) Already-tracked session for this project? Open its drawer.
     const existing = findSessionForPath(prompt.project);
     if (existing) {
@@ -377,13 +402,19 @@
         <div
           class="prompt-item"
           class:selectable={!!onselect}
-          onclick={onselect ? () => handleSelect(prompt) : undefined}
-          onkeydown={onselect ? (e) => { if (e.key === "Enter") handleSelect(prompt); } : undefined}
-          role={onselect ? "button" : undefined}
-          tabindex={onselect ? 0 : undefined}
-          title={prompt.display}
+          class:expandable={!onselect}
+          class:expanded={!onselect && expandedIds.has(prompt.id)}
+          onclick={onselect ? () => handleSelect(prompt) : () => toggleExpand(prompt.id)}
+          onkeydown={(e) => { if (e.key === "Enter") { onselect ? handleSelect(prompt) : toggleExpand(prompt.id); } }}
+          role="button"
+          tabindex="0"
+          title={onselect ? prompt.display : undefined}
         >
-          <div class="prompt-text">{truncate(prompt.display, 120)}</div>
+          <div class="prompt-text">{
+            !onselect && expandedIds.has(prompt.id)
+              ? prompt.display
+              : truncate(prompt.display, 120)
+          }</div>
           <div class="prompt-meta">
             <span class="prompt-project">{projectBasename(prompt.project)}</span>
             <span class="prompt-time">{timeAgo(prompt.timestamp)}</span>
@@ -436,7 +467,8 @@
       {#if drawerSession}
         <ConversationDrawer
           sessionName={drawerSession}
-          onclose={() => (drawerSession = null)}
+          initialSessionId={drawerSessionId}
+          onclose={() => { drawerSession = null; drawerSessionId = null; }}
         />
       {/if}
 
@@ -605,10 +637,9 @@
   }
   .prompt-item:first-child { border-top: none; }
   .prompt-item:hover { background: var(--bg-tertiary); }
-  /* Pointer cursor only when the row is the actual tap target. The
-   * non-selectable case has explicit copy/open icon-buttons instead. */
-  .prompt-item:not(.selectable) { cursor: default; }
-  .prompt-item:not(.selectable):hover { background: none; }
+  /* Both the selectable (picker) and expandable (home-library) cases make
+   * the row a tap target — picker inserts the prompt, expandable toggles
+   * the full text. Keep the pointer cursor + hover for both. */
   /* Container for copy / open / star actions on the right side. */
   .prompt-actions {
     grid-column: 2;
@@ -658,6 +689,12 @@
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
+  }
+  /* Tapped-open row: drop the 2-line clamp so the full prompt shows. */
+  .prompt-item.expanded .prompt-text {
+    -webkit-line-clamp: unset;
+    display: block;
+    overflow: visible;
   }
   .compact .prompt-text {
     font-size: 0.625rem;

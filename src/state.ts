@@ -292,6 +292,32 @@ export class StateManager {
     return newDaemonState();
   }
 
+  // -- Autostart pins ---------------------------------------------------------
+
+  /** All persisted autostart overrides (name → forced enabled flag). */
+  getAutostartOverrides(): Record<string, boolean> {
+    return this.state.autostart_overrides ?? {};
+  }
+
+  /**
+   * Pin (or unpin) a session for autostart. Persisted so the user's ⭐
+   * choice survives daemon restarts; applied over the boot-resolved
+   * `enabled` flag on the next boot and immediately by the caller.
+   */
+  setAutostartOverride(name: string, enabled: boolean): void {
+    if (!this.state.autostart_overrides) this.state.autostart_overrides = {};
+    this.state.autostart_overrides[name] = enabled;
+    this.persist();
+  }
+
+  /** Drop a session's autostart override (e.g. when it's removed). */
+  clearAutostartOverride(name: string): void {
+    if (this.state.autostart_overrides && name in this.state.autostart_overrides) {
+      delete this.state.autostart_overrides[name];
+      this.persist();
+    }
+  }
+
   /** Flush state to disk immediately (public wrapper for persist) */
   flush(): void {
     this.persist();

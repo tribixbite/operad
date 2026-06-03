@@ -372,6 +372,15 @@ export interface TmxState {
   battery?: BatterySnapshot | null;
   /** Switchboard — subsystem enable/disable controls */
   switchboard?: Switchboard;
+  /**
+   * Persisted per-session autostart pins, keyed by session name. A value
+   * of `true` forces the session to auto-boot; `false` keeps it from
+   * auto-booting even if recency/TOML would otherwise enable it. Applied
+   * over `config.sessions[].enabled` after boot resolution so the user's
+   * explicit ⭐ pin choices survive daemon restarts. Absent name = no
+   * override (use the resolved default).
+   */
+  autostart_overrides?: Record<string, boolean>;
 }
 
 /** Battery snapshot stored in state */
@@ -413,6 +422,7 @@ export type IpcCommand =
   | { cmd: "open"; path: string; name?: string; auto_go?: boolean; priority?: number; force_new?: boolean }
   | { cmd: "dedupe"; dry_run?: boolean }
   | { cmd: "close"; name: string }
+  | { cmd: "autostart"; name: string; enabled: boolean }
   | { cmd: "recent"; count?: number }
   | { cmd: "suspend"; name: string }
   | { cmd: "resume"; name: string }
