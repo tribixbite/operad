@@ -33,6 +33,17 @@ All notable changes to this project will be documented in this file.
   API gains the `accept_cap_downgrade` option.
 
 ### Fixed
+- **`operad stream` no longer reports a spurious "IPC request timed out"
+  after a reboot.** Root cause: `AndroidEngine.fixAdb()` ran the ADB
+  connect via synchronous `spawnSync`, freezing the daemon's single event
+  loop for the entire connect. After a reboot the stale ADB endpoint
+  stretched that to ~2.5 minutes, during which the daemon could serve no
+  IPC — so the CLI's 90s `stream` send timed out even though boot
+  succeeded. The connect now runs via async `spawn` (bounded by the same
+  `timeout` wrapper + a SIGKILL backstop), keeping the loop responsive so
+  IPC and `operad status` work throughout the connect. Regression test in
+  `android-adb.test.ts` asserts the loop isn't blocked during a slow
+  connect.
 - **Session action buttons no longer wrap to a second line.** The autostart
   ★ pin moved out of the action cluster to the right edge of the name cell,
   so the lifecycle buttons (stop / restart / go / pause …) stay on one row.

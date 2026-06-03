@@ -12,7 +12,7 @@
  * Uses detectPlatform() directly for platform-specific helpers.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -222,6 +222,45 @@ export class AndroidEngine {
 
   // -- ADB fix ----------------------------------------------------------------
 
+  /**
+   * Run the ADB connect script bounded by `timeoutS`, WITHOUT blocking the
+   * event loop. Mirrors the old `spawnSync('timeout', [timeoutS, script])`
+   * (the `timeout` wrapper enforces the bound; a hard SIGKILL 5s later is a
+   * backstop) but via async `spawn` so the daemon stays responsive during
+   * the connect.
+   *
+   * This is load-bearing: the previous synchronous `spawnSync` froze the
+   * daemon's single event loop for the entire connect. After a reboot the
+   * stale ADB endpoint stretched that to ~2.5 minutes, during which NO IPC
+   * could be served — so `operad stream` reported a spurious "IPC request
+   * timed out" (90s client timeout) even though boot ultimately succeeded.
+   */
+  private runConnectScript(
+    script: string,
+    timeoutS: number,
+  ): Promise<{ status: number | null; stderr: string }> {
+    return new Promise((resolve) => {
+      let stderr = "";
+      let settled = false;
+      const finish = (status: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hardKill);
+        resolve({ status, stderr });
+      };
+      const child = spawn("timeout", [String(timeoutS), script], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      // Backstop in case `timeout` itself wedges — kill 5s past its budget.
+      const hardKill = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already exited */ }
+      }, (timeoutS + 5) * 1000);
+      child.stderr?.on("data", (d) => { stderr += d.toString(); });
+      child.on("error", (err) => { stderr ||= String(err); finish(1); });
+      child.on("close", (code) => finish(code));
+    });
+  }
+
   /** Attempt ADB connection and apply phantom process killer fix */
   async fixAdb(): Promise<boolean> {
     this.ctx.log.info("Attempting ADB connection for phantom process fix");
@@ -229,14 +268,10 @@ export class AndroidEngine {
     const { connect_script, connect_timeout_s, phantom_fix } = this.ctx.config.adb;
 
     try {
-      const result = spawnSync("timeout", [String(connect_timeout_s), connect_script], {
-        encoding: "utf-8",
-        timeout: (connect_timeout_s + 5) * 1000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const result = await this.runConnectScript(connect_script, connect_timeout_s);
 
       if (result.status !== 0) {
-        this.ctx.log.warn("ADB connection failed", { stderr: result.stderr?.trim() });
+        this.ctx.log.warn("ADB connection failed", { stderr: result.stderr.trim() });
         this.ctx.state.setAdbFixed(false);
         detectPlatform().notify("operad boot", "ADB fix failed — processes may be killed", "operad-boot");
 
