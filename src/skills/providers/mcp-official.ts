@@ -37,6 +37,20 @@ const REGISTRY_HOSTNAME = "registry.modelcontextprotocol.io";
 const REGISTRY_API_BASE = `https://${REGISTRY_HOSTNAME}/v0.1`;
 
 /**
+ * Returns the effective registry base URL. The env var
+ * `OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL` overrides the production
+ * URL — test harnesses can point this at a `file://` path prefix
+ * to serve fixture JSON from disk without a network round-trip.
+ * The override is read dynamically (not cached at module load) so
+ * test suites can set it after import.
+ *
+ * @internal
+ */
+function registryBase(): string {
+  return process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL ?? REGISTRY_API_BASE;
+}
+
+/**
  * SHA-256 of the Subject-Public-Key-Info (SPKI) blobs we accept for
  * `registry.modelcontextprotocol.io`. Two entries: primary + backup
  * so a single rotation doesn't brick the resolver, per §3.9. Rotated
@@ -80,7 +94,7 @@ export const mcpOfficialProvider: ProviderModule = {
   },
 
   async list(opts: { query?: string; cursor?: string; limit?: number } = {}) {
-    const url = `${REGISTRY_API_BASE}/servers?limit=${opts.limit ?? 50}` +
+    const url = `${registryBase()}/servers?limit=${opts.limit ?? 50}` +
       (opts.cursor ? `&cursor=${encodeURIComponent(opts.cursor)}` : "");
     const body = await fetchRegistry(url);
     const parsed = JSON.parse(body) as {
@@ -105,7 +119,7 @@ export const mcpOfficialProvider: ProviderModule = {
   async fetch(locator: string, _version: string, cacheParent: string): Promise<FetchResult> {
     // Registry locator is the server id. We fetch the full server
     // record and write it to disk as the "bundle".
-    const url = `${REGISTRY_API_BASE}/servers/${encodeURIComponent(locator)}`;
+    const url = `${registryBase()}/servers/${encodeURIComponent(locator)}`;
     const body = await fetchRegistry(url);
     const parsed = JSON.parse(body) as RegistryServer;
     const resolvedVersion = parsed.version_detail?.version ?? "latest";
@@ -171,7 +185,7 @@ export const mcpOfficialProvider: ProviderModule = {
   },
 
   async latest(locator: string): Promise<string> {
-    const url = `${REGISTRY_API_BASE}/servers/${encodeURIComponent(locator)}`;
+    const url = `${registryBase()}/servers/${encodeURIComponent(locator)}`;
     const body = await fetchRegistry(url);
     const parsed = JSON.parse(body) as RegistryServer;
     return parsed.version_detail?.version ?? "latest";
@@ -185,11 +199,28 @@ export const mcpOfficialProvider: ProviderModule = {
  * otherwise warns and falls through to standard TLS verification.
  * Throws PROVIDER_FETCH_FAILED on any non-2xx, parse error, or pin
  * mismatch.
+ *
+ * When `OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL` is set to a `file://`
+ * prefix, the URL is served from local disk without HTTPS (test harness
+ * path; never used in production).
  */
 function fetchRegistry(url: string): Promise<string> {
+  // file:// shortcut for test harnesses — no HTTPS, no pin check.
+  if (url.startsWith("file://")) {
+    return new Promise((resolve, reject) => {
+      const path = url.slice("file://".length).split("?")[0];
+      const { readFileSync } = require("node:fs") as typeof import("node:fs");
+      try {
+        resolve(readFileSync(path, "utf8"));
+      } catch (err) {
+        reject(new SkillError("PROVIDER_FETCH_FAILED", `file read failed: ${(err as Error).message}`));
+      }
+    });
+  }
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    if (u.hostname !== REGISTRY_HOSTNAME) {
+    const overrideSet = Boolean(process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL);
+    if (!overrideSet && u.hostname !== REGISTRY_HOSTNAME) {
       reject(new SkillError("PROVIDER_FETCH_FAILED", `unexpected hostname: ${u.hostname}`));
       return;
     }

@@ -48,12 +48,22 @@ import { homedir } from "node:os";
 import { SkillError, type SkillMcpEntry } from "./types.js";
 
 /**
- * `~/.claude.json` and its lockfile, resolved lazily so test harnesses
- * that override $HOME after module import see the new path. Production
- * code calls these once per write; the cost is a function call.
+ * `~/.claude.json` and its lockfile. Resolved lazily through a settable home
+ * override: production leaves it null and resolves via homedir(); tests call
+ * {@link _setClaudeJsonHome} to point at a temp dir (os.homedir() can't be
+ * redirected via $HOME on bun — it caches its first value process-wide — so an
+ * explicit override is the only reliable seam, and it avoids mocking node:os).
  */
-function claudeJsonPath(): string { return join(homedir(), ".claude.json"); }
-function lockPath(): string { return join(homedir(), ".claude.json.lock"); }
+let homeOverride: string | null = null;
+function claudeJsonPath(): string { return join(homeOverride ?? homedir(), ".claude.json"); }
+function lockPath(): string { return join(homeOverride ?? homedir(), ".claude.json.lock"); }
+
+/**
+ * Test-only: redirect ~/.claude.json resolution to `home` (pass null to
+ * restore the real per-user path). Tests MUST reset to null in afterEach.
+ * @internal
+ */
+export function _setClaudeJsonHome(home: string | null): void { homeOverride = home; }
 
 /**
  * What we record in `~/.claude.json.operad_managed.<name>` so the writer

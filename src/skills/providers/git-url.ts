@@ -132,7 +132,17 @@ export const gitUrlProvider: ProviderModule = {
 /**
  * Locator parsing. Returns the bare git URL and (if pinned via `@`)
  * the requested version slice.
+ *
+ * Exported as `_parseLocator` for test-harness use only.
+ * @internal
  */
+export function _parseLocator(locator: string, fallbackVersion: string): {
+  url: string;
+  requestedVersion: string;
+} {
+  return parseLocator(locator, fallbackVersion);
+}
+
 function parseLocator(locator: string, fallbackVersion: string): {
   url: string;
   requestedVersion: string;
@@ -223,7 +233,14 @@ async function resolveVersion(url: string, requested: string): Promise<string> {
 /**
  * Add a `v` prefix to a bare semver tag if missing. Leaves non-semver
  * tags (e.g. `release-2025-11`) alone.
+ *
+ * Exported as `_canonSemver` for test-harness use only.
+ * @internal
  */
+export function _canonSemver(tag: string): string {
+  return canonSemver(tag);
+}
+
 function canonSemver(tag: string): string {
   if (/^\d+\.\d+\.\d+/.test(tag)) return `v${tag}`;
   return tag;
