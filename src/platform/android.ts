@@ -75,6 +75,60 @@ function termuxApiEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * Build the wrapper-script body that {@link AndroidPlatform.runScriptInTab}
+ * writes to `$PREFIX/tmp` before launching it via the TermuxService execute
+ * intent. Pure (no IO) so it can be unit-tested.
+ *
+ * The wrapper sets the terminal title, ensures `libtermux-exec.so` is
+ * preloaded, cd's to the project dir, and exec's the target script.
+ *
+ * The LD_PRELOAD handling is the important part: the TermuxService execute
+ * intent runs the wrapper WITHOUT Termux's default `LD_PRELOAD`, so any script
+ * (or its children) that exec's a binary with a `#!/usr/bin/env …` shebang —
+ * e.g. gradle's `./gradlew` — fails with `/usr/bin/env: bad interpreter: No
+ * such file or directory` (exit 126); the Android kernel can't resolve
+ * `/usr/bin/env`. libtermux-exec.so restores the `/usr/bin/env →
+ * $PREFIX/bin/env` shebang rewriting an interactive Termux shell gets for free.
+ *
+ * It can't simply be set as an env var, because libtermux-exec must already be
+ * loaded into the *process that calls execve* — merely exporting `LD_PRELOAD`
+ * in this wrapper bash doesn't load it here. So the wrapper re-exec's itself
+ * once with `LD_PRELOAD` set (guarded by `_TMX_LD_REEXEC` to avoid a loop):
+ * the wrapper's own shebang is an absolute path that needs no rewriting, and
+ * the re-exec'd copy starts with libtermux-exec.so loaded — so its `exec` of
+ * the (possibly `/usr/bin/env`-shebanged) target script, and every descendant,
+ * get shebang rewriting. The case-statement prepends only if absent.
+ *
+ * @param ldPreloadLib Absolute path to libtermux-exec.so, or null to skip the
+ *   preload entirely (e.g. when the lib is missing).
+ */
+export function buildRunTabWrapper(
+  scriptPath: string,
+  cwd: string,
+  tabName: string,
+  ldPreloadLib: string | null,
+): string {
+  const lines = [`#!/data/data/com.termux/files/usr/bin/bash`];
+  if (ldPreloadLib) {
+    lines.push(
+      `if [ -z "\${_TMX_LD_REEXEC:-}" ] && [ -f "${ldPreloadLib}" ]; then`,
+      `  export _TMX_LD_REEXEC=1`,
+      `  case ":\${LD_PRELOAD}:" in *":${ldPreloadLib}:"*) ;; ` +
+        `*) export LD_PRELOAD="${ldPreloadLib}\${LD_PRELOAD:+:\$LD_PRELOAD}" ;; esac`,
+      `  exec "\$0" "\$@"`,
+      `fi`,
+    );
+  }
+  lines.push(
+    `printf '\\033]0;build:%s\\007' "${tabName}"`,
+    `cd "${cwd}" || exit 1`,
+    `exec "${scriptPath}"`,
+    "",
+  );
+  return lines.join("\n");
+}
+
+/**
  * Active notification PIDs — keyed by notification --id.
  * Before spawning a new notification for the same id, we SIGKILL the previous
  * process to prevent pile-up when Termux:API service is unresponsive.
@@ -753,16 +807,18 @@ export class AndroidPlatform implements Platform {
   runScriptInTab(scriptPath: string, cwd: string, tabName: string): boolean {
     const wrapperPath = join(PREFIX, "tmp", `tmx-run-${tabName}.sh`);
     const env = this.amEnv();
+    // libtermux-exec.so must be preloaded so `#!/usr/bin/env` shebangs in the
+    // target script (e.g. gradle's ./gradlew) resolve — the TermuxService
+    // execute intent does not inherit Termux's default LD_PRELOAD.
+    const ldPreloadLib = existsSync(TERMUX_LD_PRELOAD) ? TERMUX_LD_PRELOAD : null;
 
     // Create wrapper script that sets title, cd's to project dir, runs the script
     try {
-      writeFileSync(wrapperPath, [
-        `#!/data/data/com.termux/files/usr/bin/bash`,
-        `printf '\\033]0;build:%s\\007' "${tabName}"`,
-        `cd "${cwd}" || exit 1`,
-        `exec "${scriptPath}"`,
-        "",
-      ].join("\n"), { mode: 0o755 });
+      writeFileSync(
+        wrapperPath,
+        buildRunTabWrapper(scriptPath, cwd, tabName, ldPreloadLib),
+        { mode: 0o755 },
+      );
     } catch {
       return false;
     }

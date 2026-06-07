@@ -33,6 +33,21 @@ All notable changes to this project will be documented in this file.
   API gains the `accept_cap_downgrade` option.
 
 ### Fixed
+- **Scripts run from the dashboard no longer fail with `/usr/bin/env: bad
+  interpreter` (gradle exit 126).** A build script launched from the
+  dashboard "Run script" tab (e.g. cleverkeys `build-on-termux.sh`) died
+  with `./gradlew: /usr/bin/env: bad interpreter: No such file or directory`,
+  while the same script run from an interactive Termux shell succeeded. Root
+  cause: the TermuxService execute intent runs the generated wrapper WITHOUT
+  Termux's default `LD_PRELOAD`, so `libtermux-exec.so`'s `/usr/bin/env →
+  $PREFIX/bin/env` shebang rewriting was absent and the Android kernel can't
+  resolve `/usr/bin/env`. The wrapper (`buildRunTabWrapper`, Android) now
+  re-exec's itself once with `LD_PRELOAD` set (guarded by `_TMX_LD_REEXEC`),
+  so the re-exec'd copy starts with libtermux-exec.so loaded — restoring
+  shebang rewriting for the target script's own `#!/usr/bin/env …` line AND
+  every descendant (the `./gradlew` grandchild). Covers ad-hoc commands,
+  `package.json`, root/scripts/saved sources alike. Regression +
+  end-to-end-validated in `run-tab-wrapper.test.ts`.
 - **`operad stream` no longer reports a spurious "IPC request timed out"
   after a reboot.** Root cause: `AndroidEngine.fixAdb()` ran the ADB
   connect via synchronous `spawnSync`, freezing the daemon's single event
