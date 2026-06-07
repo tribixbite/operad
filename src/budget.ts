@@ -18,24 +18,30 @@ export interface ProcessCount {
   phantom_procs: number;
 }
 
-/** Cache TTL for process count (ms) */
-const CACHE_TTL = 30_000;
+/** Cache TTL for process count (ms) — exported for tests */
+export const CACHE_TTL = 30_000;
 
 export class BudgetTracker {
   private log: Logger;
   /** Cached count + timestamp to avoid blocking every 15s */
   private cachedCount = 0;
   private cacheTime = 0;
+  /**
+   * Optional override for the process-count source; injected in tests to
+   * avoid hitting the platform singleton and real /proc or ps commands.
+   */
+  private countFn: () => number;
 
-  constructor(_budget: number, log: Logger) {
+  constructor(_budget: number, log: Logger, countFn?: () => number) {
     this.log = log;
+    this.countFn = countFn ?? (() => detectPlatform().countPhantomProcesses());
   }
 
   /** Get snapshot for dashboard/status display (cached 30s) */
   check(): ProcessCount {
     const now = Date.now();
     if (now - this.cacheTime > CACHE_TTL) {
-      this.cachedCount = detectPlatform().countPhantomProcesses();
+      this.cachedCount = this.countFn();
       this.cacheTime = now;
     }
     return { phantom_procs: this.cachedCount };

@@ -129,6 +129,44 @@ export function buildRunTabWrapper(
 }
 
 /**
+ * Parse `termux-battery-status` (Termux:API) JSON into a BatteryInfo, or null
+ * if the output isn't a JSON object. Pure — extracted from getBatteryStatus so
+ * the charging-state logic is unit-testable.
+ *
+ * Charging semantics (preserved verbatim from the original inline parse): a
+ * device counts as charging when status is CHARGING/FULL, OR it is plugged in
+ * (plugged !== "UNPLUGGED") and not actively discharging. The plugged clause
+ * matters so radios aren't disabled while the device is on AC but reporting
+ * NOT_CHARGING. Malformed/missing fields fall back to safe defaults rather
+ * than propagating undefined.
+ */
+export function parseTermuxBatteryStatus(raw: string): BatteryInfo | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  const d = data as Record<string, unknown>;
+
+  const status = typeof d.status === "string" ? d.status : "";
+  // Missing/non-string plugged behaves as "not UNPLUGGED" (matches original).
+  const plugged = typeof d.plugged === "string" ? d.plugged : undefined;
+  const percentage = typeof d.percentage === "number"
+    ? Math.max(0, Math.min(100, d.percentage))
+    : 0;
+
+  return {
+    percentage,
+    charging: status === "CHARGING" || status === "FULL" ||
+      (plugged !== "UNPLUGGED" && status !== "DISCHARGING"),
+    temperature: typeof d.temperature === "number" ? d.temperature : 0,
+    health: typeof d.health === "string" ? d.health : "UNKNOWN",
+  };
+}
+
+/**
  * Active notification PIDs — keyed by notification --id.
  * Before spawning a new notification for the same id, we SIGKILL the previous
  * process to prevent pile-up when Termux:API service is unresponsive.
@@ -513,20 +551,8 @@ export class AndroidPlatform implements Platform {
         env: termuxApiEnv(),
       });
       if (result.status === 0 && result.stdout) {
-        const data = JSON.parse(result.stdout) as {
-          percentage: number;
-          status: string;
-          plugged: string;
-          temperature: number;
-          health: string;
-        };
-        return {
-          percentage: data.percentage,
-          charging: data.status === "CHARGING" || data.status === "FULL" ||
-            (data.plugged !== "UNPLUGGED" && data.status !== "DISCHARGING"),
-          temperature: data.temperature,
-          health: data.health ?? "UNKNOWN",
-        };
+        const parsed = parseTermuxBatteryStatus(result.stdout);
+        if (parsed) return parsed;
       }
     } catch { /* battery info unavailable */ }
 

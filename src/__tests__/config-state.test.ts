@@ -194,6 +194,299 @@ describe("validateConfigFile — agent runtime types parse cleanly", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Config file parsing — uncovered branches in parseRawConfig / validateConfigFile
+// ---------------------------------------------------------------------------
+
+describe("validateConfigFile — [operad] vs [orchestrator] section names", () => {
+  test("[operad] section is accepted (primary name)", () => {
+    withTomlFile(
+      `[operad]
+       dashboard_port = 18970
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("[orchestrator] section is accepted (backward-compat alias)", () => {
+    withTomlFile(
+      `[orchestrator]
+       dashboard_port = 18970
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("empty config (no sections) is valid", () => {
+    withTomlFile(``, (p) => expect(validateConfigFile(p)).toEqual([]));
+  });
+});
+
+describe("validateConfigFile — battery section", () => {
+  test("[battery] section parses cleanly with all fields", () => {
+    withTomlFile(
+      `[operad]
+       [battery]
+       enabled = false
+       low_threshold_pct = 20
+       poll_interval_s = 30
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("[battery] section with only enabled = true is valid (other fields use defaults)", () => {
+    withTomlFile(
+      `[battery]
+       enabled = true
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+});
+
+describe("validateConfigFile — env var expansion", () => {
+  test("$VAR in session name is expanded at parse time", () => {
+    process.env["OPERAD_TEST_SESSION"] = "my-svc";
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "$OPERAD_TEST_SESSION"
+       type = "service"
+       command = "echo"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors).toEqual([]);
+      },
+    );
+    delete process.env["OPERAD_TEST_SESSION"];
+  });
+
+  test("\${VAR} braced syntax is also expanded", () => {
+    process.env["OPERAD_BRACED_NAME"] = "braced-svc";
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "\${OPERAD_BRACED_NAME}"
+       type = "service"
+       command = "echo"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors).toEqual([]);
+      },
+    );
+    delete process.env["OPERAD_BRACED_NAME"];
+  });
+
+  test("undefined env var expands to empty string (causes validation error for name)", () => {
+    // An undefined var → empty string → empty session name → validation error
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "$OPERAD_TOTALLY_MISSING_VAR_XYZ_99"
+       type = "service"
+       command = "echo"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        // name collapses to "" → "name is required" error
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.some((e) => /name/i.test(e))).toBe(true);
+      },
+    );
+  });
+});
+
+describe("validateConfigFile — [[session]] defaults and optional fields", () => {
+  test("service session with only name+command uses all defaults without error", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "minimal-svc"
+       type = "service"
+       command = "echo"
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("session with name containing uppercase is rejected", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "My-Service"
+       type = "service"
+       command = "echo"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.some((e) => /name/i.test(e))).toBe(true);
+      },
+    );
+  });
+
+  test("duplicate session names are rejected", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "svc"
+       type = "service"
+       command = "echo a"
+       [[session]]
+       name = "svc"
+       type = "service"
+       command = "echo b"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.some((e) => /duplicate/i.test(e))).toBe(true);
+      },
+    );
+  });
+
+  test("depends_on referencing an unknown session is rejected", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "app"
+       type = "service"
+       command = "echo"
+       depends_on = ["ghost"]
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.some((e) => /depends_on/.test(e) || /ghost/.test(e))).toBe(true);
+      },
+    );
+  });
+
+  test("depends_on referencing a known session is valid", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "db"
+       type = "service"
+       command = "echo"
+       [[session]]
+       name = "app"
+       type = "service"
+       command = "echo"
+       depends_on = ["db"]
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+});
+
+describe("validateConfigFile — malformed TOML", () => {
+  test("malformed TOML returns non-empty error array (does not throw)", () => {
+    withTomlFile(
+      `[[session
+       this is broken`,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.length).toBeGreaterThan(0);
+      },
+    );
+  });
+});
+
+describe("validateConfigFile — wake_lock_policy enum", () => {
+  const VALID_POLICIES = ["always", "active_sessions", "boot_only", "never"] as const;
+
+  for (const policy of VALID_POLICIES) {
+    test(`wake_lock_policy = "${policy}" is valid`, () => {
+      withTomlFile(
+        `[operad]
+         wake_lock_policy = "${policy}"
+        `,
+        (p) => expect(validateConfigFile(p)).toEqual([]),
+      );
+    });
+  }
+
+  test("invalid wake_lock_policy is rejected", () => {
+    withTomlFile(
+      `[operad]
+       wake_lock_policy = "turbo"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.some((e) => /wake_lock_policy/i.test(e))).toBe(true);
+      },
+    );
+  });
+});
+
+describe("validateConfigFile — process_budget overflow", () => {
+  test("30 enabled sessions exceed the default budget of 32 (30+5>32)", () => {
+    // Default process_budget=32; rule is budget >= sessions + 5
+    const sessions = Array.from({ length: 30 }, (_, i) =>
+      `[[session]]\nname = "svc-${String(i + 1).padStart(2, "0")}"\ntype = "service"\ncommand = "echo"\n`
+    ).join("\n");
+    withTomlFile(
+      `[operad]\n${sessions}`,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.some((e) => /process_budget/i.test(e))).toBe(true);
+      },
+    );
+  });
+
+  test("budget explicitly set high enough clears the overflow error", () => {
+    const sessions = Array.from({ length: 10 }, (_, i) =>
+      `[[session]]\nname = "svc-${String(i + 1).padStart(2, "0")}"\ntype = "service"\ncommand = "echo"\n`
+    ).join("\n");
+    withTomlFile(
+      `[operad]\nprocess_budget = 50\n${sessions}`,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.every((e) => !/process_budget/i.test(e))).toBe(true);
+      },
+    );
+  });
+});
+
+describe("validateConfigFile — session health override", () => {
+  test("session with [session.health] check=http and url parses cleanly", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "api"
+       type = "service"
+       command = "echo"
+       [session.health]
+       check = "http"
+       url = "http://localhost:8080/health"
+       unhealthy_threshold = 3
+      `,
+      (p) => expect(validateConfigFile(p)).toEqual([]),
+    );
+  });
+
+  test("unknown health check type is rejected", () => {
+    withTomlFile(
+      `[operad]
+       [[session]]
+       name = "api"
+       type = "service"
+       command = "echo"
+       [session.health]
+       check = "bananas"
+      `,
+      (p) => {
+        const errors = validateConfigFile(p);
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.some((e) => /health.check|bananas/i.test(e))).toBe(true);
+      },
+    );
+  });
+});
+
 describe("migrateState", () => {
   test("fresh state with no schemaVersion gets v0.4.0 notice", () => {
     const state: any = {};

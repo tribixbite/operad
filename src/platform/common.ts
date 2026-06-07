@@ -10,27 +10,36 @@ import { spawnSync } from "node:child_process";
 import type { SystemMemoryInfo } from "./platform.js";
 
 /**
+ * Pure parser: extract SystemMemoryInfo from the text content of /proc/meminfo.
+ * Missing fields default to 0; non-matching lines are ignored.
+ * Extracted so it can be unit-tested with fixture strings.
+ */
+export function parseMeminfo(content: string): SystemMemoryInfo {
+  const fields = new Map<string, number>();
+
+  for (const line of content.split("\n")) {
+    const match = line.match(/^(\w+):\s+(\d+)\s+kB/);
+    if (match) {
+      fields.set(match[1], parseInt(match[2], 10));
+    }
+  }
+
+  return {
+    total_kb: fields.get("MemTotal") ?? 0,
+    available_kb: fields.get("MemAvailable") ?? 0,
+    swap_total_kb: fields.get("SwapTotal") ?? 0,
+    swap_free_kb: fields.get("SwapFree") ?? 0,
+  };
+}
+
+/**
  * Parse /proc/meminfo into a SystemMemoryInfo struct.
  * Returns null if /proc/meminfo is unreadable.
  */
 export function readProcMeminfo(): SystemMemoryInfo | null {
   try {
     const content = readFileSync("/proc/meminfo", "utf-8");
-    const fields = new Map<string, number>();
-
-    for (const line of content.split("\n")) {
-      const match = line.match(/^(\w+):\s+(\d+)\s+kB/);
-      if (match) {
-        fields.set(match[1], parseInt(match[2], 10));
-      }
-    }
-
-    return {
-      total_kb: fields.get("MemTotal") ?? 0,
-      available_kb: fields.get("MemAvailable") ?? 0,
-      swap_total_kb: fields.get("SwapTotal") ?? 0,
-      swap_free_kb: fields.get("SwapFree") ?? 0,
-    };
+    return parseMeminfo(content);
   } catch {
     return null;
   }
@@ -65,6 +74,24 @@ export function parseProcStatTicks(statLine: string): number | null {
 }
 
 /**
+ * Pure parser: extract the parent PID (ppid) from a /proc/PID/stat line.
+ * The comm field (index 2) can contain spaces and parentheses, so we anchor
+ * after the LAST ')' in the line — the same strategy used for ticks.
+ * Returns null for malformed lines (no ')', non-numeric ppid).
+ * Extracted so it can be unit-tested independently.
+ */
+export function parseProcStatPpid(statLine: string): number | null {
+  const closeParen = statLine.lastIndexOf(")");
+  if (closeParen === -1) return null;
+
+  // After ')' + ' ' + state + ' ': fields[0]=state, fields[1]=ppid
+  const fields = statLine.slice(closeParen + 2).split(" ");
+  const ppid = parseInt(fields[1], 10);
+  if (isNaN(ppid)) return null;
+  return ppid;
+}
+
+/**
  * Build process tree from /proc: maps ppid → children with CPU ticks.
  * Scans all numeric entries in /proc, reads each stat file.
  */
@@ -78,15 +105,10 @@ export function buildProcTree(): Map<number, { pid: number; ticks: number }[]> {
       try {
         const pid = parseInt(entry, 10);
         const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-        const closeParen = stat.lastIndexOf(")");
-        if (closeParen === -1) continue;
-        const fields = stat.slice(closeParen + 2).split(" ");
-        const ppid = parseInt(fields[1], 10);
-        const utime = parseInt(fields[11], 10);
-        const stime = parseInt(fields[12], 10);
-        if (isNaN(ppid) || isNaN(utime) || isNaN(stime)) continue;
+        const ppid = parseProcStatPpid(stat);
+        const ticks = parseProcStatTicks(stat);
+        if (ppid === null || ticks === null) continue;
 
-        const ticks = utime + stime;
         let children = childrenOf.get(ppid);
         if (!children) {
           children = [];
@@ -126,15 +148,13 @@ export function readProcCwd(pid: number): string | null {
 export function hasProcAncestorComm(pid: number, comm: string, maxDepth = 15): boolean {
   let current = pid;
   for (let depth = 0; depth < maxDepth; depth++) {
-    // Read ppid from /proc/PID/stat
+    // Read ppid from /proc/PID/stat using the shared pure parser
     let ppid: number;
     try {
       const stat = readFileSync(`/proc/${current}/stat`, "utf-8");
-      const closeParen = stat.lastIndexOf(")");
-      if (closeParen < 0) return false;
-      const afterComm = stat.slice(closeParen + 2);
-      const fields = afterComm.split(" ");
-      ppid = parseInt(fields[1], 10); // field after state
+      const parsed = parseProcStatPpid(stat);
+      if (parsed === null) return false;
+      ppid = parsed;
     } catch {
       return false;
     }

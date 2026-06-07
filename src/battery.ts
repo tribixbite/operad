@@ -31,6 +31,36 @@ interface BatteryActionState {
   appliedAt: number;
 }
 
+/** What `checkAndAct` should do this cycle, given current status + prior state */
+export type BatteryAction = "trigger" | "clear" | "none";
+
+/** Hysteresis margin (percentage points above threshold) required to re-enable radios */
+export const BATTERY_HYSTERESIS_PCT = 5;
+
+/**
+ * Decide the low-battery action from current status, threshold, and whether
+ * protective actions are already applied. Pure — no IO, no side effects.
+ *
+ * - "trigger": battery at/below threshold, NOT charging, not already applied.
+ * - "clear":   already applied, now charging AND recovered strictly above
+ *              threshold + {@link BATTERY_HYSTERESIS_PCT} (avoids flapping).
+ * - "none":    steady state — nothing to do.
+ */
+export function batteryActionDecision(
+  status: BatteryStatus,
+  thresholdPct: number,
+  actionsApplied: boolean,
+): BatteryAction {
+  if (!actionsApplied && status.percentage <= thresholdPct && !status.charging) {
+    return "trigger";
+  }
+  if (actionsApplied && status.charging &&
+      status.percentage > thresholdPct + BATTERY_HYSTERESIS_PCT) {
+    return "clear";
+  }
+  return "none";
+}
+
 export class BatteryMonitor {
   private log: Logger;
   private lowThresholdPct: number;
@@ -77,9 +107,9 @@ export class BatteryMonitor {
     if (!status) return null;
 
     const plat = detectPlatform();
-    const isLow = status.percentage <= this.lowThresholdPct && !status.charging;
+    const action = batteryActionDecision(status, this.lowThresholdPct, this.actionState.actionsApplied);
 
-    if (isLow && !this.actionState.actionsApplied) {
+    if (action === "trigger") {
       this.log.warn(`Battery critically low: ${status.percentage}% (threshold: ${this.lowThresholdPct}%), not charging — disabling radios`, {
         battery_pct: status.percentage,
         charging: status.charging,
@@ -91,11 +121,7 @@ export class BatteryMonitor {
         appliedAtPct: status.percentage,
         appliedAt: Date.now(),
       };
-    }
-
-    // Re-enable once charging AND above threshold + 5% hysteresis
-    if (this.actionState.actionsApplied && status.charging &&
-        status.percentage > this.lowThresholdPct + 5) {
+    } else if (action === "clear") {
       this.log.info(`Battery recovered to ${status.percentage}% and charging — re-enabling radios`);
       plat.enableRadios();
       this.actionState.actionsApplied = false;

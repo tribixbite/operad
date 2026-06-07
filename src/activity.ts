@@ -24,8 +24,41 @@ interface CpuSnapshot {
   idle_streak: number;
 }
 
-/** Number of consecutive zero-delta polls before classifying as idle */
-const IDLE_THRESHOLD = 3;
+/** Number of consecutive zero-delta polls before classifying as idle (exported for tests) */
+export const IDLE_THRESHOLD = 3;
+
+/**
+ * Pure activity classifier — no I/O, no state mutation.
+ *
+ * Given the current tick reading and the previous snapshot, returns the new
+ * idle_streak and the resulting ActivityState. Extracted so it can be
+ * unit-tested independently of /proc reads.
+ *
+ * @param currentTicks  utime+stime ticks just read for this poll
+ * @param prev          previous snapshot (undefined = first observation)
+ * @returns { state, newStreak }
+ */
+export function classifyActivity(
+  currentTicks: number,
+  prev: { ticks: number; idle_streak: number } | undefined,
+): { state: ActivityState; newStreak: number } {
+  if (prev === undefined) {
+    // First observation — cannot compute a delta yet
+    return { state: "unknown", newStreak: 0 };
+  }
+
+  const delta = currentTicks - prev.ticks;
+
+  if (delta > 0) {
+    // CPU ticks advanced — session is doing real work
+    return { state: "active", newStreak: 0 };
+  }
+
+  // No tick change — increment idle streak
+  const newStreak = prev.idle_streak + 1;
+  const state: ActivityState = newStreak >= IDLE_THRESHOLD ? "idle" : "active";
+  return { state, newStreak };
+}
 
 export class ActivityDetector {
   private log: Logger;
@@ -65,24 +98,9 @@ export class ActivityDetector {
       return "unknown";
     }
 
-    const delta = ticks - prev.ticks;
-
-    if (delta > 0) {
-      // CPU ticks changed — process is doing work
-      this.snapshots.set(name, { ticks, ts: now, idle_streak: 0 });
-      return "active";
-    }
-
-    // No tick change — increment idle streak
-    const newStreak = prev.idle_streak + 1;
+    const { state, newStreak } = classifyActivity(ticks, prev);
     this.snapshots.set(name, { ticks, ts: now, idle_streak: newStreak });
-
-    if (newStreak >= IDLE_THRESHOLD) {
-      return "idle";
-    }
-
-    // Not enough consecutive zero-deltas yet to call it idle
-    return "active";
+    return state;
   }
 
   /**
@@ -108,16 +126,9 @@ export class ActivityDetector {
       return "unknown";
     }
 
-    const delta = ticks - prev.ticks;
-
-    if (delta > 0) {
-      this.snapshots.set(name, { ticks, ts: now, idle_streak: 0 });
-      return "active";
-    }
-
-    const newStreak = prev.idle_streak + 1;
+    const { state, newStreak } = classifyActivity(ticks, prev);
     this.snapshots.set(name, { ticks, ts: now, idle_streak: newStreak });
-    return newStreak >= IDLE_THRESHOLD ? "idle" : "active";
+    return state;
   }
 
   /** Remove tracking state for a session */

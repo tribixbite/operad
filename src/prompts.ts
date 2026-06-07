@@ -16,6 +16,17 @@ const HOME = homedir();
 const HISTORY_PATH = join(HOME, ".claude", "history.jsonl");
 const PROMPTS_JSON = join(HOME, ".local", "share", "tmx", "prompts.json");
 
+/** Resolve paths relative to an optional base directory override (for testing) */
+function resolvePaths(baseDir?: string): { historyPath: string; promptsJson: string } {
+  if (baseDir) {
+    return {
+      historyPath: join(baseDir, ".claude", "history.jsonl"),
+      promptsJson: join(baseDir, ".local", "share", "tmx", "prompts.json"),
+    };
+  }
+  return { historyPath: HISTORY_PATH, promptsJson: PROMPTS_JSON };
+}
+
 // -- Types -------------------------------------------------------------------
 
 export interface PromptEntry {
@@ -52,10 +63,10 @@ let parsedCache: ParsedCache | null = null;
 // -- Starred persistence -----------------------------------------------------
 
 /** Read starred IDs from disk */
-function getStarredIds(): Set<string> {
+function getStarredIds(promptsJson: string = PROMPTS_JSON): Set<string> {
   try {
-    if (!existsSync(PROMPTS_JSON)) return new Set();
-    const data = JSON.parse(readFileSync(PROMPTS_JSON, "utf-8")) as PromptsStorage;
+    if (!existsSync(promptsJson)) return new Set();
+    const data = JSON.parse(readFileSync(promptsJson, "utf-8")) as PromptsStorage;
     return new Set(data.starred ?? []);
   } catch {
     return new Set();
@@ -63,11 +74,11 @@ function getStarredIds(): Set<string> {
 }
 
 /** Write starred IDs atomically */
-function writeStarredIds(ids: Set<string>): void {
-  const dir = dirname(PROMPTS_JSON);
+function writeStarredIds(ids: Set<string>, promptsJson: string = PROMPTS_JSON): void {
+  const dir = dirname(promptsJson);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const data: PromptsStorage = { version: 1, starred: [...ids] };
-  writeFileSync(PROMPTS_JSON, JSON.stringify(data, null, 2));
+  writeFileSync(promptsJson, JSON.stringify(data, null, 2));
 }
 
 // -- Parsing -----------------------------------------------------------------
@@ -83,17 +94,21 @@ function promptId(display: string, timestamp: number): string {
 /**
  * Parse all prompts from history.jsonl.
  * Uses mtime+size cache to skip re-parsing when file hasn't changed.
+ * When historyPath is provided (overriding the module-level default), the
+ * module-level cache is bypassed so tests with temp dirs don't pollute it.
  */
-function parseAllPrompts(): Array<Omit<PromptEntry, "starred">> {
-  if (!existsSync(HISTORY_PATH)) return [];
+function parseAllPrompts(historyPath: string = HISTORY_PATH): Array<Omit<PromptEntry, "starred">> {
+  if (!existsSync(historyPath)) return [];
 
-  const st = statSync(HISTORY_PATH);
-  if (parsedCache && parsedCache.mtime === st.mtimeMs && parsedCache.size === st.size) {
+  const st = statSync(historyPath);
+  // Only use the module-level cache when using the real (default) path
+  const useCache = historyPath === HISTORY_PATH;
+  if (useCache && parsedCache && parsedCache.mtime === st.mtimeMs && parsedCache.size === st.size) {
     return parsedCache.entries;
   }
 
   const entries: Array<Omit<PromptEntry, "starred">> = [];
-  const content = readFileSync(HISTORY_PATH, "utf-8");
+  const content = readFileSync(historyPath, "utf-8");
   const lines = content.split("\n");
 
   for (const line of lines) {
@@ -127,7 +142,8 @@ function parseAllPrompts(): Array<Omit<PromptEntry, "starred">> {
   // Most recent first
   entries.sort((a, b) => b.timestamp - a.timestamp);
 
-  parsedCache = { mtime: st.mtimeMs, size: st.size, entries };
+  // Only update the module-level cache for the real (default) path
+  if (useCache) parsedCache = { mtime: st.mtimeMs, size: st.size, entries };
   return entries;
 }
 
@@ -140,10 +156,13 @@ export function searchPrompts(opts: {
   project?: string;
   limit?: number;
   offset?: number;
+  /** Optional base directory override (used in tests to avoid touching real HOME) */
+  _baseDir?: string;
 }): PromptSearchResult {
-  const { q, starred, project, limit = 50, offset = 0 } = opts;
-  const allEntries = parseAllPrompts();
-  const starredIds = getStarredIds();
+  const { q, starred, project, limit = 50, offset = 0, _baseDir } = opts;
+  const { historyPath, promptsJson } = resolvePaths(_baseDir);
+  const allEntries = parseAllPrompts(historyPath);
+  const starredIds = getStarredIds(promptsJson);
   const lowerQ = q?.toLowerCase();
 
   // Filter
@@ -183,24 +202,27 @@ export function searchPrompts(opts: {
 }
 
 /** Star a prompt by ID */
-export function starPrompt(id: string): boolean {
-  const ids = getStarredIds();
+export function starPrompt(id: string, _baseDir?: string): boolean {
+  const { promptsJson } = resolvePaths(_baseDir);
+  const ids = getStarredIds(promptsJson);
   ids.add(id);
-  writeStarredIds(ids);
+  writeStarredIds(ids, promptsJson);
   return true;
 }
 
 /** Unstar a prompt by ID */
-export function unstarPrompt(id: string): boolean {
-  const ids = getStarredIds();
+export function unstarPrompt(id: string, _baseDir?: string): boolean {
+  const { promptsJson } = resolvePaths(_baseDir);
+  const ids = getStarredIds(promptsJson);
   const deleted = ids.delete(id);
-  if (deleted) writeStarredIds(ids);
+  if (deleted) writeStarredIds(ids, promptsJson);
   return deleted;
 }
 
 /** Get unique project names from prompts (for filter dropdown) */
-export function getPromptProjects(): string[] {
-  const entries = parseAllPrompts();
+export function getPromptProjects(_baseDir?: string): string[] {
+  const { historyPath } = resolvePaths(_baseDir);
+  const entries = parseAllPrompts(historyPath);
   const projects = new Set<string>();
   for (const e of entries) {
     if (e.project) projects.add(e.project);

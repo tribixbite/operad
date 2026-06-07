@@ -15,9 +15,15 @@ import { homedir } from "node:os";
 const HOME = homedir();
 const NOTIFICATIONS_PATH = join(HOME, ".local", "share", "tmx", "logs", "notifications.jsonl");
 
+/** Resolve the JSONL file path; accepts an optional base dir override for testing */
+function notificationsPath(baseDir?: string): string {
+  if (baseDir) return join(baseDir, ".local", "share", "tmx", "logs", "notifications.jsonl");
+  return NOTIFICATIONS_PATH;
+}
+
 /** Ensure parent directory exists */
-function ensureDir(): void {
-  const dir = dirname(NOTIFICATIONS_PATH);
+function ensureDir(filePath: string): void {
+  const dir = dirname(filePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
@@ -27,8 +33,11 @@ export function appendNotification(opts: {
   title: string;
   content: string;
   session?: string;
+  /** Optional base directory override (used in tests to avoid touching real HOME) */
+  _baseDir?: string;
 }): NotificationRecord {
-  ensureDir();
+  const filePath = notificationsPath(opts._baseDir);
+  ensureDir(filePath);
   const record: NotificationRecord = {
     id: randomUUID().slice(0, 12),
     timestamp: new Date().toISOString(),
@@ -37,7 +46,7 @@ export function appendNotification(opts: {
     content: opts.content,
     session: opts.session,
   };
-  appendFileSync(NOTIFICATIONS_PATH, JSON.stringify(record) + "\n");
+  appendFileSync(filePath, JSON.stringify(record) + "\n");
   return record;
 }
 
@@ -45,13 +54,16 @@ export function appendNotification(opts: {
 export function readNotifications(opts?: {
   limit?: number;
   since?: string;
+  /** Optional base directory override (used in tests to avoid touching real HOME) */
+  _baseDir?: string;
 }): NotificationRecord[] {
   const limit = opts?.limit ?? 50;
   const sinceDate = opts?.since ? new Date(opts.since) : null;
+  const filePath = notificationsPath(opts?._baseDir);
 
-  if (!existsSync(NOTIFICATIONS_PATH)) return [];
+  if (!existsSync(filePath)) return [];
 
-  const content = readFileSync(NOTIFICATIONS_PATH, "utf-8");
+  const content = readFileSync(filePath, "utf-8");
   const lines = content.trim().split("\n");
   const results: NotificationRecord[] = [];
 

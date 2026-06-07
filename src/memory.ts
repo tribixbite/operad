@@ -13,6 +13,33 @@ import { detectPlatform } from "./platform/platform.js";
 /** Memory pressure levels based on MemAvailable thresholds */
 export type MemoryPressure = "normal" | "warning" | "critical" | "emergency";
 
+/** MemAvailable thresholds (MB) below which each pressure band activates */
+export interface PressureThresholds {
+  warningMb: number;
+  criticalMb: number;
+  emergencyMb: number;
+}
+
+/**
+ * Classify memory pressure from MemAvailable (MB) against thresholds.
+ * Pure. Strict less-than, emergency checked first — so a value exactly at a
+ * threshold lands in the safer (less-severe) band.
+ */
+export function classifyPressure(availableMb: number, t: PressureThresholds): MemoryPressure {
+  if (availableMb < t.emergencyMb) return "emergency";
+  if (availableMb < t.criticalMb) return "critical";
+  if (availableMb < t.warningMb) return "warning";
+  return "normal";
+}
+
+/**
+ * Used-memory percentage from total + available (MB). Pure.
+ * Guards against a zero/negative denominator (returns 0).
+ */
+export function computeUsedPct(totalMb: number, availableMb: number): number {
+  return totalMb > 0 ? Math.round(((totalMb - availableMb) / totalMb) * 100) : 0;
+}
+
 /** System-wide memory snapshot */
 export interface SystemMemory {
   /** Total physical RAM in MB */
@@ -88,7 +115,6 @@ export class MemoryMonitor {
 
     const totalMb = Math.round(info.total_kb / 1024);
     const availableMb = Math.round(info.available_kb / 1024);
-    const usedPct = totalMb > 0 ? Math.round(((totalMb - availableMb) / totalMb) * 100) : 0;
 
     return {
       total_mb: totalMb,
@@ -96,16 +122,17 @@ export class MemoryMonitor {
       swap_total_mb: Math.round(info.swap_total_kb / 1024),
       swap_free_mb: Math.round(info.swap_free_kb / 1024),
       pressure: this.classifyPressure(availableMb),
-      used_pct: usedPct,
+      used_pct: computeUsedPct(totalMb, availableMb),
     };
   }
 
-  /** Classify pressure from MemAvailable */
+  /** Classify pressure from MemAvailable using this monitor's thresholds */
   private classifyPressure(availableMb: number): MemoryPressure {
-    if (availableMb < this.emergencyMb) return "emergency";
-    if (availableMb < this.criticalMb) return "critical";
-    if (availableMb < this.warningMb) return "warning";
-    return "normal";
+    return classifyPressure(availableMb, {
+      warningMb: this.warningMb,
+      criticalMb: this.criticalMb,
+      emergencyMb: this.emergencyMb,
+    });
   }
 
   /**
