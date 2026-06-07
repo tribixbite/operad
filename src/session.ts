@@ -207,7 +207,7 @@ export function listTmuxSessions(): string[] {
  * ([a-z0-9-]+) so prefixing `=` is always safe.
  */
 export function sessionExists(name: string): boolean {
-  const result = spawnSync(TMUX_BIN(),["has-session", "-t", `=${name}`], {
+  const result = spawnSync(TMUX_BIN(),["has-session", "-t", formatTmuxTarget(name)], {
     timeout: 5000,
     stdio: "ignore",
     env: getCleanEnv(),
@@ -224,7 +224,7 @@ export function capturePane(sessionName: string, _lines = 5): string {
   // append `:` — that resolves to the session's current window, then to
   // its current pane. Without the colon, tmux treats `=name` as a literal
   // pane name and errors with "can't find pane".
-  const output = tmux("capture-pane", "-t", `=${sessionName}:`, "-p");
+  const output = tmux("capture-pane", "-t", formatTmuxTarget(sessionName, true), "-p");
   return output ?? "";
 }
 
@@ -233,10 +233,10 @@ export function sendKeys(sessionName: string, text: string, pressEnter = true): 
   // Send text and Enter as separate calls — Claude Code's TUI can miss
   // Enter when combined in a single send-keys invocation with text.
   // See capturePane() for why `=name:` (trailing colon) is required.
-  const textOk = tmux("send-keys", "-t", `=${sessionName}:`, text) !== null;
+  const textOk = tmux("send-keys", "-t", formatTmuxTarget(sessionName, true), text) !== null;
   if (!textOk) return false;
   if (pressEnter) {
-    return tmux("send-keys", "-t", `=${sessionName}:`, "Enter") !== null;
+    return tmux("send-keys", "-t", formatTmuxTarget(sessionName, true), "Enter") !== null;
   }
   return true;
 }
@@ -466,7 +466,7 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
   }
 
   // Try sending Ctrl-C first for a graceful exit
-  tmux("send-keys", "-t", `=${name}:`, "C-c");
+  tmux("send-keys", "-t", formatTmuxTarget(name, true), "C-c");
   await sleep(1000);
 
   // Send "exit" command
@@ -476,7 +476,7 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
   // If still alive, kill it
   if (sessionExists(name)) {
     log.info(`Force-killing session '${name}'`, { session: name });
-    tmux("kill-session", "-t", `=${name}`);
+    tmux("kill-session", "-t", formatTmuxTarget(name));
     await sleep(500);
   }
 
@@ -491,12 +491,12 @@ export async function stopSession(name: string, log: Logger, timeoutMs = 10_000)
 
 /** Kill a tmux session immediately */
 export function killSession(name: string): boolean {
-  return tmux("kill-session", "-t", `=${name}`) !== null;
+  return tmux("kill-session", "-t", formatTmuxTarget(name)) !== null;
 }
 
 /** Get the number of attached clients for a session */
 export function getAttachedClients(name: string): number {
-  const output = tmux("list-clients", "-t", `=${name}`);
+  const output = tmux("list-clients", "-t", formatTmuxTarget(name));
   if (!output) return 0;
   return output.split("\n").filter(Boolean).length;
 }
@@ -523,7 +523,7 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
   tmux("set-option", "-g", "set-titles-string", "#S");
 
   // If there's already a client on this session, nothing to do
-  const targetClients = tmux("list-clients", "-t", `=${sessionName}`, "-F", "#{client_tty}");
+  const targetClients = tmux("list-clients", "-t", formatTmuxTarget(sessionName), "-F", "#{client_tty}");
   if (targetClients && targetClients.trim().length > 0) {
     log.info(`Session '${sessionName}' already has a tab`, { session: sessionName });
     const clientTty = targetClients.trim().split("\n")[0];
@@ -545,7 +545,7 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
     const clientName = firstClient.substring(0, colonIdx);
     const clientTty = firstClient.substring(colonIdx + 1);
 
-    const switched = tmux("switch-client", "-c", clientName, "-t", `=${sessionName}`);
+    const switched = tmux("switch-client", "-c", clientName, "-t", formatTmuxTarget(sessionName));
     if (switched !== null) {
       log.info(`Switched client '${clientName}' to session '${sessionName}'`, { session: sessionName });
       tmux("refresh-client", "-c", clientName);
@@ -566,7 +566,7 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
 export function getSessionPanePids(sessionName: string): number[] {
   // list-panes uses target-window, so `=name:` (trailing colon) is required
   // for exact-match — see capturePane() for the full explanation.
-  const output = tmux("list-panes", "-t", `=${sessionName}:`, "-F", "#{pane_pid}");
+  const output = tmux("list-panes", "-t", formatTmuxTarget(sessionName, true), "-F", "#{pane_pid}");
   if (!output) return [];
   return output
     .split("\n")
@@ -689,4 +689,28 @@ export function resumeSession(sessionName: string, log: Logger): boolean {
 /** Promise-based sleep */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// -- Pure helpers (exported for unit tests) ------------------------------------
+
+/**
+ * Build a tmux target string with the exact-match `=` sigil.
+ *
+ * tmux has two distinct target namespaces:
+ *
+ *   target-session subcommands (has-session, kill-session, list-clients,
+ *   switch-client): `=name` is valid and matches exactly.
+ *
+ *   target-pane subcommands (capture-pane, send-keys, list-panes,
+ *   select-window): `=name` is treated as a literal pane name and errors
+ *   with "can't find pane". These need a target-window form: `=name:` —
+ *   the trailing colon resolves to the session's current window then its
+ *   current pane.
+ *
+ * @param name     - raw session name (alphanumeric + hyphens)
+ * @param forPane  - true when the target will be used in a pane/window
+ *                   subcommand; appends the trailing colon.
+ */
+export function formatTmuxTarget(name: string, forPane = false): string {
+  return forPane ? `=${name}:` : `=${name}`;
 }

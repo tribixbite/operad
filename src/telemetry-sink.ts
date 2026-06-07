@@ -17,11 +17,15 @@ import type { TelemetrySinkConfig, TelemetryRecord, TelemetryStats, TelemetrySdk
 
 /** SDK inference rules — checked in order, first match wins */
 const SDK_RULES: Array<{ test: (host: string, path: string) => boolean; sdk: TelemetrySdk }> = [
-  // Microsoft Aria / OneDS collector
+  // Microsoft OneCollector — MUST precede the general aria rule below, since
+  // "self.events.data.microsoft.com" also contains "events.data.microsoft.com".
+  // Path is already lower-cased by inferSdk, so match the lower-case literal.
+  { test: (h) => h.includes("self.events.data.microsoft.com"), sdk: "onecollector" },
+  { test: (_h, p) => p.includes("/onecollector"), sdk: "onecollector" },
+
+  // Microsoft Aria / OneDS collector (general host match)
   { test: (h) => h.includes("events.data.microsoft.com"), sdk: "aria" },
   { test: (h) => h.includes("browser.events.data.msn.com"), sdk: "aria" },
-  { test: (_h, p) => p.includes("/OneCollector"), sdk: "onecollector" },
-  { test: (h) => h.includes("self.events.data.microsoft.com"), sdk: "onecollector" },
 
   // Adjust attribution
   { test: (h) => h.includes("adjust.com"), sdk: "adjust" },
@@ -54,7 +58,7 @@ const SDK_RULES: Array<{ test: (host: string, path: string) => boolean; sdk: Tel
 ];
 
 /** Infer SDK from Host header and request path */
-function inferSdk(host: string, path: string): TelemetrySdk {
+export function inferSdk(host: string, path: string): TelemetrySdk {
   const h = host.toLowerCase();
   const p = path.toLowerCase();
   for (const rule of SDK_RULES) {

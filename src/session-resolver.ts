@@ -114,9 +114,10 @@ export function resolveBootSessions(
   registry: Registry,
   state: StateManager,
   log: Logger,
+  // Path to Claude's history.jsonl. Defaults to the real per-user file; tests
+  // pass a fixture so they don't read (and aren't slowed by) the real history.
+  historyPath: string = join(homedir(), ".claude", "history.jsonl"),
 ): void {
-  const home = homedir();
-  const historyPath = join(home, ".claude", "history.jsonl");
   const recentProjects = parseRecentProjects(historyPath, 1000);
   const namedSessions = findNamedSessions(historyPath, 7);
   const { auto_start, visible } = config.boot;

@@ -22,6 +22,62 @@ import type { OrchestratorContext } from "./orchestrator-context.js";
 /** Resolve ADB binary path at module load time — same pattern as daemon.ts */
 const ADB_BIN = detectPlatform().resolveAdbPath() ?? "adb";
 
+// -- Pure helpers (exported for unit tests) ------------------------------------
+
+/**
+ * Parse the text output of `adb devices` into two lists:
+ *   - `online`  — serials with state "device" (ready for commands)
+ *   - `stale`   — serials with state "offline" or "unauthorized"
+ *
+ * Handles the header line ("List of devices attached"), blank lines, and
+ * extra whitespace. Pure — no IO.
+ */
+export function parseAdbDevicesOutput(output: string): {
+  online: string[];
+  stale: string[];
+} {
+  const online: string[] = [];
+  const stale: string[] = [];
+  for (const line of output.split("\n")) {
+    if (!line.includes("\t")) continue; // header / blank lines
+    const [serial, state] = line.split("\t");
+    const trimmedState = state?.trim();
+    if (trimmedState === "device") {
+      online.push(serial.trim());
+    } else if (trimmedState === "offline" || trimmedState === "unauthorized") {
+      stale.push(serial.trim());
+    }
+  }
+  return { online, stale };
+}
+
+/**
+ * Choose the best ADB serial from a list of online serials.
+ *
+ * Preference order:
+ *   1. `127.0.0.1:*`  — loopback TCP connection
+ *   2. `localhost:*`   — named loopback
+ *   3. `<localIp>:*`  — device's own LAN IP (self-connection)
+ *   4. First entry    — fallback when no local match (or single device)
+ *
+ * Returns null if `online` is empty. Pure — no IO.
+ */
+export function resolveSerialFromList(
+  online: string[],
+  localIp: string | null,
+): string | null {
+  if (online.length === 0) return null;
+  if (online.length === 1) return online[0];
+  // Prefer any localhost / self-IP connection
+  const local = online.find(
+    (s) =>
+      s.startsWith("127.0.0.1:") ||
+      s.startsWith("localhost:") ||
+      (localIp !== null && s.startsWith(`${localIp}:`)),
+  );
+  return local ?? online[0];
+}
+
 export class AndroidEngine {
   // -- ADB serial cache -------------------------------------------------------
   private adbSerial: string | null = null;
@@ -153,18 +209,7 @@ export class AndroidEngine {
       });
       if (result.status !== 0 || !result.stdout) return null;
 
-      const lines = result.stdout.split("\n").filter((l) => l.includes("\t"));
-      const online: string[] = [];
-      const stale: string[] = [];
-
-      for (const line of lines) {
-        const [serial, state] = line.split("\t");
-        if (state?.trim() === "device") {
-          online.push(serial.trim());
-        } else if (state?.trim() === "offline" || state?.trim() === "unauthorized") {
-          stale.push(serial.trim());
-        }
-      }
+      const { online, stale } = parseAdbDevicesOutput(result.stdout);
 
       // Auto-disconnect stale entries to prevent "more than one device" errors
       for (const serial of stale) {
@@ -178,24 +223,19 @@ export class AndroidEngine {
       }
 
       // Prefer localhost/self-device connections over external phones
+      const localIp = this.getLocalIp();
+      const chosen = resolveSerialFromList(online, localIp)!; // online non-empty here
       if (online.length > 1) {
-        const localIp = this.getLocalIp();
-        const localhost = online.find((s) =>
-          s.startsWith("127.0.0.1:") ||
-          s.startsWith("localhost:") ||
-          (localIp && s.startsWith(`${localIp}:`))
-        );
-        if (localhost) {
-          this.ctx.log.debug(`Multiple ADB devices, preferring localhost: ${localhost}`);
-          this.adbSerial = localhost;
+        const pickedLocal = chosen.startsWith("127.0.0.1:") || chosen.startsWith("localhost:") ||
+          (localIp !== null && chosen.startsWith(`${localIp}:`));
+        if (pickedLocal) {
+          this.ctx.log.debug(`Multiple ADB devices, preferring localhost: ${chosen}`);
         } else {
-          this.ctx.log.warn(`Multiple ADB devices, no localhost match — using ${online[0]}. ` +
+          this.ctx.log.warn(`Multiple ADB devices, no localhost match — using ${chosen}. ` +
             `Devices: ${online.join(", ")}`);
-          this.adbSerial = online[0];
         }
-      } else {
-        this.adbSerial = online[0];
       }
+      this.adbSerial = chosen;
 
       this.adbSerialExpiry = now + AndroidEngine.ADB_SERIAL_TTL_MS;
       return this.adbSerial;

@@ -37,6 +37,77 @@ function detectLanguage(filePath: string): string {
   return "text";
 }
 
+// -- Pure parsers (exported for unit testing) ---------------------------------
+
+/**
+ * Parse the output of `git status --porcelain` into a list of dirty-file
+ * status strings. Each entry is a trimmed non-empty line from the output.
+ *
+ * @param statusOut Raw stdout from `git status --porcelain`
+ * @returns Array of status strings (e.g. [" M src/foo.ts", "?? bar.ts"])
+ */
+export function parseGitStatus(statusOut: string): string[] {
+  if (!statusOut) return [];
+  return statusOut.split("\n").map(l => l.trim()).filter(Boolean);
+}
+
+/**
+ * Parse the output of `git log --oneline -N` into structured commit records.
+ * Each line has the form `<hash> <message>`, where `<hash>` is the short SHA.
+ *
+ * @param logOut Raw stdout from `git log --oneline`
+ * @returns Array of `{ hash, message }` objects; empty when logOut is empty
+ */
+export function parseGitLog(logOut: string): Array<{ hash: string; message: string }> {
+  if (!logOut) return [];
+  return logOut.split("\n").filter(Boolean).map(line => {
+    const spaceIdx = line.indexOf(" ");
+    return {
+      hash:    spaceIdx > 0 ? line.slice(0, spaceIdx) : line,
+      message: spaceIdx > 0 ? line.slice(spaceIdx + 1) : "",
+    };
+  });
+}
+
+/**
+ * Attempt to extract `owner/repo` from a git remote URL.
+ * Handles HTTPS (`https://github.com/owner/repo.git`) and
+ * SSH (`git@github.com:owner/repo.git`) formats.
+ *
+ * Returns `null` when the URL cannot be parsed into exactly two path segments.
+ *
+ * @param remoteUrl Raw URL string from `git remote get-url origin`
+ */
+export function parseRemoteUrl(remoteUrl: string): { owner: string; repo: string } | null {
+  if (!remoteUrl) return null;
+
+  let path: string;
+
+  if (remoteUrl.startsWith("git@")) {
+    // SSH: git@github.com:owner/repo.git
+    const colonIdx = remoteUrl.indexOf(":");
+    if (colonIdx < 0) return null;
+    path = remoteUrl.slice(colonIdx + 1);
+  } else {
+    // HTTPS: https://github.com/owner/repo.git
+    try {
+      const url = new URL(remoteUrl);
+      path = url.pathname.replace(/^\//, "");
+    } catch {
+      return null;
+    }
+  }
+
+  // Strip .git suffix
+  path = path.replace(/\.git$/, "");
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length !== 2) return null;
+
+  return { owner: parts[0], repo: parts[1] };
+}
+
+// -- IO helpers ---------------------------------------------------------------
+
 /** Run a git command in a project directory, return stdout */
 function gitCmd(projectPath: string, args: string[]): string {
   const result = spawnSync("git", args, {
@@ -53,23 +124,11 @@ export function getGitInfo(projectPath: string): GitInfo {
   // Current branch
   const branch = gitCmd(projectPath, ["rev-parse", "--abbrev-ref", "HEAD"]) || "unknown";
 
-  // Dirty files (porcelain format)
-  const statusOut = gitCmd(projectPath, ["status", "--porcelain"]);
-  const dirty_files = statusOut
-    ? statusOut.split("\n").map(l => l.trim()).filter(Boolean)
-    : [];
+  // Dirty files (porcelain format) — parsed via pure helper
+  const dirty_files = parseGitStatus(gitCmd(projectPath, ["status", "--porcelain"]));
 
-  // Recent commits (last 5, one-line format)
-  const logOut = gitCmd(projectPath, ["log", "--oneline", "-5"]);
-  const recent_commits = logOut
-    ? logOut.split("\n").filter(Boolean).map(line => {
-        const spaceIdx = line.indexOf(" ");
-        return {
-          hash: spaceIdx > 0 ? line.slice(0, spaceIdx) : line,
-          message: spaceIdx > 0 ? line.slice(spaceIdx + 1) : "",
-        };
-      })
-    : [];
+  // Recent commits (last 5, one-line format) — parsed via pure helper
+  const recent_commits = parseGitLog(gitCmd(projectPath, ["log", "--oneline", "-5"]));
 
   return { branch, dirty_files, recent_commits };
 }

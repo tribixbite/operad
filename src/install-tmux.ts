@@ -113,7 +113,7 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 /** Build the full command line for a given pkg manager. */
-function buildCommand(pm: Exclude<PkgManager, { kind: "windows-manual" } | { kind: "unknown" }>): {
+export function buildCommand(pm: Exclude<PkgManager, { kind: "windows-manual" } | { kind: "unknown" }>): {
   cmd: string;
   args: string[];
   display: string;

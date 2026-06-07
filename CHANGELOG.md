@@ -33,8 +33,24 @@ All notable changes to this project will be documented in this file.
   API gains the `accept_cap_downgrade` option.
 
 ### Fixed
+- **Test-suite hardening surfaced and fixed several real defects** while
+  raising coverage from ~50% to ~70% lines (279 → ~1700 tests):
+  - `memory-db.deleteExpired()` returned an inflated count — the `memories_fts`
+    sync trigger makes bun:sqlite report the FTS5 shadow-table cascade
+    (one deleted memory → ~7 changes). Now returns the true logical count.
+  - `memory-db.getSessionCosts` / `getDecisionQualityTrend` ordered only by
+    `created_at`, which is non-deterministic for same-second rows; added
+    `id` tiebreakers so "most recent first" and the trend split are stable.
+  - `tools.isAllowedPath()` resolved home via `os.homedir()`, which caches its
+    first value process-wide and ignores later `$HOME` changes; now reads
+    `$HOME` (homedir fallback) so the path gate honours a relocated home.
+  - `telemetry-sink` SDK inference: the `/OneCollector` path rule was
+    unreachable (path is lower-cased before matching) and the general aria
+    host rule shadowed the specific `self.events.data.microsoft.com`
+    OneCollector rule; rules reordered/lower-cased so both classify correctly.
 - **Scripts run from the dashboard no longer fail with `/usr/bin/env: bad
   interpreter` (gradle exit 126).** A build script launched from the
+  dashboard "Run script" tab (e.g. cleverkeys `build-on-termux.sh`) died
   dashboard "Run script" tab (e.g. cleverkeys `build-on-termux.sh`) died
   with `./gradlew: /usr/bin/env: bad interpreter: No such file or directory`,
   while the same script run from an interactive Termux shell succeeded. Root

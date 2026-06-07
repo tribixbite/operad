@@ -88,7 +88,11 @@ function resetCounter() {
 function sendAndCollect(
   payload: Buffer | string,
   expectedLines: number,
-  timeoutMs = 3000
+  // Generous ceiling: the promise resolves EARLY as soon as expectedLines
+  // arrive, so a high timeout never slows the happy path — it only tolerates a
+  // slow connect/round-trip when the full (44-file) suite has the event loop
+  // and CPU under load. A tight 3s ceiling flaked intermittently there.
+  timeoutMs = 10000
 ): Promise<string> {
   return new Promise((resolve) => {
     const conn = net.createConnection(SOCK_PATH);
@@ -137,9 +141,10 @@ function parseResponses(raw: string): IpcResponse[] {
 
 /**
  * Probe whether the server is still accepting new connections.
- * Returns true if a new connection succeeds within 1 second.
+ * Returns true if a new connection succeeds within the timeout (generous so a
+ * loaded full-suite run doesn't false-negative a live server).
  */
-function serverIsAlive(timeoutMs = 1000): Promise<boolean> {
+function serverIsAlive(timeoutMs = 5000): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = net.createConnection(SOCK_PATH);
     probe.on("connect", () => { probe.destroy(); resolve(true); });

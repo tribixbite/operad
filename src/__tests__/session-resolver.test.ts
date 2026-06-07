@@ -346,7 +346,7 @@ describe("resolveBootSessions — auto_start/visible partition", () => {
     const state = new StateManager(join(tmpDir, "boot-state-a.json"), silentLog());
     state.initFromConfig(cfg.sessions);
 
-    resolveBootSessions(cfg, reg, state, silentLog());
+    resolveBootSessions(cfg, reg, state, silentLog(), join(tmpDir, "history.jsonl"));
 
     // rank 0 and 1 are both >= auto_start (0) and < visible (5) → disabled
     for (const s of cfg.sessions.filter((s) => s.type === "claude")) {
@@ -364,7 +364,7 @@ describe("resolveBootSessions — auto_start/visible partition", () => {
     const state = new StateManager(join(tmpDir, "boot-state-b.json"), silentLog());
     state.initFromConfig(cfg.sessions);
 
-    resolveBootSessions(cfg, reg, state, silentLog());
+    resolveBootSessions(cfg, reg, state, silentLog(), join(tmpDir, "history.jsonl"));
 
     // Service must remain enabled
     expect(cfg.sessions.find((s) => s.name === "my-service")?.enabled).toBe(true);
@@ -377,7 +377,7 @@ describe("resolveBootSessions — auto_start/visible partition", () => {
     const state = new StateManager(join(tmpDir, "boot-state-c.json"), silentLog());
     state.initFromConfig(cfg.sessions);
 
-    resolveBootSessions(cfg, reg, state, silentLog());
+    resolveBootSessions(cfg, reg, state, silentLog(), join(tmpDir, "history.jsonl"));
 
     expect(cfg.sessions.find((s) => s.name === "my-daemon")?.enabled).toBe(true);
   });
@@ -396,7 +396,7 @@ describe("resolveBootSessions — auto_start/visible partition", () => {
     state.transition("xsession", "stopping");
     state.transition("xsession", "stopped");
 
-    resolveBootSessions(cfg, reg, state, silentLog());
+    resolveBootSessions(cfg, reg, state, silentLog(), join(tmpDir, "history.jsonl"));
 
     // State entry persists across resolveBootSessions (initFromConfig is additive)
     const entry = state.getSession("xsession");
@@ -425,7 +425,7 @@ describe("resolveBootSessions — auto_start/visible partition", () => {
     const state = new StateManager(join(tmpDir, "boot-state-e.json"), silentLog());
     state.initFromConfig(cfg.sessions);
 
-    resolveBootSessions(cfg, reg, state, silentLog());
+    resolveBootSessions(cfg, reg, state, silentLog(), join(tmpDir, "history.jsonl"));
 
     const updated = cfg.sessions.find((s) => s.name === "some-claude-proj");
     // session_id is either cleared (path in history) or unchanged (path not in history)
@@ -444,7 +444,7 @@ describe("resolveBootSessions — registry auto-registration side-effect", () =>
     const state = new StateManager(join(tmpDir, "boot-state-f.json"), silentLog());
     state.initFromConfig(cfg.sessions);
 
-    resolveBootSessions(cfg, reg, state, silentLog());
+    resolveBootSessions(cfg, reg, state, silentLog(), join(tmpDir, "history.jsonl"));
 
     // The session was already in config — resolveBootSessions calls registry.add
     // only for UNTRACKED projects. A config-registered path should stay in config
