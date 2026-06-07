@@ -19,6 +19,79 @@ export interface RunChecksOptions {
   skipSlowChecks?: boolean;
 }
 
+// ── Pure helpers (exported for testing) ───────────────────────────────────
+
+/** Severity rank used by worstStatus — higher = worse. */
+const STATUS_RANK: Record<CheckStatus, number> = { ok: 0, warn: 1, fail: 2 };
+
+/**
+ * Return the worst status across an array of results.
+ * An empty array returns "ok" (nothing checked = nothing broken).
+ */
+export function worstStatus(results: CheckResult[]): CheckStatus {
+  let worst: CheckStatus = "ok";
+  for (const r of results) {
+    if (STATUS_RANK[r.status] > STATUS_RANK[worst]) {
+      worst = r.status;
+      if (worst === "fail") break; // can't get worse
+    }
+  }
+  return worst;
+}
+
+/**
+ * Produce a one-line human-readable summary of a set of check results,
+ * e.g. "3 ok, 1 warn, 0 fail" with a trailing overall-status word.
+ */
+export function summaryLine(results: CheckResult[]): string {
+  const counts = { ok: 0, warn: 0, fail: 0 };
+  for (const r of results) counts[r.status]++;
+  const overall = worstStatus(results);
+  return `${counts.ok} ok, ${counts.warn} warn, ${counts.fail} fail — ${overall}`;
+}
+
+/**
+ * Parse whether `[adb] enabled = true` appears in a TOML config string.
+ * Exported so the parsing logic can be unit-tested independently of the FS.
+ */
+export function parseAdbEnabled(text: string): boolean {
+  const adbBlock = text.match(/\[adb\][^[]*?enabled\s*=\s*(true|false)/i);
+  if (!adbBlock) return false;
+  return adbBlock[1].toLowerCase() === "true";
+}
+
+/**
+ * Extract the set of unique runtime type ids referenced by `type = "<id>"`
+ * lines in a TOML config string. Exported for unit testing.
+ */
+export function parseRuntimeTypes(text: string): Set<string> {
+  const types = new Set<string>();
+  const re = /^\s*type\s*=\s*"([a-z]+)"/gim;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) types.add(m[1].toLowerCase());
+  return types;
+}
+
+/**
+ * Classify the content of a config file as ok / warn.
+ * Returns an "ok" CheckResult when the content contains a recognised section
+ * header, "warn" when the content looks empty/unrecognised.
+ *
+ * Exported so the content-classification branch can be tested without writing
+ * a real TOML parser or hitting the filesystem.
+ */
+export function classifyConfigContent(path: string, content: string): CheckResult {
+  if (!content.includes("[operad]") && !content.includes("[orchestrator]") && !content.includes("[[session]]")) {
+    return {
+      name: "config",
+      status: "warn",
+      message: `Config at ${path} has no [operad] or [[session]] sections`,
+      fix: "Add at least [operad] or [[session]] to your config",
+    };
+  }
+  return { name: "config", status: "ok", message: path };
+}
+
 export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const platform = detectPlatform();
@@ -100,11 +173,9 @@ function checkAdbBinary(configPath?: string): CheckResult {
   if (existsSync(path)) {
     try {
       const text = readFileSync(path, "utf8");
-      // Match `enabled = true` inside the [adb] section. Tolerant: allows
-      // whitespace / tabs / quoted booleans. Doctor is best-effort here —
-      // the real source of truth is config.ts at boot.
-      const adbBlock = text.match(/\[adb\][^[]*?enabled\s*=\s*(true|false)/i);
-      if (adbBlock) adbEnabled = adbBlock[1].toLowerCase() === "true";
+      // parseAdbEnabled matches `enabled = true/false` inside the [adb] section.
+      // Doctor is best-effort here — the real source of truth is config.ts at boot.
+      adbEnabled = parseAdbEnabled(text);
     } catch { /* ignore — defaults to disabled */ }
   }
   if (!adbEnabled) {
@@ -166,10 +237,7 @@ function checkAgentRuntimes(configPath?: string): CheckResult[] {
   // Tolerant scan: every `type = "<id>"` line. The TOML parser is the real
   // source of truth at boot; here we just discover which runtimes are
   // referenced so we know which probes to run.
-  const types = new Set<string>();
-  const re = /^\s*type\s*=\s*"([a-z]+)"/gim;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) types.add(m[1].toLowerCase());
+  const types = parseRuntimeTypes(text);
 
   // Map runtime → (binary name, install hints per platform). claude's
   // binary path is intentionally omitted — the SDK bridge handles it.
@@ -373,15 +441,7 @@ function checkConfig(configPath?: string): CheckResult {
   }
   try {
     const content = readFileSync(path, "utf8");
-    if (!content.includes("[operad]") && !content.includes("[orchestrator]") && !content.includes("[[session]]")) {
-      return {
-        name: "config",
-        status: "warn",
-        message: `Config at ${path} has no [operad] or [[session]] sections`,
-        fix: "Add at least [operad] or [[session]] to your config",
-      };
-    }
-    return { name: "config", status: "ok", message: path };
+    return classifyConfigContent(path, content);
   } catch (err: any) {
     return {
       name: "config",

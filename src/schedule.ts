@@ -58,8 +58,10 @@ export type ScheduleHandler = (schedule: ScheduleRecord) => Promise<{
  * Parse a 5-field cron expression and return the next fire time after `after`.
  * Supports: numbers, *, /step, ranges (1-5), lists (1,3,5).
  * Does NOT support: @yearly, @monthly, etc.
+ *
+ * Exported for unit testing — use ScheduleEngine for production scheduling.
  */
-function nextCronTime(expr: string, after: Date): Date | null {
+export function nextCronTime(expr: string, after: Date): Date | null {
   const fields = expr.trim().split(/\s+/);
   if (fields.length !== 5) return null;
 

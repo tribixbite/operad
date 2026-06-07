@@ -38,9 +38,17 @@ const INDEX_REPO = "tribixbite/operad-stream-skills";
  * Commit SHA of the curated index repo at the version operad ships
  * against. EMPTY = provider disabled (per the spec — refuse to
  * silently auto-pull from main HEAD).
+ *
+ * The value frozen at build-time (the empty string below) is overridable
+ * at runtime via `OPERAD_CURATED_COMMIT_SHA` — checked dynamically in
+ * `loadIndex()` so test harnesses can set the env var after module load
+ * without re-importing.
  */
-const INDEX_COMMIT_SHA: string =
-  process.env.OPERAD_CURATED_COMMIT_SHA ?? "";
+const BUILT_IN_COMMIT_SHA: string = "";
+/** Returns the effective SHA: env override takes precedence over built-in. */
+function indexCommitSha(): string {
+  return process.env.OPERAD_CURATED_COMMIT_SHA ?? BUILT_IN_COMMIT_SHA;
+}
 
 interface CuratedEntry {
   locator: string;                  // user-facing slug (e.g. owner/skill)
@@ -88,7 +96,7 @@ export const operadCuratedProvider: ProviderModule = {
     if (!entry) {
       throw new SkillError(
         "PROVIDER_FETCH_FAILED",
-        `operad-curated: no entry for '${locator}' in index@${INDEX_COMMIT_SHA}`,
+        `operad-curated: no entry for '${locator}' in index@${indexCommitSha()}`,
         { locator },
       );
     }
@@ -130,9 +138,20 @@ export const operadCuratedProvider: ProviderModule = {
 
 let cachedIndex: CuratedIndex | null = null;
 
+/**
+ * Reset the in-memory index cache. Exported for test harnesses only —
+ * lets tests point at a fresh local index without a stale cached result
+ * bleeding across test cases.
+ * @internal
+ */
+export function _resetIndexCache(): void {
+  cachedIndex = null;
+}
+
 async function loadIndex(): Promise<CuratedIndex> {
   if (cachedIndex) return cachedIndex;
-  if (!INDEX_COMMIT_SHA) {
+  const sha = indexCommitSha();
+  if (!sha) {
     throw new SkillError(
       "PROVIDER_FETCH_FAILED",
       `operad-curated is disabled: no commit SHA pinned in this operad build. Set OPERAD_CURATED_COMMIT_SHA env var to enable.`,
@@ -146,7 +165,7 @@ async function loadIndex(): Promise<CuratedIndex> {
     ?? `https://raw.githubusercontent.com/{repo}/{sha}/index.json`;
   const url = tpl
     .replace("{repo}", INDEX_REPO)
-    .replace("{sha}", INDEX_COMMIT_SHA);
+    .replace("{sha}", sha);
   const body = url.startsWith("file://")
     ? readLocalIndex(url)
     : await httpsGet(url);
