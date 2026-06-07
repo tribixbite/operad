@@ -1,16 +1,21 @@
 /**
- * consolidation.test.ts — Unit tests for shouldConsolidate()
+ * consolidation.test.ts — Unit tests for memory consolidation engine
  *
- * Tests the idle-condition gate that controls when memory consolidation
- * ("REM sleep") is allowed to run. The function checks:
- * - idle time >= 1800s (30 min)
- * - charging and battery >= 30%
- * - SDK not busy
- * - minimum 12h since last consolidation
+ * Tests:
+ * - shouldConsolidate(): idle-condition gate (idle time, battery, SDK busy, interval)
+ * - getConsolidationHistory(): legacy DB column remapping
+ * - getLastConsolidationTime(): reads latest completed_at from consolidation_runs
+ * - runConsolidation(): exercises decay/prune/merge/cross-pollinate with in-memory DB
+ * - buildReflectionPrompt(): section rendering with fake MemoryDb stubs
  */
 
-import { describe, test, expect } from "bun:test";
-import { shouldConsolidate } from "../consolidation.js";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import {
+  shouldConsolidate,
+  getLastConsolidationTime,
+  runConsolidation,
+  buildReflectionPrompt,
+} from "../consolidation.js";
 import type { IdleConditions } from "../consolidation.js";
 
 /** Helper: build a fully-passing IdleConditions object */

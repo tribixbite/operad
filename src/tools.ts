@@ -1175,7 +1175,11 @@ export class ToolExecutor {
 
 /** Check if a path is within allowed directories (project dirs, ~/.claude/, etc.) */
 function isAllowedPath(filePath: string): boolean {
-  const home = homedir();
+  // Resolve home from $HOME (homedir() fallback). os.homedir() caches its first
+  // result process-wide and ignores later $HOME changes, which makes this gate
+  // brittle under anything that relocates HOME; reading the env var keeps it
+  // correct and matches the conventional way a relocated home is honoured.
+  const home = process.env.HOME || homedir();
   const allowedPrefixes = [
     join(home, ".claude"),
     join(home, "git"),

@@ -893,13 +893,25 @@ export class MemoryDb {
     return result.changes;
   }
 
-  /** Delete expired memories */
+  /** Delete expired memories; returns the number of memories removed */
   deleteExpired(): number {
     const db = this.requireDb();
-    const result = db.prepare(
-      `DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at <= unixepoch()`,
-    ).run();
-    return result.changes;
+    // Capture `now` once so the count and the delete share one cutoff (no TOCTOU
+    // across a second boundary).
+    const now = Math.floor(Date.now() / 1000);
+    const row = db.prepare(
+      `SELECT COUNT(*) AS c FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+    ).get(now) as { c: number } | undefined;
+    const n = row?.c ?? 0;
+    if (n > 0) {
+      // result.changes is NOT a usable logical count here: the memories_fts sync
+      // trigger makes bun:sqlite report the FTS5 shadow-table cascade, so one
+      // deleted memory shows up as ~7 changes. Count the matching rows instead.
+      db.prepare(
+        `DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+      ).run(now);
+    }
+    return n;
   }
 
   /** Count memories for a project */
@@ -936,7 +948,9 @@ export class MemoryDb {
   getSessionCosts(sessionName: string, limit = 100): CostRecord[] {
     const db = this.requireDb();
     return db.prepare(
-      `SELECT * FROM costs WHERE session_name = ? ORDER BY created_at DESC LIMIT ?`,
+      // id DESC tiebreaks rows sharing a created_at second so "most recent
+      // first" is deterministic.
+      `SELECT * FROM costs WHERE session_name = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(sessionName, limit) as unknown as CostRecord[];
   }
 
@@ -1328,7 +1342,9 @@ export class MemoryDb {
   } {
     const db = this.requireDb();
     const rows = db.prepare(
-      `SELECT score FROM agent_decisions WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?`,
+      // id DESC tiebreaks same-second inserts so the recent/older half split is
+      // deterministic.
+      `SELECT score FROM agent_decisions WHERE agent_name = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(agentName, windowSize) as Array<{ score: number | null }>;
 
     const total = rows.length;
