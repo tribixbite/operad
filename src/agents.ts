@@ -28,8 +28,29 @@ type AgentSource = "builtin" | "toml" | "project" | "user";
 /** Agent name validation pattern — prevents path traversal */
 const AGENT_NAME_PATTERN = /^[a-z0-9-]+$/;
 
-/** Directory for user-level agent definitions */
-const USER_AGENTS_DIR = join(homedir(), ".claude", "agents");
+/**
+ * Directory for user-level agent definitions. Resolved lazily through a
+ * settable home override so tests can redirect reads/writes to a temp dir:
+ * os.homedir() can't be redirected via $HOME on bun (it caches its first
+ * value process-wide), so an explicit override is the only reliable seam.
+ * Production leaves it null and resolves via homedir(). Mirrors the
+ * _setClaudeJsonHome() pattern in skills/claude-json.ts.
+ */
+let userAgentsHomeOverride: string | null = null;
+function userAgentsDir(): string {
+  return join(userAgentsHomeOverride ?? homedir(), ".claude", "agents");
+}
+
+/**
+ * Test-only: redirect ~/.claude/agents resolution to `<home>/.claude/agents`
+ * (pass null to restore the real per-user path). Tests that exercise
+ * saveUserAgent/deleteUserAgent/discoverUserAgents MUST set this in beforeEach
+ * and reset to null in afterEach to avoid polluting the real home directory.
+ * @internal
+ */
+export function _setUserAgentsHome(home: string | null): void {
+  userAgentsHomeOverride = home;
+}
 
 // -- Types --------------------------------------------------------------------
 
@@ -518,7 +539,7 @@ export function discoverProjectAgents(projectPath: string): AgentConfig[] {
 
 /** Discover user-level agent definitions from ~/.claude/agents/*.json */
 function discoverUserAgents(): AgentConfig[] {
-  return loadAgentsFromDir(USER_AGENTS_DIR, "user");
+  return loadAgentsFromDir(userAgentsDir(), "user");
 }
 
 /** Load agent JSON files from a directory */
@@ -590,13 +611,14 @@ export function saveUserAgent(agent: AgentConfig): void {
     throw new Error(`Invalid agent config: ${errors.join("; ")}`);
   }
 
-  if (!existsSync(USER_AGENTS_DIR)) {
-    mkdirSync(USER_AGENTS_DIR, { recursive: true });
+  const dir = userAgentsDir();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
 
   // Strip source field — it's inferred on load
   const { source: _, ...data } = agent;
-  const filePath = join(USER_AGENTS_DIR, `${agent.name}.json`);
+  const filePath = join(dir, `${agent.name}.json`);
   writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
@@ -610,7 +632,7 @@ export function deleteUserAgent(name: string): boolean {
     throw new Error(`Invalid agent name: '${name}'`);
   }
 
-  const filePath = join(USER_AGENTS_DIR, `${name}.json`);
+  const filePath = join(userAgentsDir(), `${name}.json`);
   if (!existsSync(filePath)) return false;
 
   unlinkSync(filePath);

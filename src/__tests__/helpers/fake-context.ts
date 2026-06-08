@@ -40,6 +40,7 @@ import { WakeLockManager } from "../../wake.js";
 import { MemoryMonitor } from "../../memory.js";
 import { ConsumerTracker } from "../../skills/consumer-tracker.js";
 import { defaultSwitchboard } from "../../types.js";
+import { _setUserAgentsHome } from "../../agents.js";
 import type { Logger } from "../../log.js";
 import type { OrchestratorContext } from "../../orchestrator-context.js";
 import type { TmxConfig, Switchboard, IpcResponse, SessionConfig } from "../../types.js";
@@ -200,6 +201,13 @@ export interface FakeContext {
 export async function makeFakeContext(opts: FakeContextOpts = {}): Promise<FakeContext> {
   const dir = mkdtempSync(join(tmpdir(), "operad-ctx-"));
   const log = opts.log ?? silentLog();
+
+  // Redirect ~/.claude/agents writes/reads into the temp dir for the lifetime
+  // of this context, so handler routes that call saveUserAgent/deleteUserAgent
+  // (agents toggle/update/delete) never pollute the real home. Reset in
+  // cleanup(). homedir() can't be redirected via $HOME on bun — this seam is
+  // the reliable route (see testing-gotchas).
+  _setUserAgentsHome(dir);
 
   const config = opts.config ?? makeConfig(dir, opts.extraToml ?? "");
   if (opts.agentConfigs) config.agents = opts.agentConfigs;
@@ -372,6 +380,7 @@ export async function makeFakeContext(opts: FakeContextOpts = {}): Promise<FakeC
     db,
     dir,
     cleanup: () => {
+      try { _setUserAgentsHome(null); } catch { /* ignore */ }
       try { db?.close(); } catch { /* ignore */ }
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
     },
