@@ -44,6 +44,7 @@ import type { Logger } from "../../log.js";
 import type { OrchestratorContext } from "../../orchestrator-context.js";
 import type { TmxConfig, Switchboard, IpcResponse, SessionConfig } from "../../types.js";
 import type { AgentConfig } from "../../agents.js";
+import type { AgentEngine } from "../../agent-engine.js";
 
 // ---------------------------------------------------------------------------
 // Small shared fixtures
@@ -84,6 +85,26 @@ export function makeSession(name: string, overrides: Partial<SessionConfig> = {}
     bare: false,
     ...overrides,
   };
+}
+
+/**
+ * A do-nothing AgentEngine fake whose method invocations are recorded into
+ * `calls` (keyed by a short name). Use when a handler needs an AgentEngine
+ * reference but the test isn't exercising agent logic itself.
+ */
+export function fakeAgentEngine(
+  calls: Record<string, unknown[][]> = {},
+): AgentEngine {
+  const rec = (k: string) => (...a: unknown[]) => { (calls[k] ??= []).push(a); };
+  return {
+    handleStandaloneAgentRun: async (...a: unknown[]) => { rec("run")(...a); return {}; },
+    handleAgentChat: async (...a: unknown[]) => { rec("chat")(...a); },
+    handleStandaloneAgentRun_label: undefined,
+    runOodaCycle: async () => { rec("ooda")(); },
+    executeRoundtable: async (...a: unknown[]) => { rec("roundtable")(...a); return {}; },
+    buildAgentContext: (...a: unknown[]) => { rec("ctx")(...a); return ""; },
+    reloadAgents: () => { rec("reload")(); },
+  } as unknown as AgentEngine;
 }
 
 /** Build a fully-defaulted AgentConfig. */
