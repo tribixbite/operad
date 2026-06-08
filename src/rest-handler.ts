@@ -1158,9 +1158,21 @@ export class RestHandler {
             return { status: 200, data: memoryDb.getRecentAgentMessages(limit) };
           }
 
-          if (name && segments[1] && method === "GET") {
+          // /api/agent-messages/pairs — distinct-conversation summary. MUST be
+          // checked before the two-agent conversation branch below: "pairs" is
+          // a single path segment, so the old `name && segments[1]` guard
+          // misread it as agent1 and this endpoint was unreachable.
+          if (name === "pairs" && method === "GET") {
+            return { status: 200, data: memoryDb.getAgentConversationPairs() };
+          }
+
+          // /api/agent-messages/<agent1>/<agent2> — conversation between two
+          // agents. agent2 is segments[2]; the previous code read segments[1]
+          // (== agent1/`name`), so every conversation query compared an agent
+          // to itself. Requiring segments[2] also stops `pairs` being shadowed.
+          if (name && segments[2] && method === "GET") {
             const agent1 = decodeURIComponent(name);
-            const agent2 = decodeURIComponent(segments[1]);
+            const agent2 = decodeURIComponent(segments[2]);
             const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
             return { status: 200, data: memoryDb.getConversation(agent1, agent2, limit) };
           }
@@ -1183,10 +1195,6 @@ export class RestHandler {
             } catch (err) {
               return { status: 400, data: { error: String(err) } };
             }
-          }
-
-          if (name === "pairs" && method === "GET") {
-            return { status: 200, data: memoryDb.getAgentConversationPairs() };
           }
 
           return { status: 400, data: { error: "Unknown agent-messages endpoint" } };

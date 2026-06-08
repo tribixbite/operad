@@ -749,13 +749,16 @@ describe("RestHandler — GET/POST /api/customization-file", () => {
     // The handler reconstructs the file path as:
     //   segments.slice(1).map(decodeURIComponent).join("/")
     // where segments = pathPart.replace(/^\/api\//, "").split("/").
-    // For an absolute path like /data/data/.../CLAUDE.md, splitting on "/"
-    // after stripping the leading slash gives ["data","data",...,"CLAUDE.md"].
-    // slice(1) drops "customization-file", join("/") re-assembles WITHOUT the
-    // leading slash.  resolve() then resolves relative to cwd — which will NOT
-    // match fc.dir.  The only way to pass a full absolute path through this
-    // handler is to percent-encode the leading slash so it survives the split:
-    // the path becomes one single encoded segment that decodes to "/abs/path".
+    //
+    // The dashboard (api.ts fetchFileContent) encodes each segment separately:
+    // split("/").map(encodeURIComponent).join("/"). For an ABSOLUTE path the
+    // leading "/" yields an empty first segment, so the URL is
+    // "/api/customization-file//abs/path" and the backend's slice(1).join("/")
+    // rebuilds ["","abs","path"].join("/") = "/abs/path" — leading slash
+    // preserved. That production round-trip is NOT broken.
+    //
+    // Here we use the equivalent single-segment form (encodeURIComponent of the
+    // whole path, "/"→"%2F"), which decodes back to the same absolute path.
     const encoded = encodeURIComponent(claudeMd); // encodes "/"→"%2F"
     const res = await h.handleDashboardApi("GET", `/api/customization-file/${encoded}`, "");
     expect(res.status).toBe(200);

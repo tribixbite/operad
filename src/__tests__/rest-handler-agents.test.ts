@@ -372,16 +372,44 @@ describe("RestHandler — agent-messages", () => {
     expect(msgs.some((m) => m.content === "Test content")).toBe(true);
   });
 
-  test("GET /api/agent-messages/pairs route: note the route-ordering behaviour", async () => {
-    // URL: /api/agent-messages/pairs → segments = ["agent-messages", "pairs"]
-    // The handler checks `name && segments[1]` BEFORE the `name === "pairs"` guard,
-    // so it routes to getConversation("pairs", "pairs", ...) instead of getPairs().
-    // This is source behaviour we document here rather than mask — the result is 200 + empty array.
+  test("GET /api/agent-messages/pairs returns the distinct-conversation summary", async () => {
+    // Regression guard: `pairs` is a single path segment, so the route must be
+    // matched BEFORE the two-agent conversation branch (the old `name &&
+    // segments[1]` guard shadowed it and this endpoint returned an empty
+    // pairs↔pairs conversation). It must now reach getAgentConversationPairs().
     fc.db!.sendAgentMessage("optimizer", "ideator", "Msg A");
+    fc.db!.sendAgentMessage("ideator", "optimizer", "Msg B");
     const res = await h.handleDashboardApi("GET", "/api/agent-messages/pairs", "");
     expect(res.status).toBe(200);
-    // Returns conversation between "pairs"↔"pairs" — always empty
-    expect(Array.isArray(res.data)).toBe(true);
+    const pairs = res.data as { agent1: string; agent2: string; message_count: number }[];
+    expect(Array.isArray(pairs)).toBe(true);
+    expect(pairs.length).toBeGreaterThan(0);
+    // The optimizer↔ideator pair must appear with both messages counted
+    const pair = pairs.find(
+      (p) =>
+        (p.agent1 === "optimizer" && p.agent2 === "ideator") ||
+        (p.agent1 === "ideator" && p.agent2 === "optimizer"),
+    );
+    expect(pair).toBeDefined();
+    expect(pair!.message_count).toBeGreaterThanOrEqual(2);
+  });
+
+  test("GET /api/agent-messages/<a>/<b> returns the a↔b conversation (not a↔a)", async () => {
+    // Regression guard: agent2 must come from segments[2], not segments[1].
+    // The old code passed segments[1] (== agent1) as agent2, so every query
+    // compared an agent to itself and returned nothing.
+    fc.db!.sendAgentMessage("optimizer", "ideator", "Cross msg");
+    fc.db!.sendAgentMessage("optimizer", "optimizer", "Self msg");
+    const res = await h.handleDashboardApi(
+      "GET",
+      "/api/agent-messages/optimizer/ideator",
+      "",
+    );
+    expect(res.status).toBe(200);
+    const conv = res.data as { content: string }[];
+    expect(conv.some((m) => m.content === "Cross msg")).toBe(true);
+    // The self-message must NOT bleed into the optimizer↔ideator conversation
+    expect(conv.some((m) => m.content === "Self msg")).toBe(false);
   });
 
   test("POST /api/agent-messages with invalid JSON → 400", async () => {
