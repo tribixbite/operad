@@ -28,7 +28,18 @@ export class PersistenceEngine {
   /** ISO date string of the last day snapshots were written (e.g. "2026-04-17") */
   private lastSnapshotDate: string | null = null;
 
-  constructor(private ctx: OrchestratorContext) {}
+  /**
+   * @param ctx          Shared orchestrator dependency context.
+   * @param snapshotDir  Base dir for daily agent snapshots. Defaults to the
+   *                     real per-user location; tests pass a temp dir so they
+   *                     stay hermetic (homedir() can't be redirected via $HOME
+   *                     on bun — see testing-gotchas). Mirrors the injectable-
+   *                     path pattern used by notifications.ts / prompts.ts.
+   */
+  constructor(
+    private ctx: OrchestratorContext,
+    private snapshotDir: string = join(homedir(), ".local", "share", "operad", "snapshots"),
+  ) {}
 
   /**
    * Run daily agent snapshots if they have not yet been taken today.
@@ -46,7 +57,7 @@ export class PersistenceEngine {
     if (this.lastSnapshotDate === today) return;
     this.lastSnapshotDate = today;
 
-    const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
+    const snapshotDir = this.snapshotDir;
     for (const agent of agentConfigs) {
       if (!agent.enabled) continue;
       try {
