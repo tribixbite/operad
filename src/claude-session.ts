@@ -18,10 +18,20 @@ import type {
 
 import { homedir } from "node:os";
 
-const HOME = homedir();
-const CLAUDE_DIR = join(HOME, ".claude");
-const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
-const HISTORY_PATH = join(CLAUDE_DIR, "history.jsonl");
+// Resolve the Claude config locations LAZILY rather than capturing homedir()
+// at module load. A module-level `const HOME = homedir()` freezes whatever
+// homedir() returned the first time this file was imported — which, under a
+// test that has installed a global mock.module("node:os") (skills-e2e /
+// skills-crash), can be a temp dir, and then every consumer reads the wrong
+// projects/history path for the rest of the process. Reading
+// process.env.HOME || homedir() at call time keeps it correct regardless of
+// import order or $HOME relocation (same convention as tools.ts /
+// session-resolver.ts). homedir() doesn't change at runtime in production, so
+// this is behaviourally identical there.
+function claudeHome(): string { return process.env.HOME || homedir(); }
+function claudeDir(): string { return join(claudeHome(), ".claude"); }
+function projectsDir(): string { return join(claudeDir(), "projects"); }
+function historyPath(): string { return join(claudeDir(), "history.jsonl"); }
 
 // -- Pricing (per million tokens) -------------------------------------------
 
@@ -79,7 +89,7 @@ function extractSessionTitle(filePath: string): string | null {
 /** List all JSONL files for a project path, sorted by mtime descending */
 export function resolveJsonlFiles(projectPath: string): JsonlFileInfo[] {
   const mangled = manglePath(projectPath);
-  const dir = join(PROJECTS_DIR, mangled);
+  const dir = join(projectsDir(), mangled);
   if (!existsSync(dir)) return [];
 
   const results: JsonlFileInfo[] = [];
@@ -114,9 +124,9 @@ export function resolveActiveJsonl(projectPath: string): JsonlFileInfo | null {
   if (files.length === 0) return null;
 
   // Try to find the active session from history.jsonl
-  if (existsSync(HISTORY_PATH)) {
+  if (existsSync(historyPath())) {
     try {
-      const content = readFileSync(HISTORY_PATH, "utf-8");
+      const content = readFileSync(historyPath(), "utf-8");
       const lines = content.trim().split("\n");
       // Read from end to find most recent entry for this project
       for (let i = lines.length - 1; i >= Math.max(0, lines.length - 500); i--) {

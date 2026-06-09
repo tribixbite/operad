@@ -26,8 +26,12 @@ function makeCtx(connectScript: string): any {
   };
 }
 
-// Needs a POSIX shell to run the 1s "connect" script — skip on Windows.
-describe.skipIf(process.platform === "win32")("AndroidEngine.fixAdb — non-blocking connect", () => {
+// This verifies AndroidEngine.fixAdb's Termux-specific non-blocking ADB connect
+// (the original bug was a synchronous spawnSync freezing the event loop). It
+// needs the real Termux $PREFIX sh + the AndroidEngine adb path, so it only
+// runs on Android/Termux — off-Termux there's no adb and the script-timing
+// assertion is meaningless. Gated to TERMUX_VERSION (skips on all CI runners).
+describe.skipIf(!process.env.TERMUX_VERSION)("AndroidEngine.fixAdb — non-blocking connect", () => {
   test("does not block the event loop during the ADB connect", async () => {
     const dir = mkdtempSync(join(tmpdir(), "operad-adb-"));
     const script = join(dir, "connect.sh");

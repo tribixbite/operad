@@ -27,7 +27,10 @@ function seedConversation(uuid: string): { projectPath: string; cleanup: () => v
   // Unique project path so the mangled dir can't collide with a real one.
   const projectPath = `/tmp/operad-runtime-test-${uuid}`;
   const mangled = projectPath.replace(/[^a-zA-Z0-9]/g, "-");
-  const dir = join(homedir(), ".claude", "projects", mangled);
+  // Resolve home the SAME way claude-session.ts does (process.env.HOME ||
+  // homedir()) so the fixture lands exactly where the adapter looks — even if
+  // a sibling test file left a global node:os mock or $HOME override in place.
+  const dir = join(process.env.HOME || homedir(), ".claude", "projects", mangled);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${uuid}.jsonl`), `{"type":"summary"}\n`);
   return { projectPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
