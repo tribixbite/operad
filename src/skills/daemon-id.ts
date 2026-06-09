@@ -21,7 +21,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -104,7 +104,10 @@ export function chooseLocation(baseDir?: string): string {
   //    Cleared on logout (acceptable — the id is per-machine, not per-
   //    session, and we cache the chosen path elsewhere anyway).
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg && xdg.startsWith("/") && safeWritable(xdg)) {
+  // isAbsolute() rather than startsWith("/") so a drive-letter path is accepted
+  // on Windows; the intent is "ignore a relative XDG value", and a bare "/"
+  // check wrongly rejects every absolute Windows path.
+  if (xdg && isAbsolute(xdg) && safeWritable(xdg)) {
     return join(xdg, "operad", "daemon-id");
   }
 

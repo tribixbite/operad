@@ -42,8 +42,11 @@ jobs:
             sudo apt-get update && sudo apt-get install -y tmux
           fi
 
+      # 20s per-test cap (default is 5s): the Windows runner is markedly slower
+      # at temp-dir SQLite I/O, so a few db-backed REST tests legitimately need
+      # more than 5s there. ubuntu/macOS finish well under it.
       - name: Test
-        run: bun test
+        run: bun test --timeout 20000
 
       - name: Verify bundle exists (POSIX)
         if: runner.os != 'Windows'
