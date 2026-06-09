@@ -123,26 +123,20 @@ export class WindowsPlatform implements Platform {
   }
 
   /**
-   * Check if a process is alive via `tasklist /FI "PID eq <pid>"`.
-   * Falls back to false on error.
+   * Check if a process is alive via signal-0 existence probe.
    */
   isProcessAlive(pid: number): boolean {
+    // Use signal 0 (existence probe — does not actually deliver a signal)
+    // rather than parsing `tasklist` CSV, which is fragile (locale/quoting and
+    // worker-PID differences made it return false for the live test process on
+    // CI). process.kill(pid, 0) throws ESRCH when the process is gone and EPERM
+    // when it exists but we can't signal it — the latter still means alive.
+    // Canonical, cross-platform, and spawn-free (so also faster).
     try {
-      const result = spawnSync(
-        "tasklist",
-        ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
-        {
-          encoding: "utf-8",
-          timeout: 5000,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-      if (result.status !== 0 || !result.stdout) return false;
-      // tasklist returns "INFO: No tasks are running which match the specified criteria."
-      // if the process doesn't exist; otherwise it prints a CSV row.
-      return result.stdout.includes(`"${pid}"`);
-    } catch {
-      return false;
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === "EPERM";
     }
   }
 
