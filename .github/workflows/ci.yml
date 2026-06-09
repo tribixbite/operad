@@ -29,6 +29,19 @@ jobs:
       - name: Build
         run: bun run build
 
+      # health.test.ts runs real tmux_alive probes. ubuntu-latest preinstalls
+      # tmux, but macos-latest does not — without this the health-sweep tests
+      # fail with "tmux binary not found". Windows has no tmux package and uses
+      # a different process model, so it's POSIX-only here.
+      - name: Install tmux (POSIX — for health-check tests)
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install tmux
+          else
+            sudo apt-get update && sudo apt-get install -y tmux
+          fi
+
       - name: Test
         run: bun test
 
