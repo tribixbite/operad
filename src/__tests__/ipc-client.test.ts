@@ -30,7 +30,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import * as net from "node:net";
-import { mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IpcServer, IpcClient } from "../ipc.js";
@@ -52,8 +52,12 @@ const silentLog: Logger = {
 
 /** Creates a fresh temp dir and returns it + a cleanup function */
 function makeTempDir(): { dir: string; cleanup: () => void } {
-  const dir = join(tmpdir(), `ipc-client-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
+  // macOS caps AF_UNIX sun_path at ~104 bytes; the default tmpdir()
+  // (/var/folders/…) plus a long dir name overflows it and every bind fails
+  // with ENAMETOOLONG. Use a short base + short mkdtemp prefix so the full
+  // socket path fits on macOS too (Linux/Windows tmpdir is already short).
+  const base = process.platform === "darwin" ? "/tmp" : tmpdir();
+  const dir = mkdtempSync(join(base, "oi-"));
   return {
     dir,
     cleanup() {

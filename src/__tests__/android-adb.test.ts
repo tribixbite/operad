@@ -26,11 +26,20 @@ function makeCtx(connectScript: string): any {
   };
 }
 
-describe("AndroidEngine.fixAdb — non-blocking connect", () => {
+// Needs a POSIX shell to run the 1s "connect" script — skip on Windows.
+describe.skipIf(process.platform === "win32")("AndroidEngine.fixAdb — non-blocking connect", () => {
   test("does not block the event loop during the ADB connect", async () => {
     const dir = mkdtempSync(join(tmpdir(), "operad-adb-"));
     const script = join(dir, "connect.sh");
-    writeFileSync(script, "#!/data/data/com.termux/files/usr/bin/sh\nsleep 1\nexit 0\n");
+    // Pick a shebang that actually exists on the host: Termux has no working
+    // /bin/sh (libtermux-exec rewrites it at exec, not for script shebangs),
+    // while CI Linux/macOS has no $PREFIX path. A wrong shebang makes the
+    // script fail instantly, fixAdb resolves before the 30ms timer, and the
+    // event-loop ordering assertion flips.
+    const shebang = process.env.TERMUX_VERSION
+      ? "#!/data/data/com.termux/files/usr/bin/sh"
+      : "#!/bin/sh";
+    writeFileSync(script, `${shebang}\nsleep 1\nexit 0\n`);
     chmodSync(script, 0o755);
     const engine = new AndroidEngine(makeCtx(script));
 

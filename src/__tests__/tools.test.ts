@@ -27,7 +27,7 @@ import {
   readFileSync,
   existsSync,
 } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { ToolExecutor } from "../tools.js";
 import type {
@@ -154,7 +154,11 @@ let tmp: string;
 let db: ReturnType<typeof makeDb>;
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), "operad-tools-test-"));
+  // Fixtures MUST live under $HOME so isAllowedPath() accepts them. On this
+  // Termux host os.tmpdir() happens to resolve under $HOME, but on CI it's
+  // /tmp (Linux) or %TEMP% (Windows) — outside the home-based allow-list — so
+  // using tmpdir() here made the file-read/write/list tests pass only locally.
+  tmp = mkdtempSync(join(resolveHome(), ".operad-tools-test-"));
   db = makeDb();
 });
 

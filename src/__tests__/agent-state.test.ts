@@ -615,7 +615,9 @@ describe("saveSnapshot", () => {
     const snapshotDir = join(tmpDir, "snapshots");
     const config = makeAgentConfig("my-agent");
     const filePath = saveSnapshot(db, config, snapshotDir);
-    const filename = filePath.split("/").pop()!;
+    // Split on BOTH separators — saveSnapshot uses path.join, so the basename
+    // is delimited by "\" on Windows and "/" elsewhere.
+    const filename = filePath.split(/[\\/]/).pop()!;
     expect(filename).toMatch(/^\d{4}-\d{2}-\d{2}\.operad-agent\.gz$/);
   });
 
