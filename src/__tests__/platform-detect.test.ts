@@ -11,6 +11,7 @@
  * Convention: import source with .js extension (esbuild CJS output).
  */
 import { describe, test, expect, beforeEach } from "bun:test";
+import { isAbsolute } from "node:path";
 import { detectPlatform, resetPlatform } from "../platform/platform.js";
 import type { Platform, PlatformId } from "../platform/platform.js";
 
@@ -323,27 +324,27 @@ describe("Platform behavioral contracts", () => {
     expect(paths.length).toBeGreaterThan(0);
     for (const p of paths) {
       expect(typeof p).toBe("string");
-      expect(p.startsWith("/")).toBe(true); // all config paths are absolute
+      expect(isAbsolute(p)).toBe(true); // all config paths are absolute
     }
   });
 
   test("defaultSocketPath() returns an absolute path string", () => {
     const sock = platform.defaultSocketPath();
     expect(typeof sock).toBe("string");
-    expect(sock.startsWith("/")).toBe(true);
+    expect(isAbsolute(sock)).toBe(true);
     expect(sock.length).toBeGreaterThan(1);
   });
 
   test("defaultStatePath() returns an absolute path string", () => {
     const state = platform.defaultStatePath();
     expect(typeof state).toBe("string");
-    expect(state.startsWith("/")).toBe(true);
+    expect(isAbsolute(state)).toBe(true);
   });
 
   test("defaultLogDir() returns an absolute path string", () => {
     const logDir = platform.defaultLogDir();
     expect(typeof logDir).toBe("string");
-    expect(logDir.startsWith("/")).toBe(true);
+    expect(isAbsolute(logDir)).toBe(true);
   });
 
   test("resolveBinaryPath('ls') returns a non-empty string", () => {

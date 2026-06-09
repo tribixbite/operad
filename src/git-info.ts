@@ -7,7 +7,21 @@
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
-import { join, resolve, extname, basename } from "node:path";
+import { join, resolve, relative, isAbsolute, extname, basename } from "node:path";
+
+/**
+ * True when `target` is `base` itself or lives underneath it. Uses
+ * path.relative so it's correct on Windows (`\` separators, drive letters)
+ * where the old `startsWith(base + "/")` check always failed — a resolved
+ * Windows path uses `\`, so it never starts with `base + "/"` and every file
+ * read was wrongly rejected as traversal. `allowSelf=false` additionally
+ * rejects `target === base` (used where reading the dir itself is nonsensical).
+ */
+function isContained(base: string, target: string, allowSelf: boolean): boolean {
+  const rel = relative(base, target);
+  if (rel === "") return allowSelf;
+  return !rel.startsWith("..") && !isAbsolute(rel);
+}
 import type { GitInfo, FileEntry, FileContentResponse } from "./types.js";
 
 const MAX_FILE_SIZE = 100 * 1024; // 100KB max file content
@@ -139,8 +153,8 @@ export function getFileTree(projectPath: string, subdir?: string): FileEntry[] {
     ? resolve(projectPath, subdir)
     : projectPath;
 
-  // Path traversal protection: resolved path must start with project path
-  if (!targetDir.startsWith(projectPath + "/") && targetDir !== projectPath) {
+  // Path traversal protection: resolved path must be the project dir or under it.
+  if (!isContained(projectPath, targetDir, /* allowSelf */ true)) {
     throw new Error("Path traversal blocked");
   }
 
@@ -182,8 +196,8 @@ export function getFileTree(projectPath: string, subdir?: string): FileEntry[] {
 export function getFileContent(projectPath: string, filePath: string): FileContentResponse {
   const fullPath = resolve(projectPath, filePath);
 
-  // Path traversal protection
-  if (!fullPath.startsWith(projectPath + "/")) {
+  // Path traversal protection — must be strictly under the project dir.
+  if (!isContained(projectPath, fullPath, /* allowSelf */ false)) {
     throw new Error("Path traversal blocked");
   }
 

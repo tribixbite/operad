@@ -130,12 +130,17 @@ export function makeAgent(name: string, overrides: Partial<AgentConfig> = {}): A
  */
 export function makeConfig(dir: string, extraToml = ""): TmxConfig {
   const tomlPath = join(dir, "operad-test.toml");
+  // TOML double-quoted strings treat "\" as an escape introducer, so a raw
+  // Windows path (C:\Users\…) would be mangled/rejected by the parser. Forward
+  // slashes are valid path separators on Windows too, so normalise before
+  // interpolating — keeps the generated config valid on every platform.
+  const p = dir.replace(/\\/g, "/");
   writeFileSync(
     tomlPath,
     `[operad]
-socket = "${dir}/operad.sock"
-state_file = "${dir}/state.json"
-log_dir = "${dir}/logs"
+socket = "${p}/operad.sock"
+state_file = "${p}/state.json"
+log_dir = "${p}/logs"
 dashboard_port = 0
 ${extraToml}
 `,

@@ -438,7 +438,9 @@ describe("writeClaudeJson — disk integration", () => {
     expect(typeof contents).toBe("object");
   });
 
-  test("creates ~/.claude.json with mode 0o600 (readable only by owner)", () => {
+  // Windows has no POSIX file-mode bits — Node ignores the `mode` option and
+  // statSync reports a fixed ACL-derived mode, so 0o600 is unverifiable there.
+  test.skipIf(process.platform === "win32")("creates ~/.claude.json with mode 0o600 (readable only by owner)", () => {
     const path = join(tmpDir, ".claude.json");
     writeClaudeJsonFn({ daemon_id: D1 });
     const { statSync } = require("node:fs");

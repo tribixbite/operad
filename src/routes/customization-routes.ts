@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve, basename } from "node:path";
+import { join, resolve, basename, sep } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "../orchestrator-context.js";
 import type { SessionConfig } from "../types.js";
@@ -64,7 +64,7 @@ export class CustomizationRoutes {
     const claudeDir = join(home, ".claude");
     const resolved = resolve(filePath);
 
-    if (resolved.startsWith(claudeDir + "/")) return true;
+    if (resolved.startsWith(claudeDir + sep)) return true;
 
     const knownPaths = this.ctx.config.sessions
       .map((s: SessionConfig) => s.path)
@@ -76,7 +76,7 @@ export class CustomizationRoutes {
       const projectDir = resolve(p);
       if (resolved === join(projectDir, "CLAUDE.md")) return true;
       if (resolved === join(projectDir, "AGENTS.md")) return true; // OpenCode/Codex/Claude cross-compat
-      if (resolved.startsWith(join(projectDir, ".claude") + "/")) return true;
+      if (resolved.startsWith(join(projectDir, ".claude") + sep)) return true;
     }
     // User-level AGENTS.md at $HOME/AGENTS.md (rare but supported by some tools)
     if (resolved === join(home, "AGENTS.md")) return true;

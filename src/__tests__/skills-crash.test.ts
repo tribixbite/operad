@@ -224,7 +224,9 @@ function assertNoOrphans(env: ReturnType<typeof buildEnv>) {
   }
 }
 
-describe("Phase E.4 — install transaction rollback under fault injection", () => {
+// Real git + on-disk install/rollback uses POSIX path layouts; the skill
+// marketplace targets the Termux/Linux/macOS daemon, so this is POSIX-only.
+describe.skipIf(process.platform === "win32")("Phase E.4 — install transaction rollback under fault injection", () => {
   test("fetch step failure leaves no orphan state", async () => {
     const env = buildEnv(makeFaultyProvider({ fetch: true }));
     await expect(env.mgr.install("git+url", fixtureRepo, "v0.1.0"))

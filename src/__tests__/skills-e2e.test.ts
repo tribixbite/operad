@@ -214,7 +214,11 @@ afterAll(() => {
 
 // -- Test --------------------------------------------------------------------
 
-describe("Phase E.3 end-to-end install/use/uninstall (git+url + real disk)", () => {
+// Real git clone/checkout + on-disk skill install exercise POSIX path layouts
+// (file:// URLs, "/"-separated cache paths). The skill marketplace targets the
+// Termux/Linux/macOS daemon; verifying its disk plumbing on Windows is out of
+// scope, so this end-to-end suite is POSIX-only.
+describe.skipIf(process.platform === "win32")("Phase E.3 end-to-end install/use/uninstall (git+url + real disk)", () => {
   test("install → list → tool registered → workflow registered → uninstall → cleaned up", async () => {
     // Pre-flight sanity.
     expect(toolExecutor.hasTool("e2e_echo")).toBe(false);

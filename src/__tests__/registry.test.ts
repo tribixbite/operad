@@ -17,7 +17,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 
@@ -55,7 +55,7 @@ describe("Registry.add", () => {
     const entry = reg.add({ name: "alpha", path: "/fake/path", priority: 50, auto_go: false });
     expect(entry).not.toBeNull();
     expect(entry!.name).toBe("alpha");
-    expect(entry!.path).toMatch(/fake\/path/); // resolve() keeps the tail
+    expect(entry!.path).toMatch(/fake[\\/]path/); // resolve() keeps the tail (\ on Windows)
     expect(entry!.opened_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(entry!.last_active).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
@@ -74,7 +74,7 @@ describe("Registry.add", () => {
     const entry = reg.add({ name: "rel", path: "../somewhere", priority: 10, auto_go: false });
     expect(entry!.path).not.toBe("../somewhere");
     // It should be absolute
-    expect(entry!.path.startsWith("/")).toBe(true);
+    expect(isAbsolute(entry!.path)).toBe(true);
   });
 
   test("add stores optional session_id", () => {

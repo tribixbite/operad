@@ -382,7 +382,7 @@ describe("daemon-id chooseLocation", () => {
     delete process.env.PREFIX;
 
     const location = chooseLocation("/fake/home");
-    expect(location).toBe("/fake/home/.local/share/operad/daemon-id");
+    expect(location).toBe(join("/fake/home", ".local", "share", "operad", "daemon-id"));
   });
 
   test("chooses XDG_RUNTIME_DIR when it exists and is an absolute path", () => {
@@ -405,7 +405,7 @@ describe("daemon-id chooseLocation", () => {
 
     const location = chooseLocation("/fallback");
     // Must not use the relative XDG path
-    expect(location).toBe("/fallback/.local/share/operad/daemon-id");
+    expect(location).toBe(join("/fallback", ".local", "share", "operad", "daemon-id"));
   });
 
   test("XDG_RUNTIME_DIR ignored when dir does not exist", () => {
@@ -413,14 +413,14 @@ describe("daemon-id chooseLocation", () => {
     delete process.env.PREFIX;
 
     const location = chooseLocation("/fallback");
-    expect(location).toBe("/fallback/.local/share/operad/daemon-id");
+    expect(location).toBe(join("/fallback", ".local", "share", "operad", "daemon-id"));
   });
 
   test("fallback path ends with operad/daemon-id segment", () => {
     delete process.env.XDG_RUNTIME_DIR;
     delete process.env.PREFIX;
     const location = chooseLocation("/any/base");
-    expect(location.endsWith("operad/daemon-id")).toBe(true);
+    expect(location.endsWith(join("operad", "daemon-id"))).toBe(true);
   });
 });
 
@@ -527,7 +527,7 @@ describe("daemon-id resolveDaemonId", () => {
       const result = resolveDaemonId(tmpBase);
       // XDG path doesn't start with ~/.local/share
       expect(result.may_sync).toBe(false);
-      expect(result.path).toContain("operad/daemon-id");
+      expect(result.path).toContain(join("operad", "daemon-id"));
     } finally {
       rmSync(tmpXdg, { recursive: true, force: true });
       if (origXdg2 === undefined) delete process.env.XDG_RUNTIME_DIR;
