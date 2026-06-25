@@ -26,7 +26,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { spawn as spawnAsync, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 
@@ -620,6 +620,100 @@ describe("runHealthSweep — adopted bare-PID sessions", () => {
     expect(r.healthy).toBe(false);
     expect(state.getSession("s")!.consecutive_failures).toBeGreaterThan(0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// runHealthSweep — adopted bare-PID sessions with explicit process_pattern
+//
+// Regression coverage for the termux-x11 false-negative: a bare service whose
+// wrapper re-execs to a different argv0 (termux-x11 → app_process
+// com.termux.x11.Loader) can never match the marker derived from its launch
+// command's first token. An explicit `health.process_pattern` must be honoured
+// as the cmdline marker for the adopted-PID path. These tests read
+// /proc/<pid>/cmdline, so they only run where that exists (Linux/Android).
+// ---------------------------------------------------------------------------
+
+/** True where /proc/<pid>/cmdline is readable (Linux/Android, not macOS/Windows) */
+const hasProcCmdline = (() => {
+  try {
+    readFileSync("/proc/self/cmdline", "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** Poll until the spawned child's cmdline reflects the exec'd target */
+async function waitForCmdline(pid: number, token: string, tries = 50): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const raw = readFileSync(`/proc/${pid}/cmdline`, "utf-8").replace(/\0/g, " ");
+      if (raw.includes(token)) return true;
+    } catch {
+      /* /proc entry not populated yet */
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return false;
+}
+
+describe("runHealthSweep — adopted bare-PID with explicit process_pattern", () => {
+  test.skipIf(!hasProcCmdline)(
+    "explicit health.process_pattern matches the live cmdline when the derived command marker cannot (re-exec wrapper)",
+    async () => {
+      // Mimics termux-x11: launched via command "true" (derived marker "true",
+      // absent from the live process) but the adopted PID's real cmdline is a
+      // `sleep` child. The explicit process_pattern "sleep" must be used.
+      const child = spawnAsync("sleep", ["300"], { stdio: "ignore" });
+      try {
+        await waitForCmdline(child.pid!, "sleep");
+        const session = makeSession("x11svc", {
+          bare: true,
+          command: "true", // deriveCmdlineMarker → "true" — NOT in `sleep 300`
+          max_restarts: 99,
+          health: hc({ check: "process", process_pattern: "sleep", unhealthy_threshold: 99 }),
+        });
+        const cfg = setupSweep([session]);
+        setSweepState("x11svc", "running", 0);
+
+        const adoptedPids = new Map<string, number>([["x11svc", child.pid!]]);
+        const results = runHealthSweep(cfg, state, silentLog(), adoptedPids);
+
+        const r = results.find((x) => x.session === "x11svc")!;
+        expect(r.healthy).toBe(true);
+        expect(state.getSession("x11svc")!.status).toBe("running");
+      } finally {
+        child.kill("SIGKILL");
+      }
+    },
+  );
+
+  test.skipIf(!hasProcCmdline)(
+    "explicit health.process_pattern takes precedence over a derived marker that would otherwise match",
+    async () => {
+      const child = spawnAsync("sleep", ["300"], { stdio: "ignore" });
+      try {
+        await waitForCmdline(child.pid!, "sleep");
+        const session = makeSession("x11svc2", {
+          bare: true,
+          command: "sleep 300", // derived marker "sleep" WOULD match the child
+          max_restarts: 99,
+          health: hc({ check: "process", process_pattern: "no-such-token-zzz", unhealthy_threshold: 99 }),
+        });
+        const cfg = setupSweep([session]);
+        setSweepState("x11svc2", "running", 0);
+
+        const adoptedPids = new Map<string, number>([["x11svc2", child.pid!]]);
+        const results = runHealthSweep(cfg, state, silentLog(), adoptedPids);
+
+        const r = results.find((x) => x.session === "x11svc2")!;
+        expect(r.healthy).toBe(false);
+        expect(r.message).toContain("cmdline doesn't match");
+      } finally {
+        child.kill("SIGKILL");
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

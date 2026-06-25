@@ -290,8 +290,18 @@ export function runHealthSweep(
     let result: HealthResult;
     if (adoptedPid !== undefined) {
       // Match cmdline as well as liveness so PID reuse can't keep a
-      // dead bare service looking healthy.
-      const marker = deriveCmdlineMarker(session.name, session.command);
+      // dead bare service looking healthy. Prefer an explicit
+      // process_pattern from the session's health config: the marker
+      // derived from the launch command's first token can never match a
+      // service whose wrapper re-execs to a different argv0 (e.g.
+      // termux-x11 → `app_process … com.termux.x11.Loader`), which would
+      // otherwise wedge the service in an endless restart loop despite
+      // the process being perfectly alive. Fall back to the heuristic
+      // marker when no pattern is configured.
+      const marker =
+        healthConfig.check === "process" && healthConfig.process_pattern
+          ? healthConfig.process_pattern
+          : deriveCmdlineMarker(session.name, session.command);
       result = pidAliveCheck(session.name, adoptedPid, Date.now(), marker);
     } else if (!tmuxAlive) {
       continue; // Already handled above
