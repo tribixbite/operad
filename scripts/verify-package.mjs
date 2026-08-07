@@ -16,7 +16,7 @@
  * Usage: node scripts/verify-package.mjs
  * Exit 0 = tarball complete, exit 1 = missing/empty entries (with details).
  */
-import { execFileSync } from "node:child_process";
+import { execSync } from "node:child_process";
 
 /**
  * Entries that MUST exist in the published tarball.
@@ -33,16 +33,17 @@ const REQUIRED = [
 ];
 
 /**
- * npm's executable name differs by platform: on Windows it is the shim
- * `npm.cmd`, and execFileSync does not do PATHEXT resolution, so a bare "npm"
- * fails with ENOENT there.
+ * @returns {{path: string, size: number}[]} files npm would include
+ *
+ * Runs through a shell deliberately. On Windows npm is the `npm.cmd` shim, and
+ * since the CVE-2024-27980 fix Node refuses to spawn `.cmd`/`.bat` without a
+ * shell — `execFileSync("npm", …)` gives ENOENT and `execFileSync("npm.cmd", …)`
+ * gives EINVAL. The command line below is a fixed literal with no interpolated
+ * input, so there is nothing for a shell to inject.
  */
-const NPM_BIN = process.platform === "win32" ? "npm.cmd" : "npm";
-
-/** @returns {{path: string, size: number}[]} files npm would include */
 function packFileList() {
   // --json puts the manifest on stdout; npm notices go to stderr.
-  const raw = execFileSync(NPM_BIN, ["pack", "--dry-run", "--json"], {
+  const raw = execSync("npm pack --dry-run --json", {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 120_000,
