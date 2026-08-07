@@ -32,10 +32,17 @@ const REQUIRED = [
   { path: "CHANGELOG.md", why: "release notes" },
 ];
 
+/**
+ * npm's executable name differs by platform: on Windows it is the shim
+ * `npm.cmd`, and execFileSync does not do PATHEXT resolution, so a bare "npm"
+ * fails with ENOENT there.
+ */
+const NPM_BIN = process.platform === "win32" ? "npm.cmd" : "npm";
+
 /** @returns {{path: string, size: number}[]} files npm would include */
 function packFileList() {
   // --json puts the manifest on stdout; npm notices go to stderr.
-  const raw = execFileSync("npm", ["pack", "--dry-run", "--json"], {
+  const raw = execFileSync(NPM_BIN, ["pack", "--dry-run", "--json"], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 120_000,
@@ -45,7 +52,9 @@ function packFileList() {
   if (!entry || !Array.isArray(entry.files)) {
     throw new Error("Unexpected `npm pack --json` output shape — no files[]");
   }
-  return entry.files;
+  // Normalise separators so the REQUIRED table (written with "/") matches on
+  // Windows too, regardless of what npm emits there.
+  return entry.files.map((f) => ({ ...f, path: String(f.path).replace(/\\/g, "/") }));
 }
 
 const files = packFileList();
