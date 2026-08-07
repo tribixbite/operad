@@ -93,7 +93,9 @@ export function scanSkillsInto(
     return;
   }
   for (const entry of entries) {
-    if (entry.startsWith(".")) continue;
+    // Skip dot-directories (.git, .cache) but keep dotted *files* — the
+    // previous flat loop listed anything ending in .md, so blanket-skipping
+    // every leading dot silently dropped skills that used to appear.
     const abs = join(dir, entry);
     let isDir = false;
     try {
@@ -102,6 +104,7 @@ export function scanSkillsInto(
       continue; // broken symlink
     }
     if (isDir) {
+      if (entry.startsWith(".")) continue;
       // Directory-form skill: the manifest is SKILL.md inside it.
       const manifest = join(abs, "SKILL.md");
       if (existsSync(manifest)) {

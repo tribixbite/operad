@@ -30,6 +30,9 @@ export type ApiHandler = (
   method: string,
   path: string,
   body: string,
+  /** Raw Content-Type request header — routes that mutate state outside
+   *  operad use it to require a CORS preflight (see /api/customization/import). */
+  contentType: string,
 ) => Promise<{ status: number; data: unknown }>;
 
 /** WebSocket message handler — receives parsed JSON messages from clients */
@@ -435,7 +438,12 @@ export class DashboardServer {
       }
     }
 
-    const result = await this.apiHandler(req.method ?? "GET", path, body);
+    const result = await this.apiHandler(
+      req.method ?? "GET",
+      path,
+      body,
+      String(req.headers["content-type"] ?? ""),
+    );
     res.writeHead(result.status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result.data));
   }

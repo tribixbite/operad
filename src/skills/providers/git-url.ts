@@ -27,6 +27,7 @@ import {
   type ProviderReadResult,
   type TrustTier,
   SkillError,
+  versionDirName,
 } from "../types.js";
 import { readSkillManifests } from "../adapter.js";
 
@@ -58,7 +59,11 @@ export const gitUrlProvider: ProviderModule = {
     // `../../../../etc` escaped the operad-owned cache and deleted an
     // arbitrary directory BEFORE the clone that would have failed.
     assertSafePathComponent(resolvedVersion, "version");
-    const targetDir = join(cacheParent, resolvedVersion);
+    // The directory name is derived, not the raw version: `commit:<sha>` is a
+    // legal POSIX name but an NTFS alternate-data-stream on Windows, where the
+    // clone would fail. store.cacheDir() applies the same mapping, so both
+    // agree on where the bundle lives.
+    const targetDir = join(cacheParent, versionDirName(resolvedVersion));
 
     mkdirSync(cacheParent, { recursive: true });
 
@@ -137,6 +142,11 @@ export const gitUrlProvider: ProviderModule = {
 
   async latest(locator: string): Promise<string> {
     const { url } = parseLocator(locator, "latest");
+    // Same guard as fetch(). resolveVersion shells out to `git ls-remote`,
+    // so an unguarded `ext::sh -c ...` locator executes here too. fetch() was
+    // hardened but this sibling entry point was not — any future update-check
+    // route would have inherited the hole.
+    assertSafeGitUrl(url);
     return resolveVersion(url, "latest");
   },
 };
@@ -184,8 +194,11 @@ export function assertSafeGitUrl(url: string): void {
     );
   }
   // Absolute/relative filesystem paths are legitimate — git clones bare local
-  // repos, and the test suite relies on it.
+  // repos, and the test suite relies on it. Windows drive paths (C:\repos\r,
+  // C:/repos/r) count too; rejecting them made local installs impossible there.
   if (url.startsWith("/") || url.startsWith("./") || url.startsWith("../")) return;
+  if (/^[a-zA-Z]:[\\/]/.test(url)) return;
+  if (url.startsWith(".\\") || url.startsWith("..\\")) return;
 
   const ok = ALLOWED_GIT_URL_PREFIXES.some((p) => url.startsWith(p));
   if (!ok) {

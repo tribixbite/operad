@@ -290,6 +290,21 @@ export function sanitizeLocator(locator: string): string {
 }
 
 /**
+ * Map a canonical version string to a filesystem-safe directory name.
+ *
+ * `commit:<sha>` is a legal POSIX filename but not a legal Windows one — the
+ * colon introduces an NTFS alternate data stream, so `git clone` into
+ * `C:\cache\...\commit:abc` fails. The logical version keeps the colon (it is
+ * the identity stored in SQLite and returned by the API); only the on-disk
+ * name is rewritten. Must be used by every path that builds a version
+ * directory, or the provider and the store will disagree about where a bundle
+ * lives.
+ */
+export function versionDirName(version: string): string {
+  return version.replace(/:/g, "-");
+}
+
+/**
  * Build the canonical `OperadSkill.id` from its components. Stable
  * across re-installs of the same (provider, locator, version).
  */

@@ -1306,7 +1306,8 @@ export class Daemon {
     this.dashboard = new DashboardServer(
       port,
       staticDir,
-      (method, path, body) => this.restHandler.handleDashboardApi(method, path, body),
+      (method, path, body, contentType) =>
+        this.restHandler.handleDashboardApi(method, path, body, contentType),
       this.log,
     );
 

@@ -16,6 +16,7 @@ import {
   type Provider,
   type TrustTier,
   sanitizeLocator,
+  versionDirName,
 } from "./types.js";
 
 /**
@@ -69,7 +70,7 @@ export class SkillStore {
    * land on disk. Includes sanitization to prevent path traversal.
    */
   cacheDir(provider: Provider, locator: string, version: string): string {
-    return join(this.cacheRoot, provider, sanitizeLocator(locator), version);
+    return join(this.cacheRoot, provider, sanitizeLocator(locator), versionDirName(version));
   }
 
   /**

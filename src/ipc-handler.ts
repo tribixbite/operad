@@ -153,7 +153,7 @@ export class IpcHandler {
     if (!mgr) {
       return {
         ok: false,
-        error: "Skill marketplace not enabled. Restart the daemon with --enable-skills-preview.",
+        error: "Skill marketplace not enabled. Set [skills] enabled = true in operad.toml (or pass --enable-skills-preview) and restart the daemon.",
       };
     }
     try {

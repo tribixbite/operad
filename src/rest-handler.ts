@@ -136,6 +136,7 @@ export class RestHandler {
     method: string,
     path: string,
     body: string,
+    contentType = "",
   ): Promise<{ status: number; data: unknown }> {
     // Resolve lazy deps once per request — getters may return null if not yet
     // initialised; every usage site guards with an explicit null check.
@@ -606,6 +607,21 @@ export class RestHandler {
             // POST /api/customization/import — body is {bundle, options?}
             if (method !== "POST") {
               return { status: 405, data: { error: "Method not allowed" } };
+            }
+            // Import writes files Claude Code later executes as instructions
+            // (and, with include_mcp, spawnable MCP commands). The dashboard
+            // has no auth and sends `Access-Control-Allow-Origin: *`, so
+            // accepting a CORS *simple* request would let any page the user
+            // visits fire this blind. Requiring application/json forces a
+            // preflight, which the wildcard ACAO does not satisfy for a
+            // cross-origin caller.
+            if (!/^application\/json\b/i.test(contentType)) {
+              return {
+                status: 415,
+                data: {
+                  error: "Content-Type: application/json is required for import",
+                },
+              };
             }
             try {
               const parsed = JSON.parse(body) as {
@@ -1734,7 +1750,7 @@ export class RestHandler {
           if (!mgr) {
             return {
               status: 503,
-              data: { error: "Skill marketplace not enabled. Restart daemon with --enable-skills-preview." },
+              data: { error: "Skill marketplace not enabled. Set [skills] enabled = true in operad.toml (or pass --enable-skills-preview) and restart the daemon." },
             };
           }
           const subAction = segments[2] ?? "";

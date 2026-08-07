@@ -28,12 +28,14 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join, dirname } from "node:path";
-import { realpathSync } from "node:fs";
+import { join, dirname, resolve, sep } from "node:path";
 
 /** Bump only for incompatible changes; importers accept older versions. */
 export const BUNDLE_FORMAT_VERSION = 1;
@@ -103,6 +105,8 @@ export interface CustomizationBundle {
   marketplaces: BundleMarketplace[];
   plugins: BundlePlugin[];
   mcp_servers: BundleMcpServer[];
+  /** Files omitted by the export size caps, if any. */
+  skipped?: string[];
 }
 
 // ── Path safety ─────────────────────────────────────────────────────────────
@@ -116,20 +120,86 @@ export interface CustomizationBundle {
  * no control characters, and (on Windows) no drive letters or reserved names.
  */
 export function isSafeRelPath(rel: string): boolean {
-  if (!rel || rel.length > 512) return false;
+  if (!rel || typeof rel !== "string" || rel.length > 512) return false;
   if (rel.startsWith("/") || rel.startsWith("\\")) return false;
   // Drive-qualified or UNC path (Windows).
   if (/^[a-zA-Z]:/.test(rel)) return false;
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(rel)) return false;
+  // A colon anywhere else opens an NTFS alternate data stream ("a.md:evil"),
+  // which writes hidden content instead of the intended file.
+  if (rel.includes(":")) return false;
 
   const parts = rel.split(/[/\\]/);
   for (const part of parts) {
     if (part === "" || part === "." || part === "..") return false;
     // Trailing dots/spaces are stripped by Windows, enabling collisions.
     if (/[. ]$/.test(part)) return false;
+    if (isWindowsReservedName(part)) return false;
   }
   return true;
+}
+
+/**
+ * Windows refuses (or redirects) these device names, with or without an
+ * extension: NUL.md opens the null device rather than creating a file.
+ * Checked on every platform so a bundle behaves identically everywhere.
+ */
+const WINDOWS_RESERVED = new Set([
+  "con", "prn", "aux", "nul",
+  "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+]);
+
+function isWindowsReservedName(part: string): boolean {
+  const stem = part.split(".")[0].toLowerCase();
+  return WINDOWS_RESERVED.has(stem);
+}
+
+/**
+ * Would writing `target` stay inside `root` once symlinks are resolved?
+ *
+ * `isSafeRelPath` only inspects the string, so it cannot detect that the
+ * collection root itself — or a directory along the way — is a symlink to
+ * somewhere else. Since both the exporter and the dashboard deliberately
+ * follow symlinked skill directories, that is a realistic layout, and a
+ * bundle carrying an innocuous-looking `rel_path` could write through it.
+ *
+ * Resolves the deepest existing ancestor of `target` (the rest does not exist
+ * yet and will be created inside it) and compares against the resolved root.
+ * Exported for testing.
+ */
+export function isContainedWrite(base: string, target: string): boolean {
+  // `base` is the LOGICAL containment root (the .claude directory), never the
+  // collection directory itself. Resolving the collection dir would follow the
+  // very symlink we are trying to detect and always report "contained".
+  let realBase: string;
+  try {
+    realBase = realpathSync(base);
+  } catch {
+    // Nothing exists yet, so there is no symlink to traverse; mkdir will
+    // create the tree inside the home dir. A lexical check is sufficient.
+    realBase = resolve(base);
+    return resolve(target).startsWith(realBase + sep);
+  }
+
+  // Resolve the deepest ancestor of the target that already exists — the rest
+  // will be created inside it, so it cannot introduce a new symlink.
+  let probe = dirname(resolve(target));
+  const seen = new Set<string>();
+  while (!existsSync(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe || seen.has(parent)) break;
+    seen.add(probe);
+    probe = parent;
+  }
+  let realParent: string;
+  try {
+    realParent = realpathSync(probe);
+  } catch {
+    return false;
+  }
+  return realParent === realBase || realParent.startsWith(realBase + sep);
 }
 
 /** Only these extensions are exported/imported as documents. */
@@ -148,6 +218,15 @@ export function isDocumentFile(name: string): boolean {
 const MAX_COLLECTION_DEPTH = 3;
 
 /**
+ * Export caps. The whole bundle is built in memory and serialised into one
+ * response, so an unbounded walk over ~/.claude is a memory/DoS hazard on a
+ * phone. Anything skipped is reported rather than silently dropped.
+ */
+const MAX_DOCUMENT_BYTES = 1024 * 1024;        // 1 MB per file
+const MAX_TOTAL_DOCUMENT_BYTES = 32 * 1024 * 1024; // 32 MB per bundle
+const MAX_DOCUMENT_COUNT = 5000;
+
+/**
  * Recursively collect documents under a collection root.
  *
  * Handles both layouts operad has to deal with:
@@ -162,9 +241,11 @@ export function collectDocuments(
   root: string,
   collection: DocCollection,
   scope: "user" | "project",
+  budget?: { bytes: number; count: number; skipped: string[] },
 ): BundleDocument[] {
   const out: BundleDocument[] = [];
   if (!existsSync(root)) return out;
+  const bud = budget ?? { bytes: 0, count: 0, skipped: [] };
 
   const walk = (dir: string, prefix: string, depth: number): void => {
     if (depth > MAX_COLLECTION_DEPTH) return;
@@ -189,13 +270,24 @@ export function collectDocuments(
         continue;
       }
       if (!isDocumentFile(name)) continue;
+      if (bud.count >= MAX_DOCUMENT_COUNT) {
+        bud.skipped.push(`${collection}/${rel} (document count cap reached)`);
+        continue;
+      }
       try {
-        out.push({
-          collection,
-          scope,
-          rel_path: rel,
-          content: readFileSync(abs, "utf-8"),
-        });
+        const size = statSync(abs).size;
+        if (size > MAX_DOCUMENT_BYTES) {
+          bud.skipped.push(`${collection}/${rel} (exceeds ${MAX_DOCUMENT_BYTES} byte per-file cap)`);
+          continue;
+        }
+        if (bud.bytes + size > MAX_TOTAL_DOCUMENT_BYTES) {
+          bud.skipped.push(`${collection}/${rel} (bundle size cap reached)`);
+          continue;
+        }
+        const content = readFileSync(abs, "utf-8");
+        bud.bytes += size;
+        bud.count += 1;
+        out.push({ collection, scope, rel_path: rel, content });
       } catch {
         // unreadable file — skip rather than fail the whole export
       }
@@ -267,9 +359,12 @@ export function buildBundle(opts: ExportSources = {}): CustomizationBundle {
   const claudeDir = join(home, ".claude");
 
   const documents: BundleDocument[] = [];
+  // One budget shared across every collection so the caps bound the whole
+  // bundle, not each directory independently.
+  const budget = { bytes: 0, count: 0, skipped: [] as string[] };
   for (const collection of DOC_COLLECTIONS) {
     documents.push(
-      ...collectDocuments(join(claudeDir, collection), collection, "user"),
+      ...collectDocuments(join(claudeDir, collection), collection, "user", budget),
     );
     if (opts.projectPath) {
       documents.push(
@@ -277,6 +372,7 @@ export function buildBundle(opts: ExportSources = {}): CustomizationBundle {
           join(opts.projectPath, ".claude", collection),
           collection,
           "project",
+          budget,
         ),
       );
     }
@@ -294,6 +390,9 @@ export function buildBundle(opts: ExportSources = {}): CustomizationBundle {
     marketplaces: readMarketplaces(home),
     plugins: opts.plugins ?? [],
     mcp_servers: opts.mcpServers ?? [],
+    // Never let a cap silently truncate an export — a migration that quietly
+    // dropped files would look successful and lose data.
+    skipped: budget.skipped,
   };
 }
 
@@ -353,31 +452,63 @@ export function validateBundle(value: unknown): string | null {
   return null;
 }
 
-/** Merge `entries` into a JSON object file, creating it when absent. */
+/**
+ * Merge into a JSON object file, creating it when absent.
+ *
+ * REFUSES to touch a file that exists but does not parse as a plain JSON
+ * object. These targets are `~/.claude.json` and `~/.claude/settings.json` —
+ * Claude Code's entire state (project history, MCP servers, account,
+ * onboarding) lives in the former. An earlier version fell back to `{}` on a
+ * parse error and then wrote it out, so a single unparseable byte anywhere in
+ * ~/.claude.json silently replaced the whole file with just the imported keys.
+ * Refusing and reporting is the only safe behaviour: an import must never be
+ * able to destroy state it did not create.
+ *
+ * Returns null on success, or a human-readable reason the merge was skipped.
+ */
 function mergeJsonFile(
   path: string,
   mutate: (obj: Record<string, unknown>) => void,
   dryRun: boolean,
-): void {
+): string | null {
   let obj: Record<string, unknown> = {};
   if (existsSync(path)) {
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-      // Must be a plain object. `typeof [] === "object"` is true, and
-      // assigning a key to an array is silently dropped by JSON.stringify —
-      // the merge would appear to succeed and write nothing.
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        obj = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Malformed file — start from an empty object rather than throwing away
-      // the import. The original is overwritten only when not a dry run.
+      parsed = JSON.parse(readFileSync(path, "utf-8"));
+    } catch (err) {
+      return `${path} is not valid JSON (${(err as Error).message}) — refusing to overwrite it; fix or move the file and retry`;
     }
+    // `typeof [] === "object"`, and assigning a key to an array is dropped by
+    // JSON.stringify, so arrays must be rejected explicitly rather than
+    // adopted as the merge target.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return `${path} does not contain a JSON object — refusing to overwrite it`;
+    }
+    obj = parsed as Record<string, unknown>;
   }
-  mutate(obj);
-  if (dryRun) return;
+
+  try {
+    mutate(obj);
+  } catch (err) {
+    // e.g. an existing key whose value is a frozen/primitive shape we cannot
+    // extend. Leave the file alone.
+    return `${path} could not be merged: ${(err as Error).message}`;
+  }
+
+  if (dryRun) return null;
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(obj, null, 2)}\n`, "utf-8");
+  // Write atomically — Claude Code writes these files concurrently, and a
+  // crash partway through a plain writeFileSync would truncate them.
+  const tmp = `${path}.operad-import-${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`, "utf-8");
+    renameSync(tmp, path);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    return `${path} could not be written: ${(err as Error).message}`;
+  }
+  return null;
 }
 
 /**
@@ -407,8 +538,31 @@ export function importBundle(
     warnings: [],
   };
 
+  // Bundles are untrusted JSON: any of these fields can be a non-array (or
+  // absent), and `documents` can hold nulls or wrong-typed members. Coerce
+  // once here so the loops below cannot throw and abort a partially-applied
+  // import — the contract is that bad items are reported, not fatal.
+  const asArray = <T,>(v: unknown, field: string): T[] => {
+    if (v === undefined || v === null) return [];
+    if (Array.isArray(v)) return v as T[];
+    report.warnings.push(`bundle.${field} is not an array — ignored`);
+    return [];
+  };
+  const documentList = asArray<BundleDocument>(bundle.documents, "documents");
+  const marketplaceList = asArray<BundleMarketplace>(bundle.marketplaces, "marketplaces");
+  const pluginList = asArray<BundlePlugin>(bundle.plugins, "plugins");
+  const mcpList = asArray<BundleMcpServer>(bundle.mcp_servers, "mcp_servers");
+
   // -- documents ------------------------------------------------------------
-  for (const doc of bundle.documents ?? []) {
+  for (const doc of documentList) {
+    if (!doc || typeof doc !== "object") {
+      report.skipped.push({ path: "(unknown)", reason: "malformed document entry" });
+      continue;
+    }
+    if (typeof doc.rel_path !== "string") {
+      report.skipped.push({ path: "(unknown)", reason: "document rel_path is not a string" });
+      continue;
+    }
     if (!DOC_COLLECTIONS.includes(doc.collection)) {
       report.skipped.push({
         path: String(doc.rel_path),
@@ -448,8 +602,29 @@ export function importBundle(
     } else {
       root = join(claudeDir, doc.collection);
     }
+    // Containment is measured against the .claude tree, not the collection
+    // dir — resolving the collection dir would follow a symlinked skills root
+    // and defeat the check.
+    const containmentBase = doc.scope === "project"
+      ? join(opts.projectPath as string, ".claude")
+      : claudeDir;
 
     const target = join(root, doc.rel_path);
+
+    // isSafeRelPath is purely lexical, so it cannot see that the collection
+    // root (or an intermediate directory) is a symlink pointing elsewhere.
+    // Symlinked skill directories are a supported, common layout — the
+    // exporter deliberately follows them — so a bundle could otherwise write
+    // through one to an arbitrary location. Resolve the real parent and
+    // require it to stay under the real collection root.
+    if (!isContainedWrite(containmentBase, target)) {
+      report.skipped.push({
+        path: target,
+        reason: "resolved path escapes the collection directory (symlink)",
+      });
+      continue;
+    }
+
     if (existsSync(target) && !overwrite) {
       report.skipped.push({ path: target, reason: "already exists" });
       continue;
@@ -472,10 +647,10 @@ export function importBundle(
 
   // -- marketplaces + plugin enablement ------------------------------------
   if (includePlugins) {
-    const marketplaces = bundle.marketplaces ?? [];
+    const marketplaces = marketplaceList;
     if (marketplaces.length > 0) {
       const kmPath = join(claudeDir, "plugins", "known_marketplaces.json");
-      mergeJsonFile(
+      const kmErr = mergeJsonFile(
         kmPath,
         (obj) => {
           for (const mp of marketplaces) {
@@ -493,12 +668,16 @@ export function importBundle(
         },
         dryRun,
       );
+      if (kmErr) {
+        report.marketplaces_added.length = 0;
+        report.warnings.push(`Marketplaces not registered: ${kmErr}`);
+      }
     }
 
-    const enabled = (bundle.plugins ?? []).filter((p) => p?.id && p.enabled);
+    const enabled = pluginList.filter((p) => p?.id && p.enabled);
     if (enabled.length > 0) {
       const settingsPath = join(claudeDir, "settings.json");
-      mergeJsonFile(
+      const settingsErr = mergeJsonFile(
         settingsPath,
         (obj) => {
           const map = (obj.enabledPlugins ?? {}) as Record<string, boolean>;
@@ -511,7 +690,10 @@ export function importBundle(
         },
         dryRun,
       );
-      report.warnings.push(
+      if (settingsErr) {
+        report.plugins_enabled.length = 0;
+        report.warnings.push(`Plugins not enabled: ${settingsErr}`);
+      } else report.warnings.push(
         `${enabled.length} plugin(s) marked enabled. Claude Code installs them from their marketplace on next launch — operad does not clone plugin repos.`,
       );
     }
@@ -519,10 +701,10 @@ export function importBundle(
 
   // -- MCP servers ----------------------------------------------------------
   if (includeMcp) {
-    const servers = (bundle.mcp_servers ?? []).filter((s) => s?.name && s.command);
+    const servers = mcpList.filter((s) => s?.name && typeof s.name === "string" && s.command);
     if (servers.length > 0) {
       const claudeJson = join(home, ".claude.json");
-      mergeJsonFile(
+      const mcpErr = mergeJsonFile(
         claudeJson,
         (obj) => {
           const map = (obj.mcpServers ?? {}) as Record<string, unknown>;
@@ -556,8 +738,12 @@ export function importBundle(
         },
         dryRun,
       );
+      if (mcpErr) {
+        report.mcp_servers_added.length = 0;
+        report.warnings.push(`MCP servers not imported: ${mcpErr}`);
+      }
     }
-  } else if ((bundle.mcp_servers ?? []).length > 0) {
+  } else if (mcpList.length > 0) {
     report.warnings.push(
       `${bundle.mcp_servers.length} MCP server(s) in the bundle were not imported (enable "include MCP servers" — note that secret env values are redacted at export).`,
     );

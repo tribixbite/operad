@@ -31,6 +31,7 @@ import {
   isSafeRelPath,
   readMarketplaces,
   validateBundle,
+  isContainedWrite,
   type CustomizationBundle,
 } from "../routes/customization-transfer.js";
 
@@ -511,44 +512,209 @@ describe("importBundle — marketplaces, plugins and MCP", () => {
   });
 });
 
-describe("mergeJsonFile robustness (via importBundle)", () => {
+describe("mergeJsonFile — never destroys an existing file it cannot parse", () => {
   let dst: string;
   beforeEach(() => { dst = makeTempDir(); });
   afterEach(() => { rmSync(dst, { recursive: true, force: true }); });
 
-  test("an array-shaped settings.json does not silently swallow the merge", () => {
-    // typeof [] === "object", but assigning a key to an array is dropped by
-    // JSON.stringify — the write would appear to succeed and change nothing.
-    put(join(dst, ".claude", "settings.json"), "[1,2,3]");
-    const bundle = emptyBundle({
-      plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
-    });
-    importBundle(bundle, { home: dst });
-    const settings = JSON.parse(
-      readFileSync(join(dst, ".claude", "settings.json"), "utf-8"),
-    ) as { enabledPlugins?: Record<string, boolean> };
-    expect(Array.isArray(settings)).toBe(false);
-    expect(settings.enabledPlugins).toEqual({ "p@m": true });
+  /** A bundle that would write enabledPlugins into settings.json. */
+  const pluginBundle = () => emptyBundle({
+    plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
   });
 
-  test("a malformed settings.json is replaced rather than aborting the import", () => {
-    put(join(dst, ".claude", "settings.json"), "{ not json");
+  test("unparseable settings.json is left byte-identical and reported", () => {
+    const p = join(dst, ".claude", "settings.json");
+    const original = '{ "model": "opus", // trailing comment\n}';
+    put(p, original);
+
+    const report = importBundle(pluginBundle(), { home: dst });
+
+    expect(readFileSync(p, "utf-8")).toBe(original);
+    expect(report.plugins_enabled).toHaveLength(0);
+    expect(report.warnings.join(" ")).toContain("not valid JSON");
+  });
+
+  test("unparseable ~/.claude.json is left byte-identical — it holds all Claude Code state", () => {
+    const p = join(dst, ".claude.json");
+    const original = '{"projects":{"/a":{"history":["IMPORTANT"]}}} // comment';
+    put(p, original);
+
     const bundle = emptyBundle({
-      plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
+      mcp_servers: [{ name: "evil", scope: "user", command: "sh", args: ["-c", "id"], disabled: false }],
     });
-    const report = importBundle(bundle, { home: dst });
+    const report = importBundle(bundle, { home: dst, includeMcp: true });
+
+    expect(readFileSync(p, "utf-8")).toBe(original);
+    expect(report.mcp_servers_added).toHaveLength(0);
+    expect(report.warnings.join(" ")).toContain("not valid JSON");
+  });
+
+  test("array-shaped settings.json is refused, not adopted or overwritten", () => {
+    const p = join(dst, ".claude", "settings.json");
+    put(p, "[1,2,3]");
+    const report = importBundle(pluginBundle(), { home: dst });
+    expect(readFileSync(p, "utf-8")).toBe("[1,2,3]");
+    expect(report.plugins_enabled).toHaveLength(0);
+    expect(report.warnings.join(" ")).toContain("does not contain a JSON object");
+  });
+
+  test("scalar-shaped settings.json is refused", () => {
+    const p = join(dst, ".claude", "settings.json");
+    put(p, '"hello"');
+    const report = importBundle(pluginBundle(), { home: dst });
+    expect(readFileSync(p, "utf-8")).toBe('"hello"');
+    expect(report.plugins_enabled).toHaveLength(0);
+  });
+
+  test("a valid object file still merges, preserving unrelated keys", () => {
+    const p = join(dst, ".claude", "settings.json");
+    put(p, JSON.stringify({ model: "opus", hooks: { a: 1 } }));
+    const report = importBundle(pluginBundle(), { home: dst });
+    const settings = JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+    expect(settings.model).toBe("opus");
+    expect(settings.hooks).toEqual({ a: 1 });
+    expect(settings.enabledPlugins).toEqual({ "p@m": true });
     expect(report.plugins_enabled).toEqual(["p@m"]);
   });
 
-  test("a string-shaped JSON file is not treated as an object", () => {
-    put(join(dst, ".claude", "settings.json"), '"hello"');
+  test("an absent file is created normally", () => {
+    const report = importBundle(pluginBundle(), { home: dst });
+    expect(report.plugins_enabled).toEqual(["p@m"]);
+    expect(existsSync(join(dst, ".claude", "settings.json"))).toBe(true);
+  });
+
+  test("no .tmp scratch file is left behind after a successful merge", () => {
+    importBundle(pluginBundle(), { home: dst });
+    const leftovers = require("node:fs")
+      .readdirSync(join(dst, ".claude"))
+      .filter((f: string) => f.includes(".tmp"));
+    expect(leftovers).toEqual([]);
+  });
+});
+
+// ── malformed bundle members must be reported, never thrown ────────────────
+
+describe("importBundle — malformed bundle members do not abort the import", () => {
+  let dst: string;
+  beforeEach(() => { dst = makeTempDir(); });
+  afterEach(() => { rmSync(dst, { recursive: true, force: true }); });
+
+  test("a null document entry is skipped, later documents still land", () => {
+    const bundle = emptyBundle({
+      documents: [
+        null as never,
+        { collection: "skills", scope: "user", rel_path: "ok.md", content: "yes" },
+      ],
+    });
+    const report = importBundle(bundle, { home: dst });
+    expect(report.written).toHaveLength(1);
+    expect(readFileSync(join(dst, ".claude", "skills", "ok.md"), "utf-8")).toBe("yes");
+    expect(report.skipped[0].reason).toContain("malformed document entry");
+  });
+
+  test("a non-string rel_path is skipped", () => {
+    const bundle = emptyBundle({
+      documents: [{ collection: "skills", scope: "user", rel_path: 123 as never, content: "x" }],
+    });
+    const report = importBundle(bundle, { home: dst });
+    expect(report.written).toHaveLength(0);
+    expect(report.skipped[0].reason).toContain("not a string");
+  });
+
+  test("non-array plugins/marketplaces/mcp_servers are ignored with a warning", () => {
+    const bundle = emptyBundle({
+      plugins: {} as never,
+      marketplaces: "nope" as never,
+      mcp_servers: 7 as never,
+    });
+    const report = importBundle(bundle, { home: dst, includeMcp: true });
+    const w = report.warnings.join(" ");
+    expect(w).toContain("bundle.plugins is not an array");
+    expect(w).toContain("bundle.marketplaces is not an array");
+    expect(w).toContain("bundle.mcp_servers is not an array");
+  });
+
+  test("a non-array documents field is ignored rather than throwing", () => {
+    const bundle = emptyBundle({ documents: "nope" as never });
+    const report = importBundle(bundle, { home: dst });
+    expect(report.written).toHaveLength(0);
+  });
+
+  test("a settings.json whose enabledPlugins is a scalar is reported, not fatal", () => {
+    put(join(dst, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: "oops" }));
     const bundle = emptyBundle({
       plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
     });
-    importBundle(bundle, { home: dst });
-    const settings = JSON.parse(
-      readFileSync(join(dst, ".claude", "settings.json"), "utf-8"),
-    ) as { enabledPlugins?: Record<string, boolean> };
-    expect(settings.enabledPlugins).toEqual({ "p@m": true });
+    // Must not throw.
+    const report = importBundle(bundle, { home: dst });
+    expect(report).toBeDefined();
+  });
+});
+
+// ── symlink containment ────────────────────────────────────────────────────
+
+describe("isContainedWrite / symlinked collection roots", () => {
+  let dst: string;
+  let outside: string;
+  beforeEach(() => { dst = makeTempDir(); outside = makeTempDir(); });
+  afterEach(() => {
+    rmSync(dst, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  test("writing through a symlinked skills root is refused", () => {
+    // ~/.claude/skills -> /elsewhere  (a layout the exporter deliberately follows)
+    mkdirSync(join(dst, ".claude"), { recursive: true });
+    symlinkSync(outside, join(dst, ".claude", "skills"));
+
+    const bundle = emptyBundle({
+      documents: [{ collection: "skills", scope: "user", rel_path: "pwn.md", content: "owned" }],
+    });
+    const report = importBundle(bundle, { home: dst });
+
+    expect(report.written).toHaveLength(0);
+    expect(report.skipped[0].reason).toContain("escapes the collection directory");
+    expect(existsSync(join(outside, "pwn.md"))).toBe(false);
+  });
+
+  test("an ordinary (non-symlinked) root still writes", () => {
+    const bundle = emptyBundle({
+      documents: [{ collection: "skills", scope: "user", rel_path: "ok.md", content: "x" }],
+    });
+    const report = importBundle(bundle, { home: dst });
+    expect(report.written).toHaveLength(1);
+  });
+
+  test("isContainedWrite accepts a nested path under a real root", () => {
+    const root = join(dst, "root");
+    mkdirSync(root, { recursive: true });
+    expect(isContainedWrite(root, join(root, "a", "b.md"))).toBe(true);
+  });
+
+  test("isContainedWrite rejects a sibling directory", () => {
+    const root = join(dst, "root");
+    mkdirSync(root, { recursive: true });
+    expect(isContainedWrite(root, join(dst, "other", "b.md"))).toBe(false);
+  });
+});
+
+// ── Windows-hostile names ──────────────────────────────────────────────────
+
+describe("isSafeRelPath — Windows-specific hazards", () => {
+  test("rejects reserved device names with or without an extension", () => {
+    for (const n of ["NUL.md", "nul", "CON.md", "com1.md", "LPT9.markdown", "aux/x.md"]) {
+      expect(isSafeRelPath(n)).toBe(false);
+    }
+  });
+
+  test("rejects an NTFS alternate data stream suffix", () => {
+    expect(isSafeRelPath("notes.md:hidden")).toBe(false);
+    expect(isSafeRelPath("a/b.md:$DATA")).toBe(false);
+  });
+
+  test("still accepts ordinary names that merely contain reserved substrings", () => {
+    expect(isSafeRelPath("console.md")).toBe(true);
+    expect(isSafeRelPath("nullable.md")).toBe(true);
+    expect(isSafeRelPath("auxiliary/SKILL.md")).toBe(true);
   });
 });
