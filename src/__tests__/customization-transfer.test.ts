@@ -510,3 +510,45 @@ describe("importBundle — marketplaces, plugins and MCP", () => {
     expect(existsSync(join(dst, ".claude", "settings.json"))).toBe(false);
   });
 });
+
+describe("mergeJsonFile robustness (via importBundle)", () => {
+  let dst: string;
+  beforeEach(() => { dst = makeTempDir(); });
+  afterEach(() => { rmSync(dst, { recursive: true, force: true }); });
+
+  test("an array-shaped settings.json does not silently swallow the merge", () => {
+    // typeof [] === "object", but assigning a key to an array is dropped by
+    // JSON.stringify — the write would appear to succeed and change nothing.
+    put(join(dst, ".claude", "settings.json"), "[1,2,3]");
+    const bundle = emptyBundle({
+      plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
+    });
+    importBundle(bundle, { home: dst });
+    const settings = JSON.parse(
+      readFileSync(join(dst, ".claude", "settings.json"), "utf-8"),
+    ) as { enabledPlugins?: Record<string, boolean> };
+    expect(Array.isArray(settings)).toBe(false);
+    expect(settings.enabledPlugins).toEqual({ "p@m": true });
+  });
+
+  test("a malformed settings.json is replaced rather than aborting the import", () => {
+    put(join(dst, ".claude", "settings.json"), "{ not json");
+    const bundle = emptyBundle({
+      plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
+    });
+    const report = importBundle(bundle, { home: dst });
+    expect(report.plugins_enabled).toEqual(["p@m"]);
+  });
+
+  test("a string-shaped JSON file is not treated as an object", () => {
+    put(join(dst, ".claude", "settings.json"), '"hello"');
+    const bundle = emptyBundle({
+      plugins: [{ id: "p@m", name: "p", marketplace: "m", version: "1", enabled: true, scope: "user" }],
+    });
+    importBundle(bundle, { home: dst });
+    const settings = JSON.parse(
+      readFileSync(join(dst, ".claude", "settings.json"), "utf-8"),
+    ) as { enabledPlugins?: Record<string, boolean> };
+    expect(settings.enabledPlugins).toEqual({ "p@m": true });
+  });
+});

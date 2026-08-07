@@ -363,7 +363,10 @@ function mergeJsonFile(
   if (existsSync(path)) {
     try {
       const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-      if (parsed && typeof parsed === "object") {
+      // Must be a plain object. `typeof [] === "object"` is true, and
+      // assigning a key to an array is silently dropped by JSON.stringify —
+      // the merge would appear to succeed and write nothing.
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         obj = parsed as Record<string, unknown>;
       }
     } catch {
