@@ -23,7 +23,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { mcpOfficialProvider } from "../skills/providers/mcp-official.js";
-import { gitUrlProvider, _parseLocator, _canonSemver } from "../skills/providers/git-url.js";
+import {
+  gitUrlProvider,
+  _parseLocator,
+  _canonSemver,
+  assertSafeGitUrl,
+  assertSafePathComponent,
+} from "../skills/providers/git-url.js";
 import { claudeMarketplaceProvider } from "../skills/providers/claude-marketplace.js";
 import { SkillError } from "../skills/types.js";
 
@@ -1062,5 +1068,118 @@ describe("claude-marketplace provider — read() shape (offline)", () => {
     // which always has a warnings array. Cast to access it.
     const r = await claudeMarketplaceProvider.read(tmpDir) as { warnings?: string[] };
     expect(Array.isArray(r.warnings)).toBe(true);
+  });
+});
+
+// ============================================================================
+// git-url hardening — transport allow-list, path-component safety, pin parsing
+//
+// The installer takes a user-supplied locator and version straight from
+// unauthenticated REST/IPC. Both flowed into `git` argv and into a
+// `join(cacheParent, version)` that is `rmSync`'d recursively before cloning.
+// ============================================================================
+
+describe("assertSafeGitUrl — git transport allow-list", () => {
+  test("accepts https", () => {
+    expect(() => assertSafeGitUrl("https://github.com/o/r")).not.toThrow();
+  });
+
+  test("accepts http, ssh, git and file transports", () => {
+    for (const u of [
+      "http://example.com/r",
+      "ssh://git@example.com/r",
+      "git://example.com/r",
+      "file:///srv/r",
+    ]) {
+      expect(() => assertSafeGitUrl(u)).not.toThrow();
+    }
+  });
+
+  test("accepts scp-style git@host:path", () => {
+    expect(() => assertSafeGitUrl("git@github.com:o/r.git")).not.toThrow();
+  });
+
+  test("accepts local filesystem paths (bare repo clones)", () => {
+    expect(() => assertSafeGitUrl("/srv/repos/r")).not.toThrow();
+    expect(() => assertSafeGitUrl("./r")).not.toThrow();
+  });
+
+  test("rejects the ext:: transport (arbitrary command execution in git)", () => {
+    expect(() => assertSafeGitUrl("ext::sh -c 'touch /tmp/pwned'")).toThrow();
+  });
+
+  test("rejects a locator starting with '-' (parsed by git as an option)", () => {
+    expect(() => assertSafeGitUrl("--upload-pack=touch /tmp/pwned")).toThrow();
+  });
+
+  test("rejects unknown transports", () => {
+    expect(() => assertSafeGitUrl("javascript:alert(1)")).toThrow();
+    expect(() => assertSafeGitUrl("ftp://example.com/r")).toThrow();
+  });
+});
+
+describe("assertSafePathComponent — cache directory name safety", () => {
+  test("accepts ordinary version strings", () => {
+    expect(() => assertSafePathComponent("v1.2.3", "version")).not.toThrow();
+  });
+
+  test("accepts a commit: pin (colon is not a separator)", () => {
+    expect(() =>
+      assertSafePathComponent(`commit:${"a".repeat(40)}`, "version"),
+    ).not.toThrow();
+  });
+
+  test("rejects traversal that would escape the operad cache", () => {
+    expect(() => assertSafePathComponent("../../../../etc", "version")).toThrow();
+    expect(() => assertSafePathComponent("..", "version")).toThrow();
+    expect(() => assertSafePathComponent(".", "version")).toThrow();
+  });
+
+  test("rejects embedded separators", () => {
+    expect(() => assertSafePathComponent("a/b", "version")).toThrow();
+    expect(() => assertSafePathComponent("a\\b", "version")).toThrow();
+  });
+
+  test("rejects the empty string", () => {
+    expect(() => assertSafePathComponent("", "version")).toThrow();
+  });
+
+  test("rejects NUL and control characters", () => {
+    expect(() =>
+      assertSafePathComponent(`v1${String.fromCharCode(0)}`, "version"),
+    ).toThrow();
+    expect(() =>
+      assertSafePathComponent(`v1${String.fromCharCode(10)}`, "version"),
+    ).toThrow();
+  });
+
+  test("the error names the offending field", () => {
+    expect(() => assertSafePathComponent("../x", "version")).toThrow(/version/);
+  });
+});
+
+describe("_parseLocator — version pin boundary", () => {
+  test("http:// (7 chars) does not swallow the pin", () => {
+    const r = _parseLocator("http://h/o/r@v1.0.0", "latest");
+    expect(r.url).toBe("http://h/o/r");
+    expect(r.requestedVersion).toBe("v1.0.0");
+  });
+
+  test("a short local path keeps its pin", () => {
+    const r = _parseLocator("/tmp/r@v1", "latest");
+    expect(r.url).toBe("/tmp/r");
+    expect(r.requestedVersion).toBe("v1");
+  });
+
+  test("user-info '@' before the host is not treated as a pin", () => {
+    const r = _parseLocator("https://user@github.com/o/r", "latest");
+    expect(r.url).toBe("https://user@github.com/o/r");
+    expect(r.requestedVersion).toBe("latest");
+  });
+
+  test("a local path with no pin is returned unchanged", () => {
+    const r = _parseLocator("/tmp/repo", "latest");
+    expect(r.url).toBe("/tmp/repo");
+    expect(r.requestedVersion).toBe("latest");
   });
 });

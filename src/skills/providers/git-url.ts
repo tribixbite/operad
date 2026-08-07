@@ -44,8 +44,20 @@ export const gitUrlProvider: ProviderModule = {
   },
 
   async fetch(locator: string, version: string, cacheParent: string): Promise<FetchResult> {
-    const { url } = parseLocator(locator, version);
-    const resolvedVersion = await resolveVersion(url, version);
+    // Honour a version pinned in the locator itself (`<url>@v1.2.3`). Passing
+    // only the `version` argument used to silently install `latest` whenever
+    // the caller left it at its default — the dashboard always does — which
+    // turned an explicit pin into a silent supply-chain surprise.
+    const { url, requestedVersion } = parseLocator(locator, version);
+    assertSafeGitUrl(url);
+    const effectiveVersion = version === "latest" ? requestedVersion : version;
+    const resolvedVersion = await resolveVersion(url, effectiveVersion);
+
+    // resolvedVersion becomes a directory name below, and the rmSync a few
+    // lines down is recursive+force. Without this guard a version like
+    // `../../../../etc` escaped the operad-owned cache and deleted an
+    // arbitrary directory BEFORE the clone that would have failed.
+    assertSafePathComponent(resolvedVersion, "version");
     const targetDir = join(cacheParent, resolvedVersion);
 
     mkdirSync(cacheParent, { recursive: true });
@@ -143,6 +155,73 @@ export function _parseLocator(locator: string, fallbackVersion: string): {
   return parseLocator(locator, fallbackVersion);
 }
 
+/**
+ * Git transports operad will clone from.
+ *
+ * `ext::` and `-`-prefixed locators are the dangerous cases: `ext::sh -c …`
+ * makes git execute an arbitrary command, and a locator starting with `-` is
+ * consumed by git as an option (`--upload-pack=…`) rather than a URL. Using
+ * execFileSync stops *shell* injection but not *git argument* injection, so
+ * the transport has to be allow-listed. The CLI already did this in
+ * `parseSkillLocator`; the REST and IPC paths bypassed it entirely.
+ */
+const ALLOWED_GIT_URL_PREFIXES = [
+  "https://",
+  "http://",
+  "ssh://",
+  "git://",
+  "file://",
+  "git@",
+];
+
+/** Throw unless `url` uses an allow-listed transport (or is a local path). */
+export function assertSafeGitUrl(url: string): void {
+  if (url.startsWith("-")) {
+    throw new SkillError(
+      "LOCATOR_MALFORMED",
+      `git URL may not start with '-' (would be parsed as a git option): ${url}`,
+      { url },
+    );
+  }
+  // Absolute/relative filesystem paths are legitimate — git clones bare local
+  // repos, and the test suite relies on it.
+  if (url.startsWith("/") || url.startsWith("./") || url.startsWith("../")) return;
+
+  const ok = ALLOWED_GIT_URL_PREFIXES.some((p) => url.startsWith(p));
+  if (!ok) {
+    throw new SkillError(
+      "LOCATOR_MALFORMED",
+      `unsupported git transport in '${url}' — allowed: ${ALLOWED_GIT_URL_PREFIXES.join(", ")}, or a local path`,
+      { url },
+    );
+  }
+}
+
+/**
+ * Throw unless `value` is safe to use as a single filesystem path component.
+ *
+ * Rejects empty strings, `.`/`..`, anything containing a path separator, NUL,
+ * or control characters. `commit:<sha>` is permitted as a whole because the
+ * colon is not a separator on POSIX and the SHA is already regex-validated.
+ */
+export function assertSafePathComponent(value: string, what: string): void {
+  const invalid =
+    value.length === 0 ||
+    value === "." ||
+    value === ".." ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    // eslint-disable-next-line no-control-regex
+    /[\x00-\x1f\x7f]/.test(value);
+  if (invalid) {
+    throw new SkillError(
+      "LOCATOR_MALFORMED",
+      `${what} '${value}' is not a valid path component`,
+      { [what]: value },
+    );
+  }
+}
+
 function parseLocator(locator: string, fallbackVersion: string): {
   url: string;
   requestedVersion: string;
@@ -163,12 +242,26 @@ function parseLocator(locator: string, fallbackVersion: string): {
       requestedVersion: afterColon.slice(atIdx + 1),
     };
   }
+  // A version pin is an '@' in the PATH portion. An '@' inside the authority
+  // is user-info (https://user@host/…) and must not be split on.
+  //
+  // The previous rule compared against the hardcoded length of "https://" (8),
+  // which mis-handled shorter schemes ("http://" is 7) and local paths:
+  // `/tmp/r@v1` put the '@' at index 6, so the pin was silently swallowed into
+  // the URL and the clone failed. Anchoring on the authority boundary — the
+  // first '/' after the scheme — handles every form.
+  const schemeIdx = locator.indexOf("://");
+  let authorityEnd: number;
+  if (schemeIdx >= 0) {
+    const slash = locator.indexOf("/", schemeIdx + "://".length);
+    // No path at all (https://user@host) means any '@' is user-info.
+    authorityEnd = slash >= 0 ? slash : locator.length;
+  } else {
+    // Bare filesystem path — no authority, so any '@' is a pin.
+    authorityEnd = -1;
+  }
   const atIdx = locator.lastIndexOf("@");
-  // We need the '@' to appear AFTER any auth-style '@' in the URL.
-  // For https URLs, `lastIndexOf` is fine — the user-info form would
-  // also be before the path.
-  if (atIdx <= "https://".length) {
-    // No version pin.
+  if (atIdx <= authorityEnd) {
     return { url: locator, requestedVersion: fallbackVersion };
   }
   return {
