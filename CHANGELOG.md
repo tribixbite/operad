@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.4.8] - 2026-08-07
 
 ### Fixed — first run on a clean machine (Ubuntu/WSL)
 - **`operad init` generated an invalid config.** The template emitted
