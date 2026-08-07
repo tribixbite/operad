@@ -4,7 +4,79 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — first run on a clean machine (Ubuntu/WSL)
+- **`operad init` generated an invalid config.** The template emitted
+  `command`/`cwd`, but the parser requires `type`/`path`, so the first
+  `operad boot` died with `session[0]: 'path' is required for type
+  'claude'`. It also used two `[operad]` keys that do not exist (`port`,
+  `log_level`). The generated config is now session-free — a fresh install
+  boots on the first try — with a commented example showing the real
+  schema.
+- **`operad doctor` green-lit configs the daemon would reject.** The
+  `config` check only looked for a section header. It now runs the same
+  parser and validator the daemon runs at boot, and reports each error with
+  the correct key names.
+- **The published npm tarball contained no dashboard.** `dashboard/dist/`
+  was listed in `package.json#files`, but the publish workflow only built
+  the esbuild CLI bundle, so `operadic@0.4.7` shipped **6 files** and every
+  install reported "Dashboard dist not bundled". The workflow now builds
+  the dashboard and `scripts/verify-package.mjs` hard-gates publishing on
+  tarball completeness (**52 files**). CI runs the same check per PR, and
+  the fresh-install job asserts the globally installed package has a
+  dashboard.
+- **WSL is detected by `operad doctor`** — reports WSL1's unreliable
+  `/proc` process accounting, a missing `notify-send` (notifications
+  silently no-op), and the WSL2 NAT that makes the reported LAN address
+  unreachable from other devices, with the `netsh portproxy` fix.
+- **CLI colour output respects TTY/`NO_COLOR`/`FORCE_COLOR`.** Redirecting
+  or piping (`operad doctor > out.txt`) no longer embeds ANSI escapes.
+
+### Security
+- **Arbitrary file read via `GET /api/customization-file`.** The read path
+  had no extension filter while the write path did, so anything under
+  `~/.claude/` was readable — including `.credentials.json` (the Claude
+  OAuth token), `settings.json`, and `history.jsonl`. Because the dashboard
+  binds `0.0.0.0` with `Access-Control-Allow-Origin: *` and no auth, any
+  LAN host or visited web page could exfiltrate those credentials. Reads
+  are now restricted to `.md`/`.markdown`/`.txt` and dotfiles are refused.
+- **Path traversal + arbitrary recursive delete in the skill installer.**
+  `version` flowed unvalidated into `join(cacheParent, version)`, which is
+  `rmSync`'d recursively before cloning, so `../../../../etc` escaped the
+  cache and deleted the target *before* the clone failed. Now validated as
+  a single path component.
+- **Git argument injection in the skill installer.** The locator was passed
+  as a positional `git` argument with no scheme check, allowing the `ext::`
+  transport (arbitrary command execution) and `-`-prefixed option
+  injection. The transport allow-list is now enforced at the provider
+  boundary that REST and IPC both use, not just in the CLI helper.
+- **Version pins were silently ignored.** `<url>@v1.2.3` installed `latest`
+  whenever the caller passed the default version — which the dashboard
+  always does.
+
 ### Added
+- **Environment migration between machines.** `GET
+  /api/customization/export` builds a versioned, self-contained bundle of
+  skills, commands, agents, plans and memories **with file content**, plus
+  plugin marketplace sources and MCP server entries. `POST
+  /api/customization/import` applies it, with `dry_run`, `overwrite`,
+  per-collection selection and a per-item report. Settings gains a
+  "Migrate environment" section driving both. The previous per-section
+  exports emitted file *paths* only and had no importer at all, so they
+  could not migrate anything. Import registers plugins for Claude Code to
+  install rather than cloning repos itself, rewrites `installLocation` to
+  local paths, and drops redacted (`***`) MCP secrets instead of writing
+  them as credentials.
+- **Skill marketplace is enabled by default** via `[skills] enabled` in
+  `operad.toml`. It was previously gated behind `--enable-skills-preview`,
+  a flag `operad stream` never forwarded to the daemon it spawns — making
+  the feature unreachable through every normal boot path.
+- **Directory-form skills are now visible.** The scanner only matched flat
+  `*.md`, missing the `<name>/SKILL.md` layout used by plugin-installed and
+  symlinked skills — roughly half the skills on a typical setup were absent
+  from the UI and from exports.
+- Skill marketplace and environment-migration REST endpoints are now
+  documented in `docs/api.md` (the `/api/skills*` and `/api/tool-autonomy`
+  routes were previously undocumented).
 - **Autostart pins (⭐) for sessions.** Each session row in the dashboard
   gets a star toggle that pins/unpins it for auto-boot. The choice is
   persisted in `state.json` (`autostart_overrides`) and applied over the
