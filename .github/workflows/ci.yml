@@ -81,6 +81,13 @@ jobs:
         run: Test-Path dashboard/dist/index.html
         shell: pwsh
 
+      # Resolves package.json#files exactly as `npm publish` would and fails
+      # if the tarball would omit the CLI bundle, the dashboard SPA, or the
+      # docs npm renders on the package page. Catches `files`/build drift in a
+      # PR instead of on the npmjs page after a release.
+      - name: Verify publishable package contents
+        run: node scripts/verify-package.mjs
+
       - name: Check API docs updated if API source changed
         if: github.event_name == 'pull_request' && runner.os != 'Windows'
         run: |
@@ -120,11 +127,31 @@ jobs:
           echo "Config created:"
           cat "$HOME/.config/operad/operad.toml"
 
-      - name: operad doctor (fresh install, expect only warnings not failures)
+      # The config `operad init` generates MUST parse with the same validator
+      # the daemon runs at boot. 0.4.7 shipped a template using command/cwd
+      # where the parser requires type/path, so every fresh install died with
+      # "session[0]: 'path' is required for type 'claude'". `operad config`
+      # exits non-zero on any validation error, so no `|| true` here.
+      - name: Generated config must validate
         run: |
           export HOME=$(mktemp -d)
           node dist/tmx.js init
-          node dist/tmx.js doctor || echo "doctor reported issues (expected on CI)"
+          node dist/tmx.js config
+
+      # doctor's config check runs the real validator, so a broken template
+      # now surfaces here too. Other checks legitimately warn on a CI box
+      # (no tmux session, no ADB), hence the tolerated non-zero exit — but we
+      # assert the config line itself is not a FAIL.
+      - name: operad doctor (fresh install, config check must not fail)
+        run: |
+          export HOME=$(mktemp -d)
+          node dist/tmx.js init
+          node dist/tmx.js doctor > doctor.out 2>&1 || echo "doctor reported issues (expected on CI)"
+          cat doctor.out
+          if grep -E '^\s*\[FAIL\]\s+config' doctor.out; then
+            echo "ERROR: doctor reports the generated config as invalid" >&2
+            exit 1
+          fi
 
   e2e:
     runs-on: ubuntu-latest
@@ -173,10 +200,15 @@ jobs:
             exit 1
           fi
 
-      - name: Install deps + build + pack
+      # Build BOTH artifacts before packing so the tarball matches what
+      # `npm publish` uploads. Packing without the dashboard build is how the
+      # 0.4.7 release reached npm with a CLI but no web UI.
+      - name: Install deps + build CLI + build dashboard + pack
         run: |
           bun install
           bun run build
+          (cd dashboard && bun install && bun run build)
+          node scripts/verify-package.mjs
           npm pack
           ls -la operadic-*.tgz
 
@@ -188,6 +220,19 @@ jobs:
           sudo npm install -g "$(ls operadic-*.tgz | head -1)"
           which operad
           operad --version
+
+      # Reproduces the end-user report: install from npm on a clean Ubuntu box
+      # and the dashboard is missing. doctor's dashboard check resolves
+      # dashboard/dist relative to the installed bundle, so a warn here means
+      # the published package would ship no web UI.
+      - name: Installed package must contain the dashboard
+        run: |
+          operad doctor > doctor.out 2>&1 || true
+          cat doctor.out
+          if grep -qiE 'Dashboard dist (not bundled|is empty)' doctor.out; then
+            echo "ERROR: globally installed package has no dashboard/dist" >&2
+            exit 1
+          fi
 
       - name: Verify tmux is NOT on PATH (control check)
         run: |

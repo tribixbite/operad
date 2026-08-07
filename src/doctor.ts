@@ -4,6 +4,7 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import * as net from "net";
 import { detectPlatform, type PlatformId } from "./platform/platform.js";
+import { validateConfigFile } from "./config.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -436,20 +437,42 @@ function checkConfig(configPath?: string): CheckResult {
       name: "config",
       status: "warn",
       message: `Config not found at ${path}`,
-      fix: `Create ${path} with at minimum:\n  [operad]\n\n  [[session]]\n  name = "my-session"\n  command = "claude"\n  cwd = "~/git/my-project"`,
+      fix: `Run 'operad init', or create ${path} with at minimum:\n  [operad]\n\n  [[session]]\n  name = "my-session"\n  type = "claude"\n  path = "~/git/my-project"`,
     };
   }
+  let content: string;
   try {
-    const content = readFileSync(path, "utf8");
-    return classifyConfigContent(path, content);
+    content = readFileSync(path, "utf8");
   } catch (err: any) {
     return {
       name: "config",
       status: "fail",
-      message: `Config parse error: ${err.message}`,
-      fix: "Fix the TOML syntax error in your config file",
+      message: `Config unreadable: ${err.message}`,
+      fix: "Check file permissions on your config file",
     };
   }
+
+  // Shape check first (missing sections is a warn, not a hard failure).
+  const classified = classifyConfigContent(path, content);
+  if (classified.status !== "ok") return classified;
+
+  // Then run the SAME parser+validator the daemon uses at boot. Without this
+  // the check only proved the file exists and has a section header, so a
+  // config the daemon rejects (e.g. a session missing `path`) reported OK
+  // here and then failed at `operad boot` with no prior warning.
+  const errors = validateConfigFile(path);
+  if (errors.length > 0) {
+    return {
+      name: "config",
+      status: "fail",
+      message: `Config invalid (${errors.length} error${errors.length === 1 ? "" : "s"}): ${errors.join("; ")}`,
+      fix:
+        `Edit ${path} to fix the errors above. Session keys are ` +
+        `name/type/path (not command/cwd) — 'path' is required for ` +
+        `type claude|opencode|codex|daemon, 'command' for type service.`,
+    };
+  }
+  return classified;
 }
 
 function checkStateDir(platformId: PlatformId): CheckResult {
@@ -545,6 +568,117 @@ async function checkPort(): Promise<CheckResult> {
   });
 }
 
+/** What we could determine about a Windows Subsystem for Linux host. */
+export interface WslInfo {
+  isWsl: boolean;
+  /** 1 or 2 when determinable, null otherwise. */
+  version: 1 | 2 | null;
+  /** Distro name from WSL_DISTRO_NAME, when exported. */
+  distro: string | null;
+}
+
+/**
+ * Detect whether this Linux host is actually WSL.
+ *
+ * WSL kernels always carry a Microsoft marker in the kernel release string;
+ * WSL2 uses a "-microsoft-standard-WSL2" suffix while WSL1 reports
+ * "-Microsoft". `WSL_INTEROP` is only set under WSL2. Env vars alone are not
+ * enough (they are absent in some login shells and sudo strips them), so the
+ * kernel string is the primary signal.
+ *
+ * Exported for testing — the /proc read is the only impure part.
+ */
+export function detectWsl(osRelease?: string): WslInfo {
+  let release = osRelease;
+  if (release === undefined) {
+    try {
+      release = readFileSync("/proc/sys/kernel/osrelease", "utf8");
+    } catch {
+      release = "";
+    }
+  }
+  const lower = release.toLowerCase();
+  const isWsl = lower.includes("microsoft") || Boolean(process.env.WSL_DISTRO_NAME);
+  if (!isWsl) return { isWsl: false, version: null, distro: null };
+
+  let version: 1 | 2 | null = null;
+  if (lower.includes("wsl2")) version = 2;
+  else if (lower.includes("microsoft")) version = 1;
+  // WSL_INTEROP is WSL2-only and wins over a stale/odd kernel string.
+  if (process.env.WSL_INTEROP) version = 2;
+
+  return {
+    isWsl: true,
+    version,
+    distro: process.env.WSL_DISTRO_NAME ?? null,
+  };
+}
+
+/**
+ * WSL-specific advisories. None of these are failures — operad works on WSL —
+ * but each is a behaviour difference that otherwise looks like a bug:
+ *
+ *  - WSL1 lacks a real Linux kernel, so /proc/PID accounting used for
+ *    per-session CPU and memory shedding is unreliable.
+ *  - `notify-send` is usually absent (no desktop session), so every
+ *    notification silently no-ops.
+ *  - WSL2 runs in a NAT'd VM: the dashboard is reachable from Windows at
+ *    localhost, but the `ip route` address operad prints for LAN access is
+ *    the VM's internal 172.x address, unreachable from other devices.
+ */
+function checkWslEnvironment(wsl: WslInfo): CheckResult[] {
+  const results: CheckResult[] = [];
+  const label = [
+    wsl.version ? `WSL${wsl.version}` : "WSL",
+    wsl.distro ? `(${wsl.distro})` : null,
+  ].filter(Boolean).join(" ");
+
+  if (wsl.version === 1) {
+    results.push({
+      name: "wsl",
+      status: "warn",
+      message: `${label} detected — WSL1 has no real Linux kernel; /proc process accounting is unreliable`,
+      fix:
+        "Upgrade to WSL2 for accurate memory/CPU monitoring:\n" +
+        "  (in PowerShell)  wsl --set-version <distro> 2",
+    });
+  } else {
+    results.push({ name: "wsl", status: "ok", message: `${label} detected` });
+  }
+
+  // Notifications: notify-send comes from libnotify-bin and is absent on a
+  // default WSL install, so status alerts vanish with no error.
+  const notify = spawnSync("which", ["notify-send"], { stdio: "ignore", timeout: 3000 });
+  if (notify.status !== 0) {
+    results.push({
+      name: "wsl-notifications",
+      status: "warn",
+      message: "notify-send not found — desktop notifications will be silently skipped",
+      fix: "Install: sudo apt-get install -y libnotify-bin  (needs WSLg or an X server to display)",
+    });
+  } else {
+    results.push({ name: "wsl-notifications", status: "ok", message: "notify-send available" });
+  }
+
+  // LAN reachability: warn only for WSL2, where the NAT is real. WSL1 shares
+  // the Windows network stack, so its address is the host's.
+  if (wsl.version !== 1) {
+    results.push({
+      name: "wsl-network",
+      status: "ok",
+      message:
+        "Dashboard reachable from Windows at http://localhost:18970 " +
+        "(WSL2 NAT means the LAN IP operad reports is VM-internal)",
+      fix:
+        "To reach the dashboard from other devices on your network, forward the port from Windows:\n" +
+        "  netsh interface portproxy add v4tov4 listenport=18970 listenaddress=0.0.0.0 \\\n" +
+        "    connectport=18970 connectaddress=$(hostname -I | awk '{print $1}')",
+    });
+  }
+
+  return results;
+}
+
 function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
   const results: CheckResult[] = [];
 
@@ -586,6 +720,14 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
 
     // Process protections — read live state vs what applyPhantomFix tries to set.
     results.push(...checkAndroidProtections());
+  }
+
+  if (platformId === "linux") {
+    // WSL presents as ordinary Linux, so operad runs there unmodified — but a
+    // few host-integration features silently no-op and the dashboard's LAN
+    // address is wrong. Surface that instead of letting users discover it.
+    const wsl = detectWsl();
+    if (wsl.isWsl) results.push(...checkWslEnvironment(wsl));
   }
 
   // Claude for Chrome extension — desktop equivalent of the Android CFC bridge.

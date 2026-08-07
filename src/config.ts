@@ -20,6 +20,7 @@ import type {
   WakeLockPolicy,
   HealthCheckType,
   ProtectedCheckpoints,
+  SkillsConfig,
 } from "./types.js";
 import { parseTomlAgents, type AgentConfig } from "./agents.js";
 import { detectPlatform } from "./platform/platform.js";
@@ -267,6 +268,16 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
     };
   }
 
+  // Skill marketplace section.
+  // Defaults to enabled: the previous CLI-flag-only gate could not be reached
+  // from `operad stream` (the flag was never forwarded to the spawned daemon),
+  // so the feature was effectively unreachable. Set `enabled = false` under
+  // [skills] to turn the surface off.
+  const skillsRaw = (raw.skills ?? {}) as Record<string, unknown>;
+  const skills: SkillsConfig = {
+    enabled: asBool(skillsRaw.enabled, "skills.enabled", true),
+  };
+
   // Sessions
   const sessionRaw = (raw.session ?? []) as Record<string, unknown>[];
   const sessions: SessionConfig[] = [];
@@ -443,7 +454,7 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
     throw new Error(`Config validation failed:\n  ${errors.join("\n  ")}`);
   }
 
-  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents, tools, workflows };
+  return { orchestrator, adb, battery, boot, telemetry_sink, sessions, health_defaults, agents, tools, workflows, skills };
 }
 
 // -- Type coercion helpers ----------------------------------------------------
@@ -585,7 +596,14 @@ export function validateConfigFile(configPath: string): string[] {
     return [];
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return msg.split("\n").filter(Boolean);
+    // parseRawConfig throws a multi-line message whose first line is the
+    // "Config validation failed:" header followed by indented per-field
+    // errors. Drop the header and trim the indentation so callers get a clean
+    // list of actual errors rather than a phantom entry for the header.
+    return msg
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && line !== "Config validation failed:");
   }
 }
 

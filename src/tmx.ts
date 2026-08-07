@@ -21,13 +21,32 @@ import { detectPlatform } from "./platform/platform.js";
 
 // -- ANSI helpers -------------------------------------------------------------
 
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const CYAN = "\x1b[36m";
-const RESET = "\x1b[0m";
+/**
+ * Emit ANSI escapes only when stdout is a real terminal and the user hasn't
+ * opted out. Without this, redirecting or piping CLI output (`operad doctor >
+ * out.txt`, `operad status | grep`) embeds raw escape codes, which breaks
+ * scripted greps and makes log files unreadable.
+ *
+ * Honours the NO_COLOR convention (https://no-color.org) and FORCE_COLOR for
+ * callers that want colour through a pipe anyway.
+ */
+const USE_COLOR = (() => {
+  if (process.env.NO_COLOR) return false;
+  if (process.env.FORCE_COLOR) return process.env.FORCE_COLOR !== "0";
+  if (process.env.TERM === "dumb") return false;
+  return Boolean(process.stdout.isTTY);
+})();
+
+/** ANSI code, or "" when colour is disabled. */
+const c = (code: string): string => (USE_COLOR ? code : "");
+
+const BOLD = c("\x1b[1m");
+const DIM = c("\x1b[2m");
+const RED = c("\x1b[31m");
+const GREEN = c("\x1b[32m");
+const YELLOW = c("\x1b[33m");
+const CYAN = c("\x1b[36m");
+const RESET = c("\x1b[0m");
 
 /** Status → colored display string */
 const STATUS_COLORS: Record<string, string> = {
@@ -148,9 +167,23 @@ async function main(): Promise<void> {
 /** Start the daemon in foreground mode */
 async function runDaemon(): Promise<void> {
   const configPath = getConfigFlag();
-  const enableSkillsPreview = process.argv.includes("--enable-skills-preview");
+  // Undefined means "no override" — the daemon then follows `[skills] enabled`
+  // from the config. Passing `false` unconditionally (the old behaviour) made
+  // the config setting unreachable.
+  const enableSkillsPreview = resolveSkillsPreviewFlag(process.argv);
   const daemon = new Daemon(configPath, { enableSkillsPreview });
   await daemon.start();
+}
+
+/**
+ * Resolve the skills-preview override from argv.
+ * Returns undefined when neither flag is present, so config wins.
+ * Exported for testing.
+ */
+export function resolveSkillsPreviewFlag(argv: string[]): boolean | undefined {
+  if (argv.includes("--disable-skills-preview")) return false;
+  if (argv.includes("--enable-skills-preview")) return true;
+  return undefined;
 }
 
 /** Stream: start daemon if needed, then boot all sessions */
@@ -178,6 +211,13 @@ async function runStream(): Promise<void> {
     console.log(`${CYAN}Starting daemon...${RESET}`);
     const daemonArgs = ["daemon"];
     if (configPath) daemonArgs.push("--config", configPath);
+    // Forward the skills-preview override to the spawned daemon. Without this
+    // `operad stream --enable-skills-preview` silently dropped the flag, so
+    // the marketplace could only ever be enabled by running the daemon in the
+    // foreground by hand.
+    const skillsOverride = resolveSkillsPreviewFlag(process.argv);
+    if (skillsOverride === true) daemonArgs.push("--enable-skills-preview");
+    if (skillsOverride === false) daemonArgs.push("--disable-skills-preview");
 
     // Resolve log dir for stderr capture
     let logDir: string;
@@ -437,23 +477,51 @@ async function runInit(): Promise<void> {
 
   fsMkdir(configDir, { recursive: true });
 
+  // Example session path, shown commented-out. Backslashes are escaped for
+  // TOML on Windows by normalising to forward slashes (TOML basic strings
+  // treat `\` as an escape introducer, so a raw `C:\Users\...` would be
+  // rejected or silently mangled).
+  const examplePath = process.platform === "win32"
+    ? pathJoin(process.env.USERPROFILE ?? "~", "git", "my-project").replace(/\\/g, "/")
+    : `${process.env.HOME ?? "~"}/git/my-project`;
+
+  // The generated config is intentionally session-free so a fresh install
+  // boots successfully on the first try. A placeholder [[session]] pointing at
+  // a directory that does not exist would either fail validation or spawn a
+  // session in a bogus cwd — both worse than starting empty and adding real
+  // projects from the dashboard.
   const template = `# operad configuration
 # Full docs: http://localhost:18970/help (after first boot)
 
 [operad]
-port = 18970
-log_level = "info"
+dashboard_port = 18970
 
-# Add your sessions below. Each session is a process managed by operad.
-# Run 'operad doctor' to validate this config before booting.
-
-[[session]]
-name = "my-session"
-command = "claude"
-cwd = "${process.platform === "win32"
-    ? pathJoin(process.env.USERPROFILE ?? "~", "git", "my-project").replace(/\\/g, "/")
-    : `${process.env.HOME ?? "~"}/git/my-project`}"
-enabled = true
+# -- Sessions ------------------------------------------------------------------
+# Each [[session]] is a process operad manages. Add them here, or add projects
+# from the dashboard at http://localhost:18970 after booting.
+#
+# Required keys: name (lowercase [a-z0-9-]) and, for agent/daemon types, path.
+#   type  = "claude" | "opencode" | "codex" | "daemon" | "service"  (default "claude")
+#   path  = project directory (required for claude/opencode/codex/daemon)
+#   command = shell command (required for type = "service")
+#
+# [[session]]
+# name = "my-project"
+# type = "claude"
+# path = "${examplePath}"
+# auto_go = false
+# priority = 5
+# enabled = true
+#
+# [[session]]
+# name = "api-server"
+# type = "service"
+# path = "${examplePath}"
+# command = "bun run dev"
+#
+# [session.health]
+# check = "http"
+# url = "http://localhost:3000/health"
 `;
 
   fsWrite(configPath, template, "utf8");

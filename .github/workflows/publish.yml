@@ -21,8 +21,25 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build
+      - name: Build CLI bundle
         run: bun run build
+
+      # package.json#files ships `dashboard/dist/`, but nothing else in this
+      # job produces it — `bun run build` only runs esbuild on the CLI. Without
+      # these two steps the published tarball contains no web UI at all and
+      # every install reports "Dashboard dist not bundled" (the 0.4.7 bug).
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: bun install
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: bun run build
+
+      # Hard gate: refuses to publish a tarball missing dist/tmx.js, the
+      # dashboard SPA, or the docs npm renders on the package page.
+      - name: Verify package contents
+        run: node scripts/verify-package.mjs
 
       # Node 24 ships with npm >= 11.5.1, required for OIDC trusted publishing.
       # Node 22 ships with npm 10.x which silently falls back to token auth.

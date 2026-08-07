@@ -6,6 +6,7 @@ import {
   parseAdbEnabled,
   parseRuntimeTypes,
   classifyConfigContent,
+  detectWsl,
   type CheckResult,
   type CheckStatus,
 } from "../doctor.js";
@@ -356,9 +357,13 @@ describe("checkConfig — behaviour driven by temp files", () => {
     expect(r.message).toBe(p);
   });
 
-  test("config with [[session]] section → ok", async () => {
+  // NB: a claude-type session requires `path`. This test previously used
+  // `command = "echo"` with no path and asserted "ok" — encoding the very bug
+  // that made fresh installs fail at boot. The check now runs the real
+  // validator, so the fixture has to be a config the daemon would accept.
+  test("config with a valid [[session]] section → ok", async () => {
     const p = join(tmpDir, "operad.toml");
-    writeFileSync(p, '[[session]]\nname = "app"\ncommand = "echo"\n', "utf8");
+    writeFileSync(p, `[[session]]\nname = "app"\ntype = "claude"\npath = "${tmpDir}"\n`, "utf8");
     const results = await runChecks({ skipSlowChecks: true, configPath: p });
     const r = results.find(r => r.name === "config")!;
     expect(r.status).toBe("ok");
@@ -772,5 +777,151 @@ describe("runChecks — invariants across the full result set", () => {
       expect(typeof r.message).toBe("string");
       expect(r.message.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// ── config check must run the real validator ──────────────────────────────
+//
+// Regression guard for the 0.4.7 first-run failure: `operad init` wrote a
+// config using `command`/`cwd` where the parser requires `type`/`path`, and
+// `operad doctor` reported it as OK because the check only looked for a
+// section header. Users hit the real error at `operad boot` instead:
+//   "session[0]: 'path' is required for type 'claude'"
+
+describe("checkConfig — validates, not just classifies", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = makeTempDir();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Write a config file and return the results of the `config` check. */
+  async function configCheck(content: string): Promise<CheckResult> {
+    const p = join(dir, "operad.toml");
+    writeFileSync(p, content);
+    const results = await runChecks({ configPath: p, skipSlowChecks: true });
+    const r = results.find((x) => x.name === "config");
+    if (!r) throw new Error("no 'config' check in results");
+    return r;
+  }
+
+  test("a session missing 'path' is reported as fail, not ok", async () => {
+    const r = await configCheck(
+      '[operad]\n\n[[session]]\nname = "my-session"\ncommand = "claude"\ncwd = "/tmp/nope"\n',
+    );
+    expect(r.status).toBe("fail");
+    expect(r.message).toContain("path");
+  });
+
+  test("the failure message names the offending session index", async () => {
+    const r = await configCheck('[operad]\n\n[[session]]\nname = "app"\n');
+    expect(r.status).toBe("fail");
+    expect(r.message).toContain("session[0]");
+  });
+
+  test("the fix text points at the correct key names", async () => {
+    const r = await configCheck('[operad]\n\n[[session]]\nname = "app"\n');
+    expect(r.fix).toBeDefined();
+    expect(r.fix).toContain("name/type/path");
+  });
+
+  test("error text does not leak the raw 'Config validation failed:' header", async () => {
+    const r = await configCheck('[operad]\n\n[[session]]\nname = "app"\n');
+    expect(r.message).not.toContain("Config validation failed:");
+  });
+
+  test("a valid session config passes", async () => {
+    const r = await configCheck(
+      `[operad]\n\n[[session]]\nname = "app"\ntype = "claude"\npath = "${dir}"\n`,
+    );
+    expect(r.status).toBe("ok");
+  });
+
+  test("a session-free config passes (what `operad init` now generates)", async () => {
+    const r = await configCheck("[operad]\ndashboard_port = 18970\n");
+    expect(r.status).toBe("ok");
+  });
+
+  test("a service session without a command fails", async () => {
+    const r = await configCheck(
+      `[operad]\n\n[[session]]\nname = "api"\ntype = "service"\npath = "${dir}"\n`,
+    );
+    expect(r.status).toBe("fail");
+    expect(r.message).toContain("command");
+  });
+
+  test("an invalid session name is rejected", async () => {
+    const r = await configCheck(
+      `[operad]\n\n[[session]]\nname = "My_Session"\ntype = "claude"\npath = "${dir}"\n`,
+    );
+    expect(r.status).toBe("fail");
+  });
+});
+
+// ── WSL detection ─────────────────────────────────────────────────────────
+
+describe("detectWsl — kernel release parsing", () => {
+  const savedDistro = process.env.WSL_DISTRO_NAME;
+  const savedInterop = process.env.WSL_INTEROP;
+
+  beforeEach(() => {
+    delete process.env.WSL_DISTRO_NAME;
+    delete process.env.WSL_INTEROP;
+  });
+
+  afterEach(() => {
+    if (savedDistro === undefined) delete process.env.WSL_DISTRO_NAME;
+    else process.env.WSL_DISTRO_NAME = savedDistro;
+    if (savedInterop === undefined) delete process.env.WSL_INTEROP;
+    else process.env.WSL_INTEROP = savedInterop;
+  });
+
+  test("a stock Linux kernel is not WSL", () => {
+    const r = detectWsl("6.6.87-1-lts");
+    expect(r.isWsl).toBe(false);
+    expect(r.version).toBeNull();
+  });
+
+  test("an Android/Termux kernel is not WSL", () => {
+    const r = detectWsl("6.6.98-android15-8-pd6ff1cd");
+    expect(r.isWsl).toBe(false);
+  });
+
+  test("WSL2 kernel release is detected as version 2", () => {
+    const r = detectWsl("5.15.167.4-microsoft-standard-WSL2");
+    expect(r.isWsl).toBe(true);
+    expect(r.version).toBe(2);
+  });
+
+  test("WSL1 kernel release is detected as version 1", () => {
+    const r = detectWsl("4.4.0-19041-Microsoft");
+    expect(r.isWsl).toBe(true);
+    expect(r.version).toBe(1);
+  });
+
+  test("WSL_INTEROP forces version 2 even on an ambiguous kernel string", () => {
+    process.env.WSL_INTEROP = "/run/WSL/8_interop";
+    const r = detectWsl("4.4.0-19041-Microsoft");
+    expect(r.version).toBe(2);
+  });
+
+  test("WSL_DISTRO_NAME alone is enough to detect WSL", () => {
+    process.env.WSL_DISTRO_NAME = "Ubuntu";
+    const r = detectWsl("");
+    expect(r.isWsl).toBe(true);
+    expect(r.distro).toBe("Ubuntu");
+  });
+
+  test("distro is null when WSL_DISTRO_NAME is unset", () => {
+    const r = detectWsl("5.15.167.4-microsoft-standard-WSL2");
+    expect(r.distro).toBeNull();
+  });
+
+  test("detection is case-insensitive", () => {
+    expect(detectWsl("4.4.0-MICROSOFT").isWsl).toBe(true);
   });
 });

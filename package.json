@@ -15,6 +15,7 @@
   "files": [
     "dist/",
     "dashboard/dist/",
+    "scripts/",
     "watchdog.sh",
     "README.md",
     "CHANGELOG.md",
