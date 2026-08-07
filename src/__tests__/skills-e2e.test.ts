@@ -51,6 +51,8 @@ mock.module("node:os", () => {
 });
 
 import { SkillManager } from "../skills/index.js";
+import { _setSettingsJsonHome } from "../skills/settings-json.js";
+import { _setGcHome } from "../skills/gc.js";
 import { gitUrlProvider } from "../skills/providers/git-url.js";
 import { ConsumerTracker } from "../skills/consumer-tracker.js";
 import type { Provider, ProviderModule } from "../skills/types.js";
@@ -143,6 +145,11 @@ function setupDb(): Database {
 
 beforeAll(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "operad-skills-e2e-home-"));
+  // Explicit seams: mock.module("node:os") only reaches modules that resolve
+  // homedir AFTER the mock is installed, which is why real ~/.claude/settings.json
+  // was being written by this suite.
+  _setSettingsJsonHome(tmpHome);
+  _setGcHome(tmpHome);
   originalHome = process.env.HOME;
   process.env.HOME = tmpHome;
 
@@ -205,6 +212,8 @@ name = "e2e-workflow"
 });
 
 afterAll(() => {
+  _setSettingsJsonHome(null);
+  _setGcHome(null);
   if (originalHome != null) process.env.HOME = originalHome;
   else delete process.env.HOME;
   try { memSql.close(); } catch { /* ignore */ }

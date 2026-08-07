@@ -30,12 +30,25 @@ import { homedir } from "node:os";
 import { SkillError } from "./types.js";
 
 /**
- * Lazy paths — same rationale as claude-json's. Test harnesses
- * override $HOME after module import, so a top-level `const` would
- * capture the pre-override path.
+ * `~/.claude/settings.json` and its lockfile, resolved lazily through a
+ * settable home override.
+ *
+ * The comment below used to claim tests could redirect this by overriding
+ * $HOME. They cannot: bun's os.homedir() caches its first value process-wide,
+ * so the override silently did nothing and the test suite wrote real skill
+ * entries into the developer's actual ~/.claude/settings.json. claude-json.ts
+ * already had this seam; settings-json.ts and gc.ts did not.
  */
-function settingsPath(): string { return join(homedir(), ".claude", "settings.json"); }
-function lockPath(): string { return join(homedir(), ".claude", "settings.json.lock"); }
+let homeOverride: string | null = null;
+function settingsPath(): string { return join(homeOverride ?? homedir(), ".claude", "settings.json"); }
+function lockPath(): string { return join(homeOverride ?? homedir(), ".claude", "settings.json.lock"); }
+
+/**
+ * Test-only: redirect settings.json resolution to `home` (pass null to restore
+ * the real per-user path). Tests MUST reset to null in afterEach.
+ * @internal
+ */
+export function _setSettingsJsonHome(home: string | null): void { homeOverride = home; }
 
 export interface SettingsJsonWriteOpts {
   /** Absolute bundle paths to add. */

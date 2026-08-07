@@ -29,7 +29,18 @@ import type { ToolExecutor } from "../tools.js";
 import { SkillStore } from "./store.js";
 
 /** Lazy — see same rationale in claude-json.ts / settings-json.ts. */
-function settingsPath(): string { return join(homedir(), ".claude", "settings.json"); }
+/**
+ * Same home seam as settings-json.ts — without it the GC pass in tests reads
+ * (and prunes against) the developer's real ~/.claude/settings.json.
+ */
+let homeOverride: string | null = null;
+function settingsPath(): string { return join(homeOverride ?? homedir(), ".claude", "settings.json"); }
+
+/**
+ * Test-only: redirect settings.json resolution. Reset to null in afterEach.
+ * @internal
+ */
+export function _setGcHome(home: string | null): void { homeOverride = home; }
 const DEFAULT_TTL_HOURS = 168; // 7 days per §3.14
 const DEFAULT_RETAIN_PER_PAIR = 3;
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour — also the two-phase delay

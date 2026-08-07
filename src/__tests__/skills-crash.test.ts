@@ -35,6 +35,8 @@ mock.module("node:os", () => {
 });
 
 import { SkillManager } from "../skills/index.js";
+import { _setSettingsJsonHome } from "../skills/settings-json.js";
+import { _setGcHome } from "../skills/gc.js";
 import { gitUrlProvider } from "../skills/providers/git-url.js";
 import { ConsumerTracker } from "../skills/consumer-tracker.js";
 import { ToolExecutor } from "../tools.js";
@@ -147,6 +149,11 @@ function makeFaultyProvider(failAt: { fetch?: boolean; read?: boolean }): Provid
 
 beforeAll(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "operad-skills-crash-home-"));
+  // Explicit seams — mock.module("node:os") does not reach modules that bound
+  // homedir before the mock was installed, which let this suite write to the
+  // developer's real ~/.claude/settings.json.
+  _setSettingsJsonHome(tmpHome);
+  _setGcHome(tmpHome);
   originalHome = process.env.HOME;
   process.env.HOME = tmpHome;
 
@@ -162,6 +169,8 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  _setSettingsJsonHome(null);
+  _setGcHome(null);
   if (originalHome != null) process.env.HOME = originalHome;
   else delete process.env.HOME;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
