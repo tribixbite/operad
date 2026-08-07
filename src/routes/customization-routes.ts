@@ -14,6 +14,13 @@ import { homedir } from "node:os";
 import type { OrchestratorContext } from "../orchestrator-context.js";
 import type { SessionConfig } from "../types.js";
 import { parseRecentProjects } from "../registry.js";
+import {
+  buildBundle,
+  importBundle,
+  validateBundle,
+  type CustomizationBundle,
+  type DocCollection,
+} from "./customization-transfer.js";
 
 /** File metadata attached to skill/plan/memory/etc. entries. */
 interface FileMeta {
@@ -34,6 +41,78 @@ function statMeta(path: string): FileMeta {
 
 /** Regex for env key names that should be redacted in API responses */
 const SENSITIVE_ENV_KEYS = /KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL/i;
+
+/**
+ * File extensions the customization file reader will return.
+ *
+ * Deliberately narrow: these are the document types the dashboard renders
+ * (skills, CLAUDE.md/AGENTS.md, plans, commands, memories). Anything else
+ * under ~/.claude — credentials, settings, session history — stays unreadable
+ * over HTTP.
+ */
+const READABLE_CUSTOMIZATION_EXTENSIONS = [".md", ".markdown", ".txt"];
+
+/**
+ * Is this a customization document the API may serve?
+ *
+ * Rejects dotfiles by basename (`.credentials.json`, `.env`) regardless of
+ * extension, then requires an allow-listed extension. Exported for testing.
+ */
+export function isReadableCustomizationFile(filePath: string): boolean {
+  const base = filePath.split(/[/\\]/).pop() ?? "";
+  if (!base || base.startsWith(".")) return false;
+  const lower = base.toLowerCase();
+  return READABLE_CUSTOMIZATION_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/**
+ * Collect skills from a skills root into `out`.
+ *
+ * Claude Code supports two layouts and the dashboard has to show both:
+ *   • flat file      ~/.claude/skills/bun-web-dev.md
+ *   • directory      ~/.claude/skills/brainstorming/SKILL.md
+ *
+ * Only the flat form was listed before, so directory skills — which is what
+ * every plugin-installed skill and every symlinked skill library uses — were
+ * invisible in the UI and absent from exports. On a typical setup that is
+ * roughly half of all installed skills.
+ *
+ * `statSync` (not `lstatSync`) is deliberate: symlinking a shared skills
+ * directory into ~/.claude/skills is a normal setup and those must resolve.
+ */
+export function scanSkillsInto(
+  dir: string,
+  scope: "user" | "project",
+  out: Array<{ name: string; path: string; scope: string; source?: string; modified: number | null; size: number | null }>,
+): void {
+  if (!existsSync(dir)) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.startsWith(".")) continue;
+    const abs = join(dir, entry);
+    let isDir = false;
+    try {
+      isDir = statSync(abs).isDirectory();
+    } catch {
+      continue; // broken symlink
+    }
+    if (isDir) {
+      // Directory-form skill: the manifest is SKILL.md inside it.
+      const manifest = join(abs, "SKILL.md");
+      if (existsSync(manifest)) {
+        out.push({ name: entry, path: manifest, scope, ...statMeta(manifest) });
+      }
+      continue;
+    }
+    if (!entry.endsWith(".md")) continue;
+    out.push({ name: entry.replace(/\.md$/, ""), path: abs, scope, ...statMeta(abs) });
+  }
+}
 
 /**
  * CustomizationRoutes — handles GET /api/customization, GET/POST /api/customization-file.
@@ -213,27 +292,9 @@ export class CustomizationRoutes {
       }
 
       const skills: Array<{ name: string; path: string; scope: string; source?: string; modified: number | null; size: number | null }> = [];
-      const userSkillsDir = join(claudeDir, "skills");
-      if (existsSync(userSkillsDir)) {
-        try {
-          for (const f of readdirSync(userSkillsDir)) {
-            if (!f.endsWith(".md")) continue;
-            const p = join(userSkillsDir, f);
-            skills.push({ name: f.replace(/\.md$/, ""), path: p, scope: "user", ...statMeta(p) });
-          }
-        } catch { /* skip */ }
-      }
+      scanSkillsInto(join(claudeDir, "skills"), "user", skills);
       if (projectPath) {
-        const projSkillsDir = join(projectPath, ".claude", "skills");
-        if (existsSync(projSkillsDir)) {
-          try {
-            for (const f of readdirSync(projSkillsDir)) {
-              if (!f.endsWith(".md")) continue;
-              const p = join(projSkillsDir, f);
-              skills.push({ name: f.replace(/\.md$/, ""), path: p, scope: "project", ...statMeta(p) });
-            }
-          } catch { /* skip */ }
-        }
+        scanSkillsInto(join(projectPath, ".claude", "skills"), "project", skills);
       }
 
       // Helper: scan a directory for .md files and push each as a metadata-tagged
@@ -652,16 +713,112 @@ export class CustomizationRoutes {
     }
   }
 
-  /** Read a customization file's content (skills, CLAUDE.md) */
+  /**
+   * Read a customization file's content (skills, CLAUDE.md).
+   *
+   * SECURITY: `isAllowedCustomizationPath` only constrains the *directory* — it
+   * admits everything under ~/.claude/. That directory also holds
+   * `.credentials.json` (the Claude OAuth token), `settings.json`, and
+   * `history.jsonl`. Since the dashboard binds 0.0.0.0 with
+   * `Access-Control-Allow-Origin: *` and no auth, an unfiltered read here let
+   * any LAN host — or any web page the user happened to visit — exfiltrate
+   * those credentials. The write path already restricted itself to .md; the
+   * read path did not.
+   *
+   * Reads are now limited to the plain-text document types the dashboard
+   * actually renders, and dotfiles are refused outright.
+   */
   cmdReadCustomizationFile(filePath: string): { ok: boolean; data?: unknown; error?: string } {
     if (!filePath || !this.isAllowedCustomizationPath(filePath)) {
       return { ok: false, error: "Path not allowed" };
+    }
+    if (!isReadableCustomizationFile(filePath)) {
+      return {
+        ok: false,
+        error: "Only .md/.markdown/.txt customization files can be read",
+      };
     }
     try {
       const content = readFileSync(filePath, "utf-8");
       return { ok: true, data: { content } };
     } catch (err) {
       return { ok: false, error: `Failed to read file: ${err}` };
+    }
+  }
+
+  /**
+   * GET /api/customization/export — build a re-importable bundle of this
+   * machine's skills, commands, agents, plans, memories, plugin marketplaces
+   * and MCP server definitions.
+   *
+   * Unlike the dashboard's older client-side downloads (which emitted file
+   * *paths* and no content), this payload carries the actual documents, so it
+   * restores on a machine that has never seen those files.
+   */
+  cmdExportBundle(projectPath?: string): { ok: boolean; data?: unknown; error?: string } {
+    try {
+      // Reuse the existing collector for plugin + MCP metadata so the bundle
+      // stays consistent with what the Settings UI displays.
+      const current = this.cmdCustomization(projectPath);
+      const data = (current.ok ? current.data : {}) as {
+        plugins?: Array<{
+          id: string; name: string; version: string;
+          enabled: boolean; scope: string;
+        }>;
+        mcpServers?: Array<{
+          name: string; scope: string; command: string;
+          args: string[]; env?: Record<string, string>; disabled: boolean;
+        }>;
+      };
+
+      const bundle = buildBundle({
+        projectPath,
+        plugins: (data.plugins ?? []).map((p) => ({
+          id: p.id,
+          name: p.name,
+          // `<plugin>@<marketplace>` — the marketplace half is what makes the
+          // entry resolvable on the target machine.
+          marketplace: p.id.includes("@") ? p.id.split("@").pop() ?? null : null,
+          version: p.version,
+          enabled: p.enabled,
+          scope: p.scope,
+        })),
+        mcpServers: data.mcpServers ?? [],
+      });
+      return { ok: true, data: bundle };
+    } catch (err) {
+      return { ok: false, error: `Export failed: ${(err as Error).message}` };
+    }
+  }
+
+  /**
+   * POST /api/customization/import — apply a previously exported bundle.
+   *
+   * Accepts `{bundle, options}` or a bare bundle body. Returns a per-item
+   * report; individual rejects never fail the whole request.
+   */
+  cmdImportBundle(
+    rawBundle: unknown,
+    options: Record<string, unknown>,
+  ): { ok: boolean; data?: unknown; error?: string } {
+    const invalid = validateBundle(rawBundle);
+    if (invalid) return { ok: false, error: invalid };
+
+    try {
+      const report = importBundle(rawBundle as CustomizationBundle, {
+        dryRun: options.dry_run === true,
+        overwrite: options.overwrite === true,
+        includePlugins: options.include_plugins !== false,
+        includeMcp: options.include_mcp === true,
+        projectPath:
+          typeof options.project_path === "string" ? options.project_path : undefined,
+        collections: Array.isArray(options.collections)
+          ? (options.collections as DocCollection[])
+          : undefined,
+      });
+      return { ok: true, data: report };
+    } catch (err) {
+      return { ok: false, error: `Import failed: ${(err as Error).message}` };
     }
   }
 

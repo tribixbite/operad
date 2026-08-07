@@ -181,10 +181,13 @@ export class Daemon {
   private skillGc: import("./skills/gc.js").SkillGc | null = null;
   private consumerTracker: import("./skills/consumer-tracker.js").ConsumerTracker;
   /**
-   * Whether the skill marketplace is enabled. Set from the
-   * `--enable-skills-preview` CLI flag; defaults to false in A0 so
-   * users on `npm i -g operadic@<A0-build>` don't get the half-built
-   * surface by accident.
+   * Whether the skill marketplace is enabled.
+   *
+   * Resolved in the constructor from `[skills] enabled` in the config, with
+   * `--enable-skills-preview` / `--disable-skills-preview` as overrides.
+   * It used to be CLI-flag-only, which made it unreachable in practice:
+   * `operad stream` (and therefore the watchdog and Termux:Boot) spawns the
+   * daemon with a fixed argv that never included the flag.
    */
   private skillsPreviewEnabled = false;
   private lastUserActivityEpoch: number = Math.floor(Date.now() / 1000);
@@ -204,8 +207,14 @@ export class Daemon {
   /** Resolved when shutdown() completes — replaces 1s polling interval */
   private shutdownResolve: (() => void) | null = null;
   constructor(configPath?: string, opts: { enableSkillsPreview?: boolean } = {}) {
-    this.skillsPreviewEnabled = opts.enableSkillsPreview === true;
     this.config = loadConfig(configPath);
+    // Config decides by default; an explicit CLI flag overrides it in either
+    // direction. Config must load first — the previous order read `opts`
+    // before the config existed, so there was no way to persist the choice.
+    this.skillsPreviewEnabled =
+      opts.enableSkillsPreview !== undefined
+        ? opts.enableSkillsPreview
+        : this.config.skills.enabled;
     this.log = new Logger(this.config.orchestrator.log_dir);
     // ConsumerTracker constructed eagerly — always-present, even when
     // the SkillManager is disabled, so call sites can wrap tool

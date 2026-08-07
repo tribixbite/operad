@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
-  import { fetchCustomization, fetchFileContent, saveFileContent, downloadFile, fetchRecent, fetchConfigOverrides, patchConfigOverrides } from "$lib/api";
+  import { fetchCustomization, fetchFileContent, saveFileContent, downloadFile, fetchRecent, fetchConfigOverrides, patchConfigOverrides,
+    exportCustomizationBundle, importCustomizationBundle, type ImportBundleReport } from "$lib/api";
   import type {
     CustomizationResponse, McpServerInfo, PluginInfo, SkillInfo, PlanInfo,
     ClaudeMdInfo, HookInfo, MarketplacePlugin, RecentProject,
@@ -69,6 +70,7 @@
     memories: false,
     agentsMd: false,
     skillMarketplace: false,
+    migrate: false,
   });
 
   /**
@@ -345,6 +347,82 @@ Example usage or output
       } catch {
         error = "Share not supported on this browser";
       }
+    }
+  }
+
+  // -- Environment migration (export / import bundle) -----------------------
+
+  /** Which migrate action is in flight ("" = idle). */
+  let migrateBusy = $state("");
+  /** Parsed bundle chosen by the user, or null when none is loaded. */
+  let importBundleData = $state<unknown>(null);
+  let importFilename = $state("");
+  let importReport = $state<ImportBundleReport | null>(null);
+  let importDryRun = $state(false);
+  let importOverwrite = $state(false);
+  let importPlugins = $state(true);
+  let importMcp = $state(false);
+
+  /** Fetch a full bundle from the daemon and save it as a JSON file. */
+  async function handleExportBundle(): Promise<void> {
+    migrateBusy = "export";
+    try {
+      const bundle = await exportCustomizationBundle(selectedProject || undefined);
+      downloadJsonPayload("operad-environment", bundle);
+      error = null;
+    } catch (err) {
+      error = `Export failed: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      migrateBusy = "";
+    }
+  }
+
+  /** Read + parse the selected bundle file. Parsing client-side lets us reject
+   *  obvious garbage before sending it to the daemon. */
+  async function handleBundleFile(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    importReport = null;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as { kind?: string };
+      if (parsed?.kind !== "operad-customization-bundle") {
+        error = "Not an operad environment bundle (expected kind: operad-customization-bundle)";
+        importBundleData = null;
+        importFilename = "";
+        return;
+      }
+      importBundleData = parsed;
+      importFilename = file.name;
+      error = null;
+    } catch (err) {
+      importBundleData = null;
+      importFilename = "";
+      error = `Could not read bundle: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /** Apply (or preview) the loaded bundle. */
+  async function runImport(dryRun: boolean): Promise<void> {
+    if (!importBundleData) return;
+    migrateBusy = dryRun ? "dry" : "apply";
+    importDryRun = dryRun;
+    try {
+      importReport = await importCustomizationBundle(importBundleData, {
+        dry_run: dryRun,
+        overwrite: importOverwrite,
+        include_plugins: importPlugins,
+        include_mcp: importMcp,
+        project_path: selectedProject || undefined,
+      });
+      error = null;
+      // A real import changes what the rest of this page lists.
+      if (!dryRun) await loadData();
+    } catch (err) {
+      error = `Import failed: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      migrateBusy = "";
     }
   }
 
@@ -951,11 +1029,94 @@ Example usage or output
       <button class="section-header" onclick={() => toggleSection("skillMarketplace")}>
         <span class="chevron">{sections.skillMarketplace ? "▾" : "▸"}</span>
         <span class="section-title">Skill marketplace</span>
-        <span class="badge badge-yellow" title="Preview feature behind --enable-skills-preview">preview</span>
+        <span class="badge badge-yellow" title="Enabled by default; set [skills] enabled = false in operad.toml to hide">preview</span>
       </button>
       {#if sections.skillMarketplace}
         <div class="section-body">
           <SkillManagerPanel />
+        </div>
+      {/if}
+    </div>
+
+    <!-- Section 5c: Migrate environment — full export/import bundle.
+         The per-section ⤓ buttons above emit metadata only; this one carries
+         document CONTENT plus plugin marketplace sources, so it can actually
+         rebuild this environment on another machine. -->
+    <div class="card section-card">
+      <button class="section-header" onclick={() => toggleSection("migrate")}>
+        <span class="chevron">{sections.migrate ? "\u25be" : "\u25b8"}</span>
+        <span class="section-title">Migrate environment</span>
+        <span class="badge badge-blue">export / import</span>
+      </button>
+      {#if sections.migrate}
+        <div class="section-body">
+          <p class="migrate-help">
+            Exports skills, commands, agents, plans and memories with their file
+            contents, plus plugin marketplace sources. Import on another machine
+            to recreate them. operad registers plugins so Claude Code installs
+            them on next launch — it does not clone plugin repos itself.
+          </p>
+
+          <div class="migrate-actions">
+            <button class="btn" onclick={handleExportBundle} disabled={migrateBusy}>
+              {migrateBusy === "export" ? "Exporting\u2026" : "Export bundle"}
+            </button>
+            <label class="btn btn-file">
+              Choose bundle…
+              <input type="file" accept="application/json,.json" onchange={handleBundleFile} hidden />
+            </label>
+            {#if importBundleData}
+              <span class="migrate-filename">{importFilename}</span>
+            {/if}
+          </div>
+
+          {#if importBundleData}
+            <div class="migrate-options">
+              <label><input type="checkbox" bind:checked={importOverwrite} /> Overwrite existing files</label>
+              <label><input type="checkbox" bind:checked={importPlugins} /> Register plugins &amp; marketplaces</label>
+              <label>
+                <input type="checkbox" bind:checked={importMcp} />
+                Import MCP servers
+                <span class="migrate-warn">(secret env values are redacted at export and will be skipped)</span>
+              </label>
+            </div>
+            <div class="migrate-actions">
+              <button class="btn" onclick={() => runImport(true)} disabled={migrateBusy}>
+                {migrateBusy === "dry" ? "Checking\u2026" : "Preview (dry run)"}
+              </button>
+              <button class="btn btn-primary" onclick={() => runImport(false)} disabled={migrateBusy}>
+                {migrateBusy === "apply" ? "Importing\u2026" : "Apply import"}
+              </button>
+            </div>
+          {/if}
+
+          {#if importReport}
+            <div class="migrate-report">
+              <div><strong>{importReport.written.length}</strong> file(s) {importDryRun ? "would be written" : "written"}</div>
+              {#if importReport.marketplaces_added.length > 0}
+                <div><strong>{importReport.marketplaces_added.length}</strong> marketplace(s): {importReport.marketplaces_added.join(", ")}</div>
+              {/if}
+              {#if importReport.plugins_enabled.length > 0}
+                <div><strong>{importReport.plugins_enabled.length}</strong> plugin(s) enabled</div>
+              {/if}
+              {#if importReport.mcp_servers_added.length > 0}
+                <div><strong>{importReport.mcp_servers_added.length}</strong> MCP server(s) added</div>
+              {/if}
+              {#if importReport.skipped.length > 0}
+                <details>
+                  <summary>{importReport.skipped.length} skipped</summary>
+                  <ul>
+                    {#each importReport.skipped as s}
+                      <li><code>{s.path}</code> — {s.reason}</li>
+                    {/each}
+                  </ul>
+                </details>
+              {/if}
+              {#each importReport.warnings as w}
+                <div class="migrate-warn">{w}</div>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -1694,5 +1855,62 @@ Example usage or output
     border: none;
     border-top: 1px solid var(--border, #333);
     margin: 0.75rem 0;
+  }
+
+  /* -- Migrate environment section -- */
+  .migrate-help {
+    font-size: 0.8rem;
+    color: var(--text-dim, #9aa4b2);
+    margin: 0 0 0.75rem;
+    line-height: 1.5;
+  }
+  .migrate-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+  .btn-file {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+  }
+  .migrate-filename {
+    font-size: 0.78rem;
+    color: var(--text-dim, #9aa4b2);
+    word-break: break-all;
+  }
+  .migrate-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.82rem;
+  }
+  .migrate-options label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .migrate-warn {
+    color: var(--warn, #e2b341);
+    font-size: 0.78rem;
+  }
+  .migrate-report {
+    border-top: 1px solid var(--border, #2a3140);
+    padding-top: 0.6rem;
+    font-size: 0.82rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .migrate-report ul {
+    margin: 0.3rem 0 0;
+    padding-left: 1.1rem;
+  }
+  .migrate-report code {
+    word-break: break-all;
   }
 </style>

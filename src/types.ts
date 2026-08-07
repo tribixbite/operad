@@ -272,6 +272,20 @@ export interface HealthDefaults {
 }
 
 /** Full parsed config file */
+/**
+ * Skill marketplace settings ([skills] TOML section).
+ *
+ * The marketplace was previously reachable only by hand-running
+ * `operad daemon --enable-skills-preview` — the normal boot path
+ * (`operad stream` / watchdog / Termux:Boot) never forwarded that flag, so
+ * in practice the feature could not be turned on at all. Config makes the
+ * choice persistent across restarts.
+ */
+export interface SkillsConfig {
+  /** Expose the skill marketplace REST/IPC surface and the dashboard panel. */
+  enabled: boolean;
+}
+
 export interface TmxConfig {
   orchestrator: OrchestratorConfig;
   adb: AdbConfig;
@@ -286,6 +300,8 @@ export interface TmxConfig {
   tools: import("./tools.js").TomlToolConfig[];
   /** Workflow definitions from TOML [[workflow]] sections — DAG of tasks. */
   workflows: import("./workflow.js").WorkflowConfig[];
+  /** Skill marketplace settings from the [skills] section. */
+  skills: SkillsConfig;
 }
 
 // -- Runtime state (persisted to JSON) ----------------------------------------

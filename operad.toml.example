@@ -28,6 +28,12 @@ enabled = true
 low_threshold_pct = 10
 poll_interval_s = 60
 
+# Skill marketplace — operad-managed installer for skill/tool bundles.
+# Enabled by default. The dashboard surfaces it under Settings → Skill
+# marketplace. Set to false to hide the REST/IPC surface and the panel.
+[skills]
+enabled = true
+
 [boot]
 auto_start = 6                         # Auto-start N most recent sessions
 visible = 10                           # Show N sessions on dashboard

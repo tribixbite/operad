@@ -329,6 +329,74 @@ Body: `{ "path": "string", "content": "string" }`
 
 Paths must satisfy the same allowlist as the GET variant.
 
+#### `GET /api/customization/export[?project=<path>]`
+
+Build a complete, **re-importable** environment bundle for migrating a machine.
+
+Unlike the dashboard's per-section `⤓` downloads (which emit file *paths* and
+metadata only), this payload carries actual document **content** plus plugin
+marketplace **sources**, so it restores on a machine that has never seen these
+files.
+
+Collected: `skills`, `commands`, `agents`, `plans`, `memories` (both the flat
+`foo.md` and directory `foo/SKILL.md` layouts, following symlinks), plus
+`known_marketplaces.json` sources, installed plugins, and MCP server entries.
+
+```json
+{
+  "kind": "operad-customization-bundle",
+  "format_version": 1,
+  "meta": { "exported_at": "ISO", "exported_from": "hostname", "operad_version": "0.4.8" },
+  "documents":   [ { "collection": "skills", "scope": "user", "rel_path": "foo/SKILL.md", "content": "..." } ],
+  "marketplaces":[ { "name": "claude-plugins-official", "source": { "source": "github", "repo": "anthropics/..." } } ],
+  "plugins":     [ { "id": "sp@official", "name", "marketplace", "version", "enabled", "scope" } ],
+  "mcp_servers": [ { "name", "scope", "command", "args", "env", "disabled" } ]
+}
+```
+
+#### `POST /api/customization/import`
+
+Apply a previously exported bundle to this machine.
+
+Body: `{ "bundle": <bundle>, "options": { ... } }` (a bare bundle body is also
+accepted).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `dry_run` | `false` | Report what would happen; touch no files |
+| `overwrite` | `false` | Replace existing files instead of skipping them |
+| `collections` | all | Restrict to e.g. `["skills","commands"]` |
+| `include_plugins` | `true` | Register marketplaces + `enabledPlugins` |
+| `include_mcp` | `false` | Merge MCP servers into `~/.claude.json` |
+| `project_path` | — | Target for `scope: "project"` documents |
+
+Response is a per-item report — individual rejects never fail the request:
+
+```json
+{
+  "written": ["/home/u/.claude/skills/foo/SKILL.md"],
+  "skipped": [ { "path": "../../evil.md", "reason": "unsafe path (traversal or absolute path rejected)" } ],
+  "marketplaces_added": ["claude-plugins-official"],
+  "plugins_enabled": ["superpowers@claude-plugins-official"],
+  "mcp_servers_added": [],
+  "warnings": ["..."]
+}
+```
+
+**What import does not do:** it never clones plugin repositories or runs an
+installer. It registers the marketplace source and marks the plugin enabled;
+Claude Code materialises the plugin on next launch. Fabricating
+`installed_plugins.json` entries pointing at install paths that don't exist on
+the target machine would leave Claude Code with a broken plugin table.
+
+**Secrets:** exports redact secret-looking MCP env values to `"***"`. Import
+drops any value equal to `"***"` (with a warning) rather than writing a
+plausible-looking but broken credential. Re-enter those by hand.
+
+**Path safety:** every `rel_path` is validated before use — traversal (`..`),
+absolute paths, Windows drive prefixes, control characters and trailing
+dot/space components are refused. Bundles are untrusted input.
+
 #### AGENTS.md cross-tool compat
 
 `AGENTS.md` is the emerging cross-tool standard ([agents.md](https://agents.md)) read by Claude Code, Codex, OpenCode, and others. operad surfaces it as a distinct `agentsMdFiles[]` array rather than lumping it with `CLAUDE.md`, and each entry carries a `consumers` list so the UI can indicate which tools will pick it up.
@@ -699,6 +767,42 @@ Query: `?agent=<agentName>` (default: `master-controller`).
 Enable or disable a schedule by numeric ID.
 
 Body: `{ "enabled": true|false }`
+
+---
+
+### Skill Marketplace
+
+Enabled by default. Set `enabled = false` under `[skills]` in `operad.toml`
+to hide the surface, or override per-run with `--enable-skills-preview` /
+`--disable-skills-preview` on `operad daemon` / `operad stream`. When
+disabled, every route below returns **503**.
+
+#### `GET /api/skills[?provider=<id>]`
+Installed skills. Providers: `git+url`, `claude-marketplace`, `mcp-official`,
+`operad-curated`.
+
+#### `GET /api/skills/events?limit=N`
+Recent install/uninstall/GC events, newest first.
+
+#### `GET /api/skills/:id`
+Full manifest for one skill. `404` if unknown.
+
+#### `POST /api/skills/install`
+Body: `{ provider, locator, version?, force_take_ownership?, accept_cap_downgrade? }`
+→ `201`. `409` for ownership/autonomy conflicts, `400` otherwise.
+
+Locators are validated: only `https://`, `http://`, `ssh://`, `git://`,
+`file://`, `git@host:path` and local filesystem paths are accepted. The `ext::`
+transport and `-`-prefixed locators are refused — both are git argument
+injection vectors. `version` is validated as a single path component before it
+is used as a cache directory name.
+
+#### `POST /api/skills/:id/uninstall`
+Body: `{ force_revoke? }`. `409` on `TOOL_HAS_ACTIVE_CONSUMERS`.
+
+#### `GET /api/tool-autonomy` · `POST /api/tool-autonomy`
+Read/set per-tool autonomy buckets (`observe` → `autonomous`). POST body:
+`{ tool_id, bucket }`; `409` on `AUTONOMY_CAP_VIOLATION`.
 
 ---
 

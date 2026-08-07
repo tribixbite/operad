@@ -594,9 +594,31 @@ export class RestHandler {
           break;
         }
         case "customization":
-          // Special sub-route: /api/customization/all-projects — aggregated view
+          // Special sub-routes before the generic per-project view.
           if (name === "all-projects") {
             resp = this.customizationRoutes.cmdAllProjectsCustomization();
+          } else if (name === "export") {
+            // GET /api/customization/export[?project=<path>]
+            resp = this.customizationRoutes.cmdExportBundle(
+              queryParams.get("project") ?? undefined,
+            );
+          } else if (name === "import") {
+            // POST /api/customization/import — body is {bundle, options?}
+            if (method !== "POST") {
+              return { status: 405, data: { error: "Method not allowed" } };
+            }
+            try {
+              const parsed = JSON.parse(body) as {
+                bundle?: unknown;
+                options?: Record<string, unknown>;
+              };
+              resp = this.customizationRoutes.cmdImportBundle(
+                parsed.bundle ?? parsed,
+                parsed.options ?? {},
+              );
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
           } else {
             resp = this.customizationRoutes.cmdCustomization(name);
           }

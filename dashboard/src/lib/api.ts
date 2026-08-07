@@ -580,6 +580,52 @@ export async function fetchFileContent(filePath: string): Promise<string> {
   return data.content;
 }
 
+/**
+ * Download a complete, re-importable customization bundle.
+ *
+ * Unlike the older per-section downloads (which emitted file *paths*), this
+ * carries the actual document content plus plugin marketplace sources, so it
+ * restores on a machine that has never seen these files.
+ */
+export async function exportCustomizationBundle(projectPath?: string): Promise<unknown> {
+  const qs = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
+  const res = await fetch(`/api/customization/export${qs}`);
+  return checkedJson(res);
+}
+
+/** Options accepted by the import endpoint. */
+export interface ImportBundleOptions {
+  dry_run?: boolean;
+  overwrite?: boolean;
+  include_plugins?: boolean;
+  include_mcp?: boolean;
+  project_path?: string;
+  collections?: string[];
+}
+
+/** Per-item outcome of an import. */
+export interface ImportBundleReport {
+  written: string[];
+  skipped: { path: string; reason: string }[];
+  marketplaces_added: string[];
+  plugins_enabled: string[];
+  mcp_servers_added: string[];
+  warnings: string[];
+}
+
+/** Apply a previously exported bundle to this machine. */
+export async function importCustomizationBundle(
+  bundle: unknown,
+  options: ImportBundleOptions = {},
+): Promise<ImportBundleReport> {
+  const res = await fetch("/api/customization/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bundle, options }),
+  });
+  return checkedJson(res) as Promise<ImportBundleReport>;
+}
+
 /** Save file content (only .md files allowed) */
 export async function saveFileContent(path: string, content: string): Promise<void> {
   await checkedPost("/api/customization-file", JSON.stringify({ path, content }));
