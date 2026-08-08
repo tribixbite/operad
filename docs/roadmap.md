@@ -65,7 +65,7 @@ The `McpLifecycle` enum is intentionally single-value (`"config-only"`) in v1 â€
 
 ### Verification / quality bar
 
-- **End-to-end dashboard verification with `--enable-skills-preview`**: SkillManagerPanel renders the empty state correctly when preview is off; full install/promote/uninstall flow through the UI has not been pixel-verified.
+- **End-to-end dashboard verification of the skill marketplace**: SkillManagerPanel renders the empty state correctly when the surface is disabled, and the REST layer is verified against a live daemon; the full install/promote/uninstall flow through the UI has not been pixel-verified.
 - **CI fixture against a published `operad-stream/skills` snapshot** â€” `skills-e2e.test.ts` runs against a synthetic file:// index. Once the production repo exists, a smoke job that fetches the real index every push would catch schema drift early.
 
 ---

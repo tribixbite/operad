@@ -10,7 +10,8 @@ Cross-platform tmux session orchestrator for Claude Code sessions. Designed for 
 - Battery and memory awareness on Android/Termux
 - Token quota tracking with velocity trends and per-session attribution
 - Workflow DAG engine: TOML-defined task pipelines with conditional edges (`success` / `error` / `always`), SQLite-persisted run history, REST execution
-- Plugin/skill marketplace (preview): multi-source aggregator for tools / agents / workflows / MCP servers / SKILL.md bundles from GitHub plugin repos, the official MCP registry, and a curated index — with per-tool autonomy caps and a 5-store transactional install. Enable per-daemon with `--enable-skills-preview`; see [`docs/skills.md`](docs/skills.md)
+- Plugin/skill marketplace: multi-source aggregator for tools / agents / workflows / MCP servers / SKILL.md bundles from GitHub plugin repos, the official MCP registry, and a curated index — with per-tool autonomy caps and a 5-store transactional install. Enabled by default; set `enabled = false` under `[skills]` in `operad.toml` to hide it. See [`docs/skills.md`](docs/skills.md)
+- Environment migration: export skills, commands, subagents, plans and memories **with their file contents** — plus plugin marketplace sources — as one JSON bundle, and import it on another machine. Settings → Migrate environment, or `GET /api/customization/export` + `POST /api/customization/import`. See [`docs/api.md`](docs/api.md#customization)
 
 ## Quick Start
 

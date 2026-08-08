@@ -1,6 +1,8 @@
 # Skill / plugin marketplace
 
-> **Status:** preview. Enable per-daemon with `--enable-skills-preview`. See
+> **Status:** preview, but enabled by default. Set `enabled = false` under
+> `[skills]` in `operad.toml` to hide the surface, or override per run with
+> `--enable-skills-preview` / `--disable-skills-preview`. See
 > `docs/superpowers/specs/2026-05-20-skill-marketplace-design.md` for the
 > full design spec.
 
@@ -55,7 +57,7 @@ POST   /api/tool-autonomy                   { tool_id, bucket }
 ```
 
 All endpoints return 503 when the daemon was started without
-`--enable-skills-preview`. Install + uninstall return 409 when a
+`[skills] enabled`. Install + uninstall return 409 when a
 gating condition fires (`INSTALL_BLOCKED_BY_ACTIVE_CONSUMER`,
 `TOOL_HAS_ACTIVE_CONSUMERS`, `AUTONOMY_CAP_VIOLATION`).
 

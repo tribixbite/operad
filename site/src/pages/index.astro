@@ -155,9 +155,10 @@ import Layout from "../layouts/Layout.astro";
           <div class="border-b border-terminal-border px-4 py-2 text-xs text-terminal-dim">quick start</div>
           <div class="p-4 font-[family-name:var(--font-mono)] text-sm leading-relaxed">
             <div><span class="text-terminal-dim">$</span> <span class="text-terminal-bright">npm i -g operadic</span></div>
-            <div class="mt-3 text-terminal-dim"># create config</div>
-            <div><span class="text-terminal-dim">$</span> <span class="text-terminal-bright">mkdir -p ~/.config/operad</span></div>
-            <div><span class="text-terminal-dim">$</span> <span class="text-terminal-bright">operad config --init</span></div>
+            <div class="mt-3 text-terminal-dim"># create config (also offers to install tmux)</div>
+            <div><span class="text-terminal-dim">$</span> <span class="text-terminal-bright">operad init</span></div>
+            <div class="mt-3 text-terminal-dim"># check your setup</div>
+            <div><span class="text-terminal-dim">$</span> <span class="text-terminal-bright">operad doctor</span></div>
             <div class="mt-3 text-terminal-dim"># boot everything</div>
             <div><span class="text-terminal-dim">$</span> <span class="text-terminal-bright">operad boot</span></div>
           </div>
@@ -424,7 +425,7 @@ import Layout from "../layouts/Layout.astro";
             <p class="font-[family-name:var(--font-mono)] text-xs text-terminal-dim">
               Browse skills and CLAUDE.md across repos.<br>
               View and edit auto-memories per project.<br>
-              Unified config management.
+              Export your whole setup and import it on another machine.
             </p>
           </div>
           <div class="rounded-lg border border-terminal-border/50 bg-terminal-surface/50 p-4">
