@@ -1,7 +1,26 @@
-# TODO — clean test pollution from the real `~/.claude`
+# Test pollution in the real `~/.claude` — resolved
 
-**Status:** open. Root cause is fixed and verified; only the residue on this
-machine remains.
+**Status:** DONE (2026-08-10). Root cause fixed in `a50ddb0`; residue removed
+and verified on this machine. Kept as the record of what happened and how it
+was checked.
+
+## Outcome
+
+| Item | Result |
+|---|---|
+| `~/.claude/settings.json` `skills[]` | 3 fixture entries removed → `[]`. Semantic diff: **0 keys lost**, 9 other top-level keys byte-identical, only `skills` changed. |
+| `skills/cache/git+url/` | 7 dirs removed (6 fixtures + one provably-empty `https:__github.com_anthropics_skills` shell, removed with `rmdir` so it would have failed had it held anything). Cache now empty. |
+| operad DB | **Left alone deliberately.** All 4 `skills` rows are `tombstoned = 1`, so `SELECT ... WHERE tombstoned = 0` returns 0 — the API and dashboard never list them. `skill_active_version`, `skill_generation_refs` and `tool_autonomy_caps` are all empty. They are inert clutter from the GC retain-floor bug (roadmap), plus an audit trail in `skill_events`. |
+| Leak re-check | Snapshotted `settings.json`, re-ran `skills-e2e` + `skills-crash` (7 pass), diffed: byte-identical. Cache dir not recreated. |
+
+**Backups** (delete once you are satisfied):
+`~/.claude/operad-cleanup-backup-2026-08-10/settings.json.before`,
+`~/.claude/settings.json.bak`,
+`~/.claude/operad-cleanup-backup-2026-08-10/skills-cache-git-url.tar.gz` (all 7 original dirs).
+
+---
+
+## Original report
 
 **Context:** before commit `a50ddb0`, this repo's own test suites wrote into the
 developer's actual `~/.claude`. `skills/settings-json.ts` and `skills/gc.ts`
