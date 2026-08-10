@@ -31,6 +31,7 @@ import {
 import type { AgentConfig } from "../agents.js";
 import type { WorkflowConfig } from "../workflow.js";
 import type { TomlToolConfig } from "../tools.js";
+import { parseTomlPreferBun } from "../toml.js";
 
 export interface AdapterReadOpts {
   extracted_path: string;
@@ -182,27 +183,24 @@ interface OperadTomlShape {
 }
 
 function parseOperadToml(content: string): OperadTomlShape {
-  // Use Bun's built-in TOML if available; this code runs under bun in
-  // production and node + better-sqlite3 in CI. For node, parseTOML in
-  // config.ts has a minimal fallback but we don't import it here to
-  // keep the skills module self-contained — instead we inline a
-  // small adequate parser at the end of this file.
-  const g = globalThis as Record<string, unknown>;
-  if (g.Bun != null) {
-    const bun = g.Bun as Record<string, unknown>;
-    if (typeof bun.TOML === "object" && bun.TOML !== null) {
-      const toml = bun.TOML as { parse: (s: string) => Record<string, unknown> };
-      return toml.parse(content) as OperadTomlShape;
-    }
+  // Bun's native TOML when running under bun, the shared minimal parser
+  // otherwise.
+  //
+  // This used to throw PROVIDER_READ_FAILED whenever `globalThis.Bun` was
+  // absent, with a comment claiming a parser was "inlined at the end of this
+  // file" — there wasn't one. The shipped bundle's shebang is
+  // `#!/usr/bin/env node` and the README states node is supported, so on every
+  // node install this made *any* skill carrying a `.operad/operad.toml` (i.e.
+  // every skill that ships tools, agents, workflows or MCP servers)
+  // uninstallable. src/toml.ts now holds the parser config.ts already had.
+  try {
+    return parseTomlPreferBun(content) as OperadTomlShape;
+  } catch (err) {
+    throw new SkillError(
+      "PROVIDER_READ_FAILED",
+      `failed to parse operad.toml: ${(err as Error).message}`,
+    );
   }
-  // CI / node fallback — re-use config.ts's parser via dynamic import
-  // would be cleaner but creates a circular-ish dependency; for A0,
-  // throw a typed error so the test suite catches "no TOML parser"
-  // immediately rather than silently producing empty manifests.
-  throw new SkillError(
-    "PROVIDER_READ_FAILED",
-    "No TOML parser available (this build expected Bun's built-in TOML support).",
-  );
 }
 
 function tomlEntryToToolConfig(t: Record<string, unknown>): TomlToolConfig {

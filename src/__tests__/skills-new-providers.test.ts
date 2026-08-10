@@ -1183,3 +1183,68 @@ describe("_parseLocator — version pin boundary", () => {
     expect(r.requestedVersion).toBe("latest");
   });
 });
+
+// ── mcp-official: trust tier must not survive a registry override ──────────
+//
+// trustTier() returned "trusted" unconditionally. Since setting
+// OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL also disables the hostname guard and
+// the SPKI pin, any host could become a trusted-tier install source — the
+// highest autonomy ceiling — just by setting an env var.
+
+describe("mcp-official — trust tier vs registry override", () => {
+  const savedBase = process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL;
+
+  afterEach(async () => {
+    if (savedBase === undefined) delete process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL;
+    else process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL = savedBase;
+    const { _resetWarnings } = await import("../skills/providers/mcp-official.js");
+    _resetWarnings();
+  });
+
+  test("no override → trusted", async () => {
+    delete process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL;
+    const { mcpOfficialProvider } = await import("../skills/providers/mcp-official.js");
+    expect(mcpOfficialProvider.trustTier("anything")).toBe("trusted");
+  });
+
+  test("override to a foreign host → escape, not trusted", async () => {
+    process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL = "https://evil.example.com/v0.1";
+    const { mcpOfficialProvider } = await import("../skills/providers/mcp-official.js");
+    expect(mcpOfficialProvider.trustTier("anything")).toBe("escape");
+  });
+
+  test("override to a file:// fixture → escape", async () => {
+    process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL = "file:///tmp/fixture";
+    const { mcpOfficialProvider } = await import("../skills/providers/mcp-official.js");
+    expect(mcpOfficialProvider.trustTier("anything")).toBe("escape");
+  });
+
+  test("override that still points at the official host stays trusted", async () => {
+    process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL =
+      "https://registry.modelcontextprotocol.io/v0.2";
+    const { mcpOfficialProvider } = await import("../skills/providers/mcp-official.js");
+    expect(mcpOfficialProvider.trustTier("anything")).toBe("trusted");
+  });
+
+  test("isRegistryOverridden classifies unparseable values as overridden", async () => {
+    process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL = "/not/a/url";
+    const { isRegistryOverridden } = await import("../skills/providers/mcp-official.js");
+    expect(isRegistryOverridden()).toBe(true);
+  });
+
+  test("the downgrade emits a one-shot process warning", async () => {
+    process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL = "https://evil.example.com/v0.1";
+    const { mcpOfficialProvider, _resetWarnings } =
+      await import("../skills/providers/mcp-official.js");
+    _resetWarnings();
+    const seen: string[] = [];
+    const onWarn = (w: Error) => seen.push(String(w.message));
+    process.on("warning", onWarn);
+    mcpOfficialProvider.trustTier("x");
+    mcpOfficialProvider.trustTier("x"); // second call must not re-warn
+    await new Promise((r) => setTimeout(r, 20));
+    process.off("warning", onWarn);
+    const hits = seen.filter((m) => m.includes("registry base URL is overridden"));
+    expect(hits.length).toBe(1);
+  });
+});

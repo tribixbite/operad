@@ -95,8 +95,8 @@ export class SkillStore {
         `INSERT INTO skills (
           id, name, description, provider, locator, version, fetched_url,
           fetched_commit_sha, fetched_archive_sha256, fetched_at, trust_tier,
-          enabled, tombstoned, manifest_json, installed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+          enabled, tombstoned, manifest_json, installed_at, generation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           description = excluded.description,
@@ -108,7 +108,8 @@ export class SkillStore {
           enabled = 1,
           tombstoned = 0,
           manifest_json = excluded.manifest_json,
-          installed_at = excluded.installed_at`,
+          installed_at = excluded.installed_at,
+          generation = excluded.generation`,
       ).run(
         skill.id,
         skill.name,
@@ -123,6 +124,7 @@ export class SkillStore {
         skill.trust_tier,
         JSON.stringify(skill),
         Math.floor(Date.now() / 1000),
+        generation,
       );
 
       db.prepare(

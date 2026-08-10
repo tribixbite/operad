@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import { parseTomlAgents, type AgentConfig } from "./agents.js";
 import { detectPlatform } from "./platform/platform.js";
+import { parseTomlMinimal } from "./toml.js";
 
 /** Default config search paths from platform (operad primary, tmx/drey fallback for compat) */
 const CONFIG_PATHS = detectPlatform().configPaths();
@@ -65,106 +66,6 @@ function parseTOML(content: string): Record<string, unknown> {
   }
   // Fallback: use our minimal TOML parser (works in Node.js and Bun)
   return parseTomlMinimal(content);
-}
-
-/**
- * Minimal TOML parser — handles the subset we use:
- * - [section] and [[array]] headers
- * - key = "string", key = number, key = bool, key = ["array"]
- * - # comments, blank lines
- */
-function parseTomlMinimal(content: string): Record<string, unknown> {
-  const root: Record<string, unknown> = {};
-  let currentSection: Record<string, unknown> = root;
-  let currentPath: string[] = [];
-  let isArrayTable = false;
-
-  for (const rawLine of content.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-
-    // Array table: [[section]]
-    const arrayMatch = line.match(/^\[\[([^\]]+)\]\]$/);
-    if (arrayMatch) {
-      isArrayTable = true;
-      currentPath = arrayMatch[1].split(".");
-      const newItem: Record<string, unknown> = {};
-
-      // Navigate to parent, creating along the way
-      let target = root;
-      for (let i = 0; i < currentPath.length - 1; i++) {
-        if (!(currentPath[i] in target)) target[currentPath[i]] = {};
-        target = target[currentPath[i]] as Record<string, unknown>;
-      }
-
-      const key = currentPath[currentPath.length - 1];
-      if (!(key in target)) target[key] = [];
-      (target[key] as unknown[]).push(newItem);
-      currentSection = newItem;
-      continue;
-    }
-
-    // Table: [section]
-    const tableMatch = line.match(/^\[([^\]]+)\]$/);
-    if (tableMatch) {
-      isArrayTable = false;
-      currentPath = tableMatch[1].split(".");
-
-      // If current array table context and this is a sub-section like [session.env]
-      // attach to the last array item
-      if (currentPath[0] === "session" && currentPath.length > 1) {
-        const sessions = root["session"] as unknown[] | undefined;
-        if (sessions && sessions.length > 0) {
-          const lastSession = sessions[sessions.length - 1] as Record<string, unknown>;
-          const subKey = currentPath.slice(1).join(".");
-          if (!(subKey in lastSession)) lastSession[subKey] = {};
-          currentSection = lastSession[subKey] as Record<string, unknown>;
-          continue;
-        }
-      }
-
-      // Navigate/create nested path
-      let target = root;
-      for (const segment of currentPath) {
-        if (!(segment in target)) target[segment] = {};
-        target = target[segment] as Record<string, unknown>;
-      }
-      currentSection = target;
-      continue;
-    }
-
-    // Key = value
-    const kvMatch = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
-    if (kvMatch) {
-      const [, key, rawValue] = kvMatch;
-      currentSection[key] = parseTomlValue(rawValue.trim());
-    }
-  }
-
-  return root;
-}
-
-/** Parse a TOML value (string, number, bool, array) */
-function parseTomlValue(raw: string): unknown {
-  // Quoted string
-  if ((raw.startsWith('"') && raw.endsWith('"')) ||
-      (raw.startsWith("'") && raw.endsWith("'"))) {
-    return raw.slice(1, -1);
-  }
-  // Boolean
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  // Array
-  if (raw.startsWith("[")) {
-    const inner = raw.slice(1, -1).trim();
-    if (!inner) return [];
-    return inner.split(",").map((s) => parseTomlValue(s.trim()));
-  }
-  // Number
-  const num = Number(raw);
-  if (!isNaN(num)) return num;
-  // Fallback: treat as string
-  return raw;
 }
 
 // -- Validation ---------------------------------------------------------------

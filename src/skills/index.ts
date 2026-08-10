@@ -134,7 +134,35 @@ export class SkillManager {
       throw new SkillError("PROVIDER_NOT_FOUND", `unknown provider: ${provider}`);
     }
 
+    // The flag gates tool execution while an install is mid-flight, so it must
+    // be cleared on every exit path. It used to be set here with the try/finally
+    // starting ~65 lines below, leaving trustTier(), getActive(),
+    // getToolAutonomyCap(), setToolAutonomyCap(), appendEvent() and
+    // beginGenerationTransaction() outside it — a throw in any of them latched
+    // installInProgress permanently, so every subsequent tool call failed with
+    // TOOL_BLOCKED_BY_ACTIVE_INSTALL until the daemon was restarted.
     this.installInProgress = true;
+    try {
+      return await this.installUnguarded(
+        provider, locator, version, opts, providerMod,
+      );
+    } finally {
+      this.installInProgress = false;
+    }
+  }
+
+  /**
+   * The install body. Always invoked through {@link install}, which owns the
+   * installInProgress flag — keeping the flag handling in a thin wrapper means
+   * no early-return or throw inside here can leak it.
+   */
+  private async installUnguarded(
+    provider: Provider,
+    locator: string,
+    version: string,
+    opts: { force_take_ownership?: boolean; accept_cap_downgrade?: boolean },
+    providerMod: import("./types.js").ProviderModule,
+  ): Promise<{ skill: OperadSkill; warnings: string[] }> {
     const trustTier = providerMod.trustTier(locator);
     const warnings: string[] = [];
 
@@ -164,8 +192,8 @@ export class SkillManager {
           }
         }
         if (clamped.length > 0 && !opts.accept_cap_downgrade) {
-          this.opts.toolExecutor.abortGeneration; // (no-op — no gen opened yet)
-          this.installInProgress = false;
+          // No generation is open yet, so there is nothing to abort; the
+          // wrapper's finally clears installInProgress.
           throw new SkillError(
             "PROVIDER_TIER_DOWNGRADE",
             `Cross-tier re-install would clamp ${clamped.length} tool(s) below their current bucket. Re-run with --accept-cap-downgrade to confirm.`,
@@ -300,8 +328,6 @@ export class SkillManager {
       this.log.error(`Install failed at step ${completedSteps.length}: ${(err as Error).message}`);
       this.rollback(completedSteps, skill);
       throw err;
-    } finally {
-      this.installInProgress = false;
     }
   }
 

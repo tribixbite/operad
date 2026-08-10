@@ -54,7 +54,28 @@ The `McpLifecycle` enum is intentionally single-value (`"config-only"`) in v1 �
 
 ### Hardening / supply chain
 
-- **Signed manifests** (sigstore / cosign) — verify the skill bundle before commit. Currently we rely on git commit SHA + `git ls-tree` digest for git+url and the pinned curated index's commit SHA for `operad-curated`. Spec ref: §10.
+**Closed in 0.4.9** (previously listed here):
+
+- ~~GC retain-floor counted tombstoned rows~~ — a skill with ≤ `retain_per_pair`
+  uninstalled versions was permanently protected, so its cache dir and DB row
+  leaked forever. Tombstones no longer consume retain slots.
+- ~~GC pin gate reached `skill_generation_refs` through `skill_active_version`~~,
+  which `markUninstalled` deletes — so pass-2 deleted cache dirs while consumers
+  still held live pins. The generation is now recorded on the `skills` row and
+  survives tombstoning.
+- ~~GC settings.json reference check hardcoded `/`~~ — never matched on Windows,
+  so the sweeper could delete a cache dir Claude Code was loading from.
+- ~~`operad-curated` integrity check was a no-op~~ — the digest was computed and
+  only embedded in an error message, never compared, while the comment claimed
+  CDN-tamper protection.
+- ~~Node builds could not install any skill shipping `operad.toml`~~ — the parser
+  was behind a `globalThis.Bun` check although the bundle's shebang is `node`.
+- ~~`installInProgress` could latch forever~~ — set ~65 lines above its
+  try/finally, so an early throw blocked all tool calls until daemon restart.
+
+
+- **Signed manifests** (sigstore / cosign) — verify the skill bundle before commit. Currently we rely on git commit SHA + `git ls-tree` digest for git+url, and for `operad-curated` the pinned commit SHA plus an optional exact body digest via `OPERAD_CURATED_INDEX_SHA256`. Spec ref: §10.
+- **Bake production SPKI pins for `mcp-official`** — `SPKI_PINS` is still empty in source, so the registry connection is TLS-only unless an operator sets `OPERAD_MCP_OFFICIAL_SPKI_PINS`. The unpinned fallback now emits a one-shot process warning instead of being silent, and overriding the registry base URL downgrades the provider to the `escape` trust tier, but a committed production pin is still the goal.
 - **Skill packs** — curated collections that install together as a single unit. Different surface from individual skill install (atomic across N skills). Spec ref: §10.
 - **`operad-stream/skills` GitHub repo bootstrap** — local stub exists at `~/git/operad-stream-skills`. Production needs: push to `tribixbite/operad-stream-skills`, bake the production commit SHA into `INDEX_COMMIT_SHA` in `src/skills/providers/operad-curated.ts`, document the contributor flow for proposing additions.
 

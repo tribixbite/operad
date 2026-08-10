@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed — skill marketplace hardening
+
+- **GC leaked uninstalled skills forever.** The retain floor (keep the 3 most
+  recent versions per provider+locator) counted tombstoned rows, so a skill
+  whose versions were *all* uninstalled was fully protected: never marked,
+  never swept, cache dir and DB row retained indefinitely. Four such rows were
+  found on a real machine. Tombstones no longer consume retain slots; the floor
+  still protects the newest live versions.
+- **GC pin gate never fired after an uninstall.** Pass-2 reached
+  `skill_generation_refs` through `skill_active_version`, which
+  `markUninstalled` deletes — so the subquery returned nothing, `NOT EXISTS`
+  was trivially true, and the cache dir was deleted while consumers still held
+  live pins on that generation. The generation is now recorded on the `skills`
+  row (new `skills.generation` column, migrated automatically) and survives
+  tombstoning.
+- **GC could delete a cache dir Claude Code was using, on Windows.** The
+  settings.json reference check hardcoded `cacheDir + "/"`, so on Windows —
+  where both sides use backslashes — it never matched. Both sides are now
+  resolved and separator-normalised.
+- **`operad-curated` integrity check did nothing.** The response digest was
+  computed and then only embedded in an error message, never compared, while
+  the module comment claimed it stopped a CDN substituting a tampered index. It
+  could not have worked as written: the pinned value is a *git commit* SHA, not
+  a body hash. `OPERAD_CURATED_INDEX_SHA256` now pins the exact sha256 and is
+  enforced (constant-time), and the comments describe the real guarantee.
+- **`mcp-official` treated an overridden registry as trusted.** Setting
+  `OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL` disables the hostname guard and the
+  SPKI pin, yet `trustTier()` still returned `"trusted"` — so any host could
+  become a trusted-tier install source, at the highest autonomy ceiling. An
+  override that does not point at the official host now yields `"escape"`. The
+  unpinned-TLS fallback finally emits the warning the module header promised,
+  and an overridden base URL must still use https.
+- **Node installs could not use any skill shipping `operad.toml`.** The parser
+  was gated behind `globalThis.Bun`, with a comment claiming a fallback was
+  "inlined at the end of this file" — there wasn't one. The published bundle's
+  shebang is `#!/usr/bin/env node`, so on node every skill carrying tools,
+  agents, workflows or MCP servers failed to install. The minimal TOML parser
+  is now shared via `src/toml.ts`.
+- **A failed install could block every tool call until restart.**
+  `installInProgress` was set ~65 lines above its `try`/`finally`, so a throw
+  from `trustTier()`, `getActive()`, `beginGenerationTransaction()` and others
+  skipped the reset and latched `TOOL_BLOCKED_BY_ACTIVE_INSTALL` permanently.
+  The flag now lives in a thin wrapper around the install body.
+
 ## [0.4.8] - 2026-08-07
 
 ### Fixed — first run on a clean machine (Ubuntu/WSL)

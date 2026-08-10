@@ -81,7 +81,7 @@ function setupDb(): Database {
       fetched_archive_sha256 TEXT NOT NULL, fetched_at INTEGER NOT NULL,
       trust_tier TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
       tombstoned INTEGER NOT NULL DEFAULT 0, manifest_json TEXT NOT NULL,
-      installed_at INTEGER NOT NULL,
+      installed_at INTEGER NOT NULL, generation INTEGER,
       UNIQUE(provider, locator, version)
     );
     CREATE TABLE skill_active_version (

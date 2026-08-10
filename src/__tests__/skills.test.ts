@@ -659,7 +659,7 @@ describe("SkillGc sweeper (Phase E.1)", () => {
         fetched_url TEXT, fetched_commit_sha TEXT,
         fetched_archive_sha256 TEXT, fetched_at INTEGER,
         trust_tier TEXT, enabled INTEGER, tombstoned INTEGER DEFAULT 0,
-        manifest_json TEXT, installed_at INTEGER NOT NULL,
+        manifest_json TEXT, installed_at INTEGER NOT NULL, generation INTEGER,
         UNIQUE(provider, locator, version)
       );
       CREATE TABLE skill_active_version (
@@ -678,19 +678,8 @@ describe("SkillGc sweeper (Phase E.1)", () => {
     return sql;
   }
 
-  test("pass-1 marks tombstoned rows beyond the retain-floor", async () => {
-    const sql = makeGcEnv();
-    const now = Math.floor(Date.now() / 1000);
-    // 4 tombstoned versions for the same (provider, locator) — newest
-    // 3 protected, oldest swept.
-    for (let i = 0; i < 4; i++) {
-      sql.prepare(`INSERT INTO skills
-          (id, provider, locator, version, manifest_json, installed_at,
-           fetched_archive_sha256, tombstoned)
-        VALUES (?, ?, ?, ?, '{}', ?, 'x', 1)`).run(
-        `git+url:r@v${i}`, "git+url", "r", `v${i}`, now - i * 100,
-      );
-    }
+  /** Build a GC bound to an in-memory DB. */
+  async function makeGc(sql: any, opts: Record<string, unknown> = {}) {
     const { MemoryDb } = await import("../memory-db.js");
     const db = Object.create(MemoryDb.prototype);
     db.requireDb = () => sql;
@@ -698,12 +687,149 @@ describe("SkillGc sweeper (Phase E.1)", () => {
     const { SkillStore } = await import("../skills/store.js");
     const store = new SkillStore(db, log);
     const { SkillGc } = await import("../skills/gc.js");
-    const gc = new SkillGc(db, log, store, { retain_per_pair: 3 });
-    const { marked } = gc.runOnce("manual");
-    expect(marked.length).toBeGreaterThanOrEqual(1);
-    // Verify only the oldest version got marked.
+    return new SkillGc(db, log, store, { retain_per_pair: 3, ...opts });
+  }
+
+  function insertSkill(sql: any, o: {
+    locator?: string; version: string; installed_at: number;
+    tombstoned?: number; generation?: number | null;
+  }) {
+    const loc = o.locator ?? "r";
+    sql.prepare(`INSERT INTO skills
+        (id, provider, locator, version, manifest_json, installed_at,
+         fetched_archive_sha256, tombstoned, generation)
+      VALUES (?, 'git+url', ?, ?, '{}', ?, 'x', ?, ?)`).run(
+      `git+url:${loc}@${o.version}`, loc, o.version, o.installed_at,
+      o.tombstoned ?? 0, o.generation ?? null,
+    );
+  }
+
+  // The retain floor exists so a recent version can be rolled back to. A
+  // tombstoned row is an explicit uninstall, so it must not hold a slot.
+  // Counting them meant <= retain_per_pair uninstalled versions were
+  // permanently protected — four such rows were found leaked on a real
+  // machine, with their cache dirs still on disk.
+  test("pass-1 sweeps ALL tombstoned rows — they do not consume retain slots", async () => {
+    const sql = makeGcEnv();
+    const now = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < 4; i++) {
+      insertSkill(sql, { version: `v${i}`, installed_at: now - i * 100, tombstoned: 1 });
+    }
+    const gc = await makeGc(sql);
+    gc.runOnce("manual");
     const pending = sql.prepare(`SELECT version FROM skill_cache_pending_delete`).all() as any[];
-    expect(pending.map((p) => p.version).sort()).toEqual(["v3"]);
+    expect(pending.map((p) => p.version).sort()).toEqual(["v0", "v1", "v2", "v3"]);
+    sql.close();
+  });
+
+  test("a fully-uninstalled skill with fewer versions than the floor still gets swept", async () => {
+    // The exact real-world leak: 3 tombstoned versions, retain floor 3.
+    const sql = makeGcEnv();
+    const now = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < 3; i++) {
+      insertSkill(sql, { version: `v${i}`, installed_at: now - i * 100, tombstoned: 1 });
+    }
+    const gc = await makeGc(sql);
+    const { marked } = gc.runOnce("manual");
+    expect(marked).toHaveLength(3);
+    sql.close();
+  });
+
+  test("the retain floor still protects the newest live (TTL-expired) versions", async () => {
+    const sql = makeGcEnv();
+    const now = Math.floor(Date.now() / 1000);
+    // 5 live versions, all past a 1-hour TTL. Newest 3 must survive.
+    for (let i = 0; i < 5; i++) {
+      insertSkill(sql, { version: `v${i}`, installed_at: now - 7200 - i * 100, tombstoned: 0 });
+    }
+    const gc = await makeGc(sql, { cache_ttl_hours: 1 });
+    gc.runOnce("manual");
+    const pending = sql.prepare(`SELECT version FROM skill_cache_pending_delete`).all() as any[];
+    expect(pending.map((p) => p.version).sort()).toEqual(["v3", "v4"]);
+    sql.close();
+  });
+
+  test("tombstoned rows do not push live versions out of the retain floor", async () => {
+    const sql = makeGcEnv();
+    const now = Math.floor(Date.now() / 1000);
+    // 3 newest are tombstoned, 3 older are live+expired. All 3 tombstoned
+    // sweep; the 3 live ones fill the floor and survive.
+    for (let i = 0; i < 3; i++) {
+      insertSkill(sql, { version: `t${i}`, installed_at: now - i * 10, tombstoned: 1 });
+    }
+    for (let i = 0; i < 3; i++) {
+      insertSkill(sql, { version: `L${i}`, installed_at: now - 7200 - i * 10, tombstoned: 0 });
+    }
+    const gc = await makeGc(sql, { cache_ttl_hours: 1 });
+    gc.runOnce("manual");
+    const pending = (sql.prepare(`SELECT version FROM skill_cache_pending_delete`).all() as any[])
+      .map((p) => p.version).sort();
+    expect(pending).toEqual(["t0", "t1", "t2"]);
+    sql.close();
+  });
+
+  // markUninstalled deletes the skill_active_version row, so the old pin gate
+  // — which reached skill_generation_refs THROUGH that row — found no
+  // generations for any uninstalled skill, made NOT EXISTS trivially true, and
+  // deleted the cache dir while consumers still held live pins on it.
+  // skills.generation survives tombstoning, so the gate now holds.
+  test("pass-2 refuses to delete a tombstoned row that still has a live pin", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600;
+    insertSkill(sql, { version: "v1", installed_at: old, tombstoned: 1, generation: 42 });
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES ('git+url','r','v1',?)`).run(old);
+    // A consumer still holds generation 42. No skill_active_version row —
+    // that is exactly the post-uninstall state.
+    sql.prepare(`INSERT INTO skill_generation_refs
+        (generation, ref_kind, ref_id, acquired_at) VALUES (42,'workflow','wf-1',?)`).run(old);
+
+    const gc = await makeGc(sql);
+    const { deleted } = gc.runOnce("manual");
+    expect(deleted).toHaveLength(0);
+    const still = sql.prepare(`SELECT COUNT(*) c FROM skills WHERE version='v1'`).get() as any;
+    expect(still.c).toBe(1);
+    sql.close();
+  });
+
+  test("pass-2 deletes a tombstoned row once its pin is released", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600;
+    insertSkill(sql, { version: "v1", installed_at: old, tombstoned: 1, generation: 42 });
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES ('git+url','r','v1',?)`).run(old);
+    // No refs at all — the pin was released.
+    const gc = await makeGc(sql);
+    const { deleted } = gc.runOnce("manual");
+    expect(deleted).toHaveLength(1);
+    sql.close();
+  });
+
+  test("a pin on an unrelated generation does not block deletion", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600;
+    insertSkill(sql, { version: "v1", installed_at: old, tombstoned: 1, generation: 42 });
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES ('git+url','r','v1',?)`).run(old);
+    sql.prepare(`INSERT INTO skill_generation_refs
+        (generation, ref_kind, ref_id, acquired_at) VALUES (99,'workflow','other',?)`).run(old);
+    const gc = await makeGc(sql);
+    expect(gc.runOnce("manual").deleted).toHaveLength(1);
+    sql.close();
+  });
+
+  test("pass-2 still honours a pin held via the active-version row (not yet uninstalled)", async () => {
+    const sql = makeGcEnv();
+    const old = Math.floor(Date.now() / 1000) - 2 * 3600;
+    insertSkill(sql, { version: "v1", installed_at: old, tombstoned: 0, generation: null });
+    sql.prepare(`INSERT INTO skill_active_version
+        (provider, locator, version, generation) VALUES ('git+url','r','v1',7)`).run();
+    sql.prepare(`INSERT INTO skill_cache_pending_delete
+        (provider, locator, version, marked_at) VALUES ('git+url','r','v1',?)`).run(old);
+    sql.prepare(`INSERT INTO skill_generation_refs
+        (generation, ref_kind, ref_id, acquired_at) VALUES (7,'tool','t',?)`).run(old);
+    const gc = await makeGc(sql);
+    expect(gc.runOnce("manual").deleted).toHaveLength(0);
     sql.close();
   });
 
@@ -831,7 +957,7 @@ describe("SkillStore round-trip", () => {
         fetched_archive_sha256 TEXT NOT NULL, fetched_at INTEGER NOT NULL,
         trust_tier TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
         tombstoned INTEGER NOT NULL DEFAULT 0, manifest_json TEXT NOT NULL,
-        installed_at INTEGER NOT NULL,
+        installed_at INTEGER NOT NULL, generation INTEGER,
         UNIQUE(provider, locator, version)
       );
       CREATE TABLE skill_active_version (
@@ -874,5 +1000,143 @@ describe("SkillStore round-trip", () => {
     expect(got?.name).toBe("demo");
 
     db.close();
+  });
+});
+
+
+// -- GC settings.json reference matching (cross-platform) -------------------
+
+describe("isPathReferenced — settings.json refs vs cache dirs", () => {
+  test("an exact match counts as referenced", async () => {
+    const { isPathReferenced } = await import("../skills/gc.js");
+    expect(isPathReferenced("/cache/gitx/r/v1", ["/cache/gitx/r/v1"])).toBe(true);
+  });
+
+  test("a bundle path inside the cache dir counts as referenced", async () => {
+    const { isPathReferenced } = await import("../skills/gc.js");
+    expect(
+      isPathReferenced("/cache/gitx/r/v1", ["/cache/gitx/r/v1/skills/demo"]),
+    ).toBe(true);
+  });
+
+  test("a sibling directory with a shared prefix does NOT count", async () => {
+    // "/cache/gitx/r/v1" must not match "/cache/gitx/r/v10".
+    const { isPathReferenced } = await import("../skills/gc.js");
+    expect(isPathReferenced("/cache/gitx/r/v1", ["/cache/gitx/r/v10/x"])).toBe(false);
+  });
+
+  test("an unrelated path does not count", async () => {
+    const { isPathReferenced } = await import("../skills/gc.js");
+    expect(isPathReferenced("/cache/gitx/r/v1", ["/somewhere/else"])).toBe(false);
+  });
+
+  test("empty and missing refs are ignored", async () => {
+    const { isPathReferenced } = await import("../skills/gc.js");
+    expect(isPathReferenced("/cache/gitx/r/v1", [])).toBe(false);
+    expect(isPathReferenced("/cache/gitx/r/v1", [""])).toBe(false);
+  });
+
+  test("a nested ref built with the platform separator matches", async () => {
+    // The old check hardcoded `cacheDir + "/"`. On Windows both sides use
+    // backslashes, so it never matched and the GC would delete a cache dir
+    // Claude Code was actively loading a skill from. join() produces the
+    // platform separator, so the Windows CI leg exercises the backslash case
+    // while POSIX exercises the forward-slash one.
+    const { isPathReferenced } = await import("../skills/gc.js");
+    const { join: pjoin, resolve } = await import("node:path");
+    const dir = resolve(pjoin("/cache", "gitx", "r", "v1"));
+    const ref = pjoin(dir, "skills", "demo");
+    expect(isPathReferenced(dir, [ref])).toBe(true);
+  });
+
+  test("a literal backslash name is not treated as a separator on POSIX", async () => {
+    // On POSIX a backslash is an ordinary filename character; treating it as
+    // a separator would make unrelated files look referenced.
+    const { isPathReferenced } = await import("../skills/gc.js");
+    const { sep } = await import("node:path");
+    if (sep === "/") {
+      expect(isPathReferenced("/cache/r/v1", ["/cache/r/v1x\\skills"])).toBe(false);
+    }
+  });
+});
+
+// -- adapter TOML parsing without Bun (the node install path) ---------------
+//
+// parseOperadToml threw PROVIDER_READ_FAILED unless globalThis.Bun existed,
+// while the shipped bundle's shebang is `#!/usr/bin/env node`. Every skill
+// carrying a .operad/operad.toml — i.e. every skill shipping tools, agents,
+// workflows or MCP servers — was therefore uninstallable on node.
+
+describe("adapter — operad.toml on the node path (no Bun.TOML)", () => {
+  // globalThis.Bun is non-configurable under bun, so it cannot be deleted or
+  // shadowed to force the fallback at runtime. Instead we exercise
+  // parseTomlMinimal directly — that IS the function node takes — and assert
+  // it agrees with parseTomlPreferBun, which is what the adapter calls.
+  const SKILL_TOML = `[skill]
+name = "node-path-skill"
+description = "installs under node too"
+
+[[tool]]
+name = "echo_tool"
+description = "echo"
+command = "echo hi"
+
+[[agent]]
+name = "helper"
+
+[mcp.fs]
+command = "mcp-fs"
+`;
+
+  test("the minimal parser reads the skill/tool/agent/mcp shape the adapter expects", async () => {
+    const { parseTomlMinimal } = await import("../toml.js");
+    const t = parseTomlMinimal(SKILL_TOML) as any;
+    expect(t.skill.name).toBe("node-path-skill");
+    expect(t.skill.description).toBe("installs under node too");
+    expect(t.tool).toHaveLength(1);
+    expect(t.tool[0].name).toBe("echo_tool");
+    expect(t.tool[0].command).toBe("echo hi");
+    expect(t.agent).toHaveLength(1);
+    expect(t.mcp.fs.command).toBe("mcp-fs");
+  });
+
+  test("minimal and Bun-preferring parsers agree on the same input", async () => {
+    const { parseTomlMinimal, parseTomlPreferBun } = await import("../toml.js");
+    const a = parseTomlMinimal(SKILL_TOML) as any;
+    const b = parseTomlPreferBun(SKILL_TOML) as any;
+    expect(b.skill.name).toBe(a.skill.name);
+    expect(b.tool.length).toBe(a.tool.length);
+    expect(b.tool[0].command).toBe(a.tool[0].command);
+    expect(b.mcp.fs.command).toBe(a.mcp.fs.command);
+  });
+
+  test("the adapter reads a real bundle end to end", () => {
+    const dir = mkdtempSync(join(tmpdir(), "operad-adapter-toml-"));
+    try {
+      mkdirSync(join(dir, ".operad"), { recursive: true });
+      writeFileSync(join(dir, ".operad", "operad.toml"), SKILL_TOML, "utf-8");
+      const r = readSkillManifests({ extracted_path: dir, trust_tier: "trusted" });
+      expect(r.name).toBe("node-path-skill");
+      expect(r.tools).toHaveLength(1);
+      expect(r.tools?.[0].autonomy_cap).toBe(capForTier("trusted"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed operad.toml surfaces PROVIDER_READ_FAILED, not a raw throw", () => {
+    const dir = mkdtempSync(join(tmpdir(), "operad-adapter-bad-"));
+    try {
+      mkdirSync(join(dir, ".operad"), { recursive: true });
+      // Unterminated array — Bun's parser rejects this; the minimal one is
+      // lenient, so this asserts only that nothing escapes as a raw error.
+      writeFileSync(join(dir, ".operad", "operad.toml"), "[[tool]\nname = ", "utf-8");
+      let threw: unknown = null;
+      try { readSkillManifests({ extracted_path: dir, trust_tier: "escape" }); }
+      catch (e) { threw = e; }
+      if (threw) expect(threw).toBeInstanceOf(SkillError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

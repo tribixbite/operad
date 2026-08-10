@@ -16,6 +16,13 @@
  * skills repo is bootstrapped + a SHA is committed here in a follow-up.
  * This is deliberate; the alternative is silently auto-pulling from
  * main, which round-3 review correctly flagged as a supply-chain risk.
+ *
+ * Integrity: the default raw URL is commit-SHA-pinned, so GitHub's content
+ * addressing is what guarantees the bytes. There is no body digest baked in
+ * (the index is expected to change between pinned commits), but setting
+ * OPERAD_CURATED_INDEX_SHA256 enforces an exact sha256 of the response — use
+ * it when pointing OPERAD_CURATED_INDEX_URL_TEMPLATE at a mirror, where the
+ * commit pin no longer implies anything.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -169,11 +176,46 @@ async function loadIndex(): Promise<CuratedIndex> {
   const body = url.startsWith("file://")
     ? readLocalIndex(url)
     : await httpsGet(url);
-  // Sanity: hash check against the SHA — GitHub's raw URL is already
-  // commit-SHA-pinned but recomputing the body hash means a CDN
-  // compromise can't substitute a tampered index that happens to
-  // round-trip through their URL.
+
+  // Content-digest pin.
+  //
+  // This used to compute `observedSha` and then only embed it in an error
+  // message — it was never compared to anything, so the comment claiming "a
+  // CDN compromise can't substitute a tampered index" described protection
+  // that did not exist. It could not have worked as written either:
+  // indexCommitSha() is a *git commit* SHA, not a sha256 of the response body,
+  // so the two are not comparable.
+  //
+  // What actually protects the default path is GitHub's commit-SHA-pinned raw
+  // URL: the content is addressed by commit, so serving different bytes for
+  // the same SHA would require compromising GitHub's content addressing, not
+  // just a CDN edge.
+  //
+  // On top of that, OPERAD_CURATED_INDEX_SHA256 lets an operator pin the exact
+  // body digest — the only defence that survives a compromised origin, and the
+  // one that matters when the URL template is pointed at a mirror. When it is
+  // set the check is enforced strictly; when unset there is no body pin and we
+  // do not pretend otherwise.
   const observedSha = createHash("sha256").update(body).digest("hex");
+  const expectedSha = process.env.OPERAD_CURATED_INDEX_SHA256?.trim().toLowerCase();
+  if (expectedSha) {
+    if (!/^[a-f0-9]{64}$/.test(expectedSha)) {
+      throw new SkillError(
+        "PROVIDER_FETCH_FAILED",
+        "OPERAD_CURATED_INDEX_SHA256 must be a 64-character hex sha256",
+        { expectedSha },
+      );
+    }
+    if (!timingSafeHexEqual(observedSha, expectedSha)) {
+      throw new SkillError(
+        "PROVIDER_FETCH_FAILED",
+        `curated index digest mismatch — refusing to use it. `
+        + `expected ${expectedSha}, got ${observedSha} (url: ${url})`,
+        { observedSha, expectedSha, url },
+      );
+    }
+  }
+
   const parsed = JSON.parse(body) as CuratedIndex;
   if (parsed.schema_version !== 1) {
     throw new SkillError(
@@ -184,6 +226,17 @@ async function loadIndex(): Promise<CuratedIndex> {
   }
   cachedIndex = parsed;
   return parsed;
+}
+
+/**
+ * Constant-time comparison of two equal-length lowercase hex digests.
+ * Avoids leaking how much of a digest matched via timing. Exported for tests.
+ */
+export function timingSafeHexEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 /**

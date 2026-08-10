@@ -51,6 +51,37 @@ function registryBase(): string {
 }
 
 /**
+ * Is the registry pointed at something other than the official host?
+ *
+ * Any override — a mirror, a local fixture, an attacker-set env var — means
+ * neither the hostname guard nor the SPKI pin is protecting the fetch, so the
+ * content cannot be treated as coming from the official registry.
+ */
+export function isRegistryOverridden(): boolean {
+  const override = process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL;
+  if (!override) return false;
+  try {
+    return new URL(override).hostname !== REGISTRY_HOSTNAME;
+  } catch {
+    // Unparseable (e.g. a bare file path) — definitely not the official host.
+    return true;
+  }
+}
+
+/** One-shot process warnings — repeating them on every request is noise. */
+const warnedOnce = new Set<string>();
+function warnOnce(key: string, message: string): void {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  // No logger is threaded into ProviderModule, so use the process warning
+  // channel — it is visible in daemon stderr and does not require plumbing.
+  process.emitWarning(message, "OperadSkillSecurity");
+}
+
+/** Test-only: clear the one-shot warning latch. @internal */
+export function _resetWarnings(): void { warnedOnce.clear(); }
+
+/**
  * SHA-256 of the Subject-Public-Key-Info (SPKI) blobs we accept for
  * `registry.modelcontextprotocol.io`. Two entries: primary + backup
  * so a single rotation doesn't brick the resolver, per §3.9. Rotated
@@ -90,6 +121,22 @@ export const mcpOfficialProvider: ProviderModule = {
   id: "mcp-official",
 
   trustTier(): TrustTier {
+    // "trusted" is a claim about provenance: content came from the official
+    // MCP registry over a hostname-checked (and optionally SPKI-pinned)
+    // connection. When the base URL is overridden, none of that holds — yet
+    // this used to keep returning "trusted", so pointing the env var at any
+    // host made it a trusted-tier install source with the highest autonomy
+    // ceiling. Downgrade to the escape tier instead.
+    if (isRegistryOverridden()) {
+      warnOnce(
+        "registry-override",
+        `mcp-official: registry base URL is overridden `
+        + `(${process.env.OPERAD_MCP_OFFICIAL_REGISTRY_BASE_URL}); hostname and `
+        + `SPKI checks do not apply, so installs from it are treated as the `
+        + `'escape' trust tier, not 'trusted'.`,
+      );
+      return "escape";
+    }
     return "trusted";
   },
 
@@ -224,6 +271,16 @@ function fetchRegistry(url: string): Promise<string> {
       reject(new SkillError("PROVIDER_FETCH_FAILED", `unexpected hostname: ${u.hostname}`));
       return;
     }
+    // An override relaxes the hostname check, but never the transport: this
+    // path uses https.request, so a http:// base would otherwise be sent
+    // cleartext to an https client and fail confusingly.
+    if (u.protocol !== "https:") {
+      reject(new SkillError(
+        "PROVIDER_FETCH_FAILED",
+        `registry URL must use https (got ${u.protocol}//${u.hostname})`,
+      ));
+      return;
+    }
     const req = httpsRequest(
       {
         hostname: u.hostname,
@@ -236,7 +293,18 @@ function fetchRegistry(url: string): Promise<string> {
         timeout: 15_000,
       },
       (res) => {
-        // SPKI pin check (if configured)
+        // SPKI pin check (if configured). The module header promised a
+        // "structured warning" on the unpinned fallback; it was never
+        // emitted, so an install over an unpinned connection looked identical
+        // to a pinned one.
+        if (SPKI_PINS.length === 0) {
+          warnOnce(
+            "no-spki-pins",
+            `mcp-official: no SPKI pins configured, so the connection to `
+            + `${u.hostname} is TLS-only (no certificate pinning). Set `
+            + `OPERAD_MCP_OFFICIAL_SPKI_PINS to enable pinning.`,
+          );
+        }
         if (SPKI_PINS.length > 0) {
           const socket = res.socket as TLSSocket;
           const peer = socket.getPeerCertificate(true);

@@ -16,17 +16,46 @@
  * yet, so the acquire-clears-pending path is a no-op until Phase C.
  *
  * Honours the recent-versions retention floor (§3.14): per
- * (provider, locator), the 3 most recent versions are NEVER swept,
- * even with refcount = 0. Older versions GC unconditionally.
+ * (provider, locator), the 3 most recent *installed* versions are never
+ * swept, even with refcount = 0. Older versions GC unconditionally.
+ *
+ * Tombstoned (uninstalled) rows do NOT consume a retain slot — the floor
+ * exists so a recent version can be rolled back to, and an uninstalled one
+ * cannot be. Counting them meant a skill with <= 3 versions, all uninstalled,
+ * was permanently protected and leaked both its cache dir and its DB row.
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import type { MemoryDb } from "../memory-db.js";
 import type { Logger } from "../log.js";
 import type { ToolExecutor } from "../tools.js";
 import { SkillStore } from "./store.js";
+
+/**
+ * Is `cacheDir` referenced by any path in `refs`?
+ *
+ * A settings.json entry points at a bundle *inside* a version's cache dir
+ * (`<cacheDir>/skills/<name>`), so a prefix test is required — but the old
+ * `ref.startsWith(cacheDir + "/")` hardcoded a POSIX separator and therefore
+ * never matched on Windows, where both sides use backslashes. The GC would
+ * then happily delete a cache dir Claude Code was actively loading a skill
+ * from.
+ *
+ * Both sides are resolved and separator-normalised so the comparison holds on
+ * every platform. Exported for testing.
+ */
+export function isPathReferenced(cacheDir: string, refs: Iterable<string>): boolean {
+  const norm = (p: string) => resolve(p).split(sep).join("/");
+  const target = norm(cacheDir);
+  for (const ref of refs) {
+    if (!ref) continue;
+    const r = norm(ref);
+    if (r === target || r.startsWith(target + "/")) return true;
+  }
+  return false;
+}
 
 /** Lazy — see same rationale in claude-json.ts / settings-json.ts. */
 /**
@@ -180,24 +209,29 @@ export class SkillGc {
       }
 
       for (const [key, rows] of grouped) {
-        // Sort newest-first so the most recent N survive the
-        // retain-floor cut.
-        const sorted = [...rows].sort((a, b) => b.installed_at - a.installed_at);
-        // Skip the retain_per_pair newest rows for this (provider, locator).
-        // We also count any non-candidate rows already on disk towards
-        // the floor — but candidates already filtered to expired/tombstoned,
-        // so non-candidates outside this set don't appear. The simpler
-        // policy: the N newest CANDIDATES are protected.
-        const sweepable = sorted.slice(this.retainPerPair);
+        // The retain floor exists to keep the N most recent *usable* versions
+        // of a (provider, locator) around for quick rollback. A tombstoned row
+        // is an explicit uninstall — there is nothing to roll back to, so it
+        // must never consume a retain slot.
+        //
+        // Applying the floor to all candidates (the previous behaviour) meant
+        // a skill with <= retain_per_pair versions, all tombstoned, was fully
+        // protected: it never got marked, so it never reached pass-2, and both
+        // its cache dir and its skills row leaked forever. Four such rows were
+        // found on a real machine.
+        const tombstoned = rows.filter((r) => r.tombstoned === 1);
+        const live = rows.filter((r) => r.tombstoned !== 1);
+        const liveSweepable = [...live]
+          .sort((a, b) => b.installed_at - a.installed_at)
+          .slice(this.retainPerPair);
+        const sweepable = [...tombstoned, ...liveSweepable];
+
         for (const r of sweepable) {
           // Honour SKILL.md settings.json refs (§3.14 round-4 fix).
           const cacheDir = this.store.cacheDir(
             r.provider as any, r.locator, r.version,
           );
-          const referenced = Array.from(settingsRefs).some(
-            (ref) => ref === cacheDir || ref.startsWith(cacheDir + "/"),
-          );
-          if (referenced) continue;
+          if (isPathReferenced(cacheDir, settingsRefs)) continue;
 
           // Idempotent insert — ON CONFLICT do nothing.
           const result = db.prepare(
@@ -231,13 +265,29 @@ export class SkillGc {
     const deleted: PendingRow[] = [];
 
     try {
+      // The pin gate joins skill_generation_refs through skills.generation,
+      // NOT through skill_active_version. markUninstalled deletes the
+      // active-version row, so the old subquery returned no generations for
+      // any uninstalled skill, NOT EXISTS was trivially true, and pass-2
+      // deleted the cache dir even while consumers still held live pins on
+      // that generation — exactly the case the gate exists to prevent.
+      // skills.generation is written at install and survives tombstoning.
       const pending = db.prepare(
         `SELECT spd.provider, spd.locator, spd.version, spd.marked_at
            FROM skill_cache_pending_delete spd
           WHERE spd.marked_at + ? < ?
             AND NOT EXISTS (
-              SELECT 1 FROM skill_generation_refs r
-                WHERE r.generation IN (
+              SELECT 1
+                FROM skill_generation_refs r
+                JOIN skills sk
+                  ON sk.generation = r.generation
+                 AND sk.provider = spd.provider
+                 AND sk.locator  = spd.locator
+                 AND sk.version  = spd.version
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM skill_generation_refs r2
+                WHERE r2.generation IN (
                   SELECT generation FROM skill_active_version sav
                    WHERE sav.provider = spd.provider AND sav.locator = spd.locator
                 )

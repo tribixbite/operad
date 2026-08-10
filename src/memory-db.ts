@@ -587,6 +587,10 @@ const SCHEMA_STATEMENTS: string[] = [
     tombstoned INTEGER NOT NULL DEFAULT 0,
     manifest_json TEXT NOT NULL,
     installed_at INTEGER NOT NULL,
+    -- Tool-executor generation this version was installed under. Survives
+    -- uninstall (unlike skill_active_version) so GC pass-2 can still match
+    -- live pins in skill_generation_refs against a tombstoned row.
+    generation INTEGER,
     UNIQUE(provider, locator, version)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_skills_provider_locator
@@ -769,6 +773,13 @@ export class MemoryDb {
     // promotion path errors with "no such column".
     ensureColumn("tool_autonomy_caps", "current_bucket", "TEXT NOT NULL DEFAULT 'suggest'");
     ensureColumn("tool_autonomy_caps", "updated_at", "INTEGER");
+    // 0.4.9 — GC pin gate. The generation used to live only on
+    // skill_active_version, which markUninstalled deletes, so after an
+    // uninstall the GC could no longer tell which generation a pending row
+    // belonged to and swept it even while consumers still held pins on it.
+    // Recording it on the skills row keeps it available for the row's whole
+    // lifetime, tombstoned or not.
+    ensureColumn("skills", "generation", "INTEGER");
   }
 
   /** Close the database */

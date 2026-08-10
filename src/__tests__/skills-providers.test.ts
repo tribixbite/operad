@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 // ============================================================================
@@ -828,5 +829,86 @@ describe("operad-curated provider — local file:// index", () => {
     process.env.OPERAD_CURATED_INDEX_URL_TEMPLATE = `file:///nonexistent/path/index.json`;
     _resetIndexCache();
     await expect(operadCuratedProvider.list({})).rejects.toThrow(/PROVIDER_FETCH_FAILED/);
+  });
+});
+
+// ── operad-curated index integrity pin ─────────────────────────────────────
+//
+// The digest was previously computed and then only embedded in an error
+// message — never compared — while the comment claimed CDN-tamper protection.
+
+describe("operad-curated — OPERAD_CURATED_INDEX_SHA256 pin", () => {
+  const saved = {
+    tpl: process.env.OPERAD_CURATED_INDEX_URL_TEMPLATE,
+    sha: process.env.OPERAD_CURATED_INDEX_SHA256,
+    commit: process.env.OPERAD_CURATED_COMMIT_SHA,
+  };
+  let dir: string;
+  let indexPath: string;
+  let bodySha: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "operad-curated-"));
+    indexPath = join(dir, "index.json");
+    const body = JSON.stringify({
+      schema_version: 1,
+      entries: [{ locator: "o/s", name: "s", git_url: "https://example.invalid/o/s", default_version: "v1.0.0" }],
+    });
+    writeFileSync(indexPath, body, "utf-8");
+    bodySha = createHash("sha256").update(body).digest("hex");
+    process.env.OPERAD_CURATED_INDEX_URL_TEMPLATE = `file://${indexPath}`;
+    process.env.OPERAD_CURATED_COMMIT_SHA = "a".repeat(40);
+    delete process.env.OPERAD_CURATED_INDEX_SHA256;
+    // The provider memoises the index at module scope, so without this a
+    // successful earlier fetch would satisfy later cases and the digest check
+    // would never run.
+    const { _resetIndexCache } = require("../skills/providers/operad-curated.js");
+    _resetIndexCache();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries({
+      OPERAD_CURATED_INDEX_URL_TEMPLATE: saved.tpl,
+      OPERAD_CURATED_INDEX_SHA256: saved.sha,
+      OPERAD_CURATED_COMMIT_SHA: saved.commit,
+    })) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  test("timingSafeHexEqual matches equal digests and rejects differences", async () => {
+    const { timingSafeHexEqual } = await import("../skills/providers/operad-curated.js");
+    expect(timingSafeHexEqual("abc123", "abc123")).toBe(true);
+    expect(timingSafeHexEqual("abc123", "abc124")).toBe(false);
+    expect(timingSafeHexEqual("abc", "abcd")).toBe(false);
+    expect(timingSafeHexEqual("", "")).toBe(true);
+  });
+
+  test("a matching pin is accepted", async () => {
+    process.env.OPERAD_CURATED_INDEX_SHA256 = bodySha;
+    const { operadCuratedProvider } = await import("../skills/providers/operad-curated.js");
+    const r = await operadCuratedProvider.list({});
+    expect(r.items.length).toBe(1);
+  });
+
+  test("a mismatched pin is REJECTED — this is the check that did not exist", async () => {
+    process.env.OPERAD_CURATED_INDEX_SHA256 = "b".repeat(64);
+    const { operadCuratedProvider } = await import("../skills/providers/operad-curated.js");
+    await expect(operadCuratedProvider.list({})).rejects.toThrow(/digest mismatch/i);
+  });
+
+  test("a malformed pin is rejected rather than silently ignored", async () => {
+    process.env.OPERAD_CURATED_INDEX_SHA256 = "not-a-sha";
+    const { operadCuratedProvider } = await import("../skills/providers/operad-curated.js");
+    await expect(operadCuratedProvider.list({})).rejects.toThrow(/64-character hex/i);
+  });
+
+  test("the pin is case-insensitive and whitespace-tolerant", async () => {
+    process.env.OPERAD_CURATED_INDEX_SHA256 = `  ${bodySha.toUpperCase()}  `;
+    const { operadCuratedProvider } = await import("../skills/providers/operad-curated.js");
+    const r = await operadCuratedProvider.list({});
+    expect(r.items.length).toBe(1);
   });
 });

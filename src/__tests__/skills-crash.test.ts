@@ -56,7 +56,7 @@ function setupDb(): Database {
       fetched_archive_sha256 TEXT NOT NULL, fetched_at INTEGER NOT NULL,
       trust_tier TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
       tombstoned INTEGER NOT NULL DEFAULT 0, manifest_json TEXT NOT NULL,
-      installed_at INTEGER NOT NULL, UNIQUE(provider, locator, version)
+      installed_at INTEGER NOT NULL, generation INTEGER, UNIQUE(provider, locator, version)
     );
     CREATE TABLE skill_active_version (
       provider TEXT NOT NULL, locator TEXT NOT NULL,
@@ -308,4 +308,64 @@ describe.skipIf(process.platform === "win32")("Phase E.4 — install transaction
     for (const r of repos) try { rmSync(r, { recursive: true, force: true }); } catch { /* ignore */ }
     env.sql.close();
   }, 30_000);
+});
+
+// ── installInProgress must never latch ─────────────────────────────────────
+//
+// The flag was set ~65 lines above the try/finally, so a throw from
+// trustTier(), getActive(), beginGenerationTransaction() etc. skipped the
+// finally and latched it forever: every later tool call and every later
+// install failed with TOOL_BLOCKED_BY_ACTIVE_INSTALL until daemon restart.
+
+describe("SkillManager — installInProgress is released on early failures", () => {
+  /** Provider whose trustTier() throws — the earliest post-flag call site. */
+  function explodingTierProvider(): ProviderModule {
+    return {
+      id: "git+url",
+      trustTier() { throw new Error("boom: tier lookup failed"); },
+      list: async () => ({ items: [] }),
+      fetch: async () => { throw new Error("unreachable"); },
+      read: async () => ({ name: "x", description: "" }),
+      latest: async () => "v1.0.0",
+    } as unknown as ProviderModule;
+  }
+
+  test("a throw from trustTier() does not latch the flag", async () => {
+    const env = buildEnv(explodingTierProvider());
+    const mgr = env.mgr;
+
+    await expect(mgr.install("git+url", "/tmp/x", "latest")).rejects.toThrow(/boom/);
+
+    // The next install must fail on its OWN error, not on a stale
+    // "already in progress" refusal.
+    let second: unknown = null;
+    try { await mgr.install("git+url", "/tmp/x", "latest"); }
+    catch (e) { second = e; }
+    expect(String((second as Error).message)).toMatch(/boom/);
+    expect(String((second as Error).message)).not.toMatch(/already in progress/i);
+  });
+
+  test("a throw from beginGenerationTransaction() does not latch the flag", async () => {
+    const provider: ProviderModule = {
+      id: "git+url",
+      trustTier: () => "escape",
+      list: async () => ({ items: [] }),
+      fetch: async () => { throw new Error("unreachable"); },
+      read: async () => ({ name: "x", description: "" }),
+      latest: async () => "v1.0.0",
+    } as unknown as ProviderModule;
+    const env = buildEnv(provider);
+    // Make the generation open blow up — it sits between the flag and the
+    // original try.
+    env.te.beginGenerationTransaction = () => {
+      throw new Error("boom: generation open failed");
+    };
+
+    await expect(env.mgr.install("git+url", "/tmp/x", "latest")).rejects.toThrow(/generation open failed/);
+
+    let second: unknown = null;
+    try { await env.mgr.install("git+url", "/tmp/x", "latest"); }
+    catch (e) { second = e; }
+    expect(String((second as Error).message)).not.toMatch(/already in progress/i);
+  });
 });
