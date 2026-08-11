@@ -16,6 +16,7 @@ import type { Logger } from "./log.js";
 import type { StateManager } from "./state.js";
 import { sessionExists, isTmuxServerAlive } from "./session.js";
 import { getHealthConfig } from "./config.js";
+import { getRuntime } from "./runtimes/index.js";
 
 /** Run a single health check for a session */
 export function checkSessionHealth(
@@ -204,9 +205,36 @@ function pidAliveCheck(
  * binary the session was meant to spawn. Returns null when the input doesn't
  * yield a usefully-specific token (very short / generic words).
  */
-function deriveCmdlineMarker(sessionName: string, command?: string | null): string | null {
-  const fallback = sessionName.length >= 4 ? sessionName : null;
-  if (!command) return fallback;
+export function deriveCmdlineMarker(
+  sessionName: string,
+  command?: string | null,
+  config?: SessionConfig,
+): string | null {
+  // No usable command → no marker, and therefore a liveness-only check.
+  //
+  // This used to fall back to the SESSION NAME, which is operad's own label
+  // and never appears in the process's cmdline. Adopted Claude sessions have
+  // no `command` (the runtime builds it), so the check failed on every sweep:
+  // healthy → degraded within two sweeps → auto-restart spawned a SECOND
+  // Claude in the same project directory while the original kept running.
+  // Two agents writing the same repo is far worse than a missed liveness
+  // signal, so an underivable marker now means "PID liveness only".
+  let source = command;
+  if (!source && config) {
+    // For agent runtimes the startup command is what actually exec'd, so it
+    // yields the right binary name ("claude", "opencode", "codex").
+    const runtime = getRuntime(config.type);
+    if (runtime) {
+      try { source = runtime.startupCommand(config); } catch { source = null; }
+    }
+  }
+  if (!source) return null;
+  const command2 = source;
+  return deriveFromCommand(command2);
+}
+
+/** Extract the first meaningful executable token from a shell command. */
+function deriveFromCommand(command: string): string | null {
   // Strip env-var assignments and leading `sh -c` so we look at what the
   // shell actually executes. Then take the first token.
   let stripped = command.replace(/^\s*sh\s+-c\s+['"]?/, "");
@@ -216,9 +244,13 @@ function deriveCmdlineMarker(sessionName: string, command?: string | null): stri
   if (preambleMatch) stripped = stripped.slice(preambleMatch[0].length);
   const firstToken = stripped.trim().split(/\s+/)[0] ?? "";
   if (firstToken.length >= 4 && !/^(bash|sh|exec)$/.test(firstToken)) {
-    return firstToken;
+    // Use the basename: a startup command may be an absolute path
+    // (/data/.../bin/claude) while the running process shows just `claude`,
+    // or vice versa. The basename is the part both forms share.
+    const base = firstToken.split("/").pop() || firstToken;
+    return base.length >= 4 ? base : firstToken;
   }
-  return fallback;
+  return null;
 }
 
 /**
@@ -301,7 +333,7 @@ export function runHealthSweep(
       const marker =
         healthConfig.check === "process" && healthConfig.process_pattern
           ? healthConfig.process_pattern
-          : deriveCmdlineMarker(session.name, session.command);
+          : deriveCmdlineMarker(session.name, session.command, session);
       result = pidAliveCheck(session.name, adoptedPid, Date.now(), marker);
     } else if (!tmuxAlive) {
       continue; // Already handled above

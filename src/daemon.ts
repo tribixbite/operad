@@ -200,7 +200,18 @@ export class Daemon {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private registryFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** Pending auto-restart timers — tracked so shutdown() can cancel them */
-  private restartTimers = new Set<ReturnType<typeof setTimeout>>();
+  /**
+   * Pending auto-restart timers, keyed by session name.
+   *
+   * This was an unkeyed Set cleared only in shutdown(), so a timer scheduled
+   * during backoff could not be cancelled. Stopping, closing or manually
+   * restarting a session inside its backoff window (up to
+   * restart_backoff_s * 2^restart_count seconds) left the timer armed, and
+   * when it fired it stopped and recreated whatever the user had just done —
+   * killing a session they had deliberately started, or resurrecting one they
+   * had closed.
+   */
+  private restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private autoTabsTimer: ReturnType<typeof setTimeout> | null = null;
   /** PIDs of adopted bare (non-tmux) Claude sessions, keyed by session name */
   private adoptedPids = new Map<string, number>();
@@ -630,7 +641,7 @@ export class Daemon {
       clearTimeout(this.autoTabsTimer);
       this.autoTabsTimer = null;
     }
-    for (const timer of this.restartTimers) {
+    for (const timer of this.restartTimers.values()) {
       clearTimeout(timer);
     }
     this.restartTimers.clear();
@@ -771,6 +782,9 @@ export class Daemon {
   /** Start a single session by name */
   private async startSession(name: string): Promise<boolean> {
     trace(`session:start:${name}`);
+    // A manual start supersedes any queued auto-restart; leaving it armed
+    // meant the timer later stopped and recreated what the user just started.
+    this.cancelRestart(name);
     const sessionConfig = this.config.sessions.find((s) => s.name === name);
     if (!sessionConfig) {
       this.log.error(`Unknown session '${name}'`);
@@ -936,6 +950,9 @@ export class Daemon {
   /** Stop a single session by name */
   private async stopSessionByName(name: string): Promise<boolean> {
     trace(`session:stop:${name}`);
+    // A deliberate stop must disarm any pending auto-restart, or the timer
+    // fires later and brings the session back.
+    this.cancelRestart(name);
     const s = this.state.getSession(name);
     if (!s) return false;
 
@@ -1219,26 +1236,85 @@ export class Daemon {
       // Transition to starting (increments restart_count)
       this.state.transition(session.name, "starting");
 
-      // Schedule the actual restart (tracked for cleanup in shutdown)
-      const timer = setTimeout(async () => {
-        this.restartTimers.delete(timer);
-        this.activity.remove(session.name); // Clear stale snapshot before restart
-        await stopSession(session.name, this.log);
-        const created = createSession(session, this.log);
-        if (created) {
-          if (getRuntime(session.type)) {
-            await this.handleAgentStartup(session.name, session);
-          } else {
-            this.state.transition(session.name, "running");
+      // Schedule the actual restart. Cancellable via cancelRestart(), and
+      // re-validated on fire because the world may have changed during the
+      // backoff.
+      this.cancelRestart(session.name);
+      const timer = setTimeout(() => {
+        this.restartTimers.delete(session.name);
+        // The whole body is wrapped: an async throw inside a setTimeout is an
+        // unhandled rejection, which terminates the process under Node's
+        // default --unhandled-rejections=throw.
+        void (async () => {
+          try {
+            // Re-validate. We set the session to "starting" before arming this
+            // timer, so anything else — stopped, closed, running again after a
+            // manual start, suspended — means the user or another code path
+            // has taken over and we must not touch it.
+            const cur = this.state.getSession(session.name);
+            if (!cur || cur.status !== "starting" || cur.suspended) {
+              this.log.info(
+                `Skipping auto-restart of '${session.name}' — state changed during backoff (now ${cur?.status ?? "absent"})`,
+                { session: session.name },
+              );
+              return;
+            }
+            const stillConfigured = this.config.sessions.find((c) => c.name === session.name);
+            if (!stillConfigured) {
+              this.log.info(`Skipping auto-restart of '${session.name}' — no longer configured`, { session: session.name });
+              return;
+            }
+
+            this.activity.remove(session.name); // Clear stale snapshot before restart
+
+            // Bare sessions are not tmux sessions. The old path called
+            // createSession() unconditionally, which built a tmux session for
+            // a service deliberately marked bare, never respawned the real
+            // process, and left the dead PID in adoptedPids — so health
+            // flapped forever. Route them back through startSession, which
+            // has the bare branch.
+            if (stillConfigured.bare) {
+              await this.stopSessionByName(session.name);
+              await this.startSession(session.name);
+              return;
+            }
+
+            await stopSession(session.name, this.log);
+            const created = createSession(stillConfigured, this.log);
+            if (created) {
+              if (getRuntime(stillConfigured.type)) {
+                await this.handleAgentStartup(session.name, stillConfigured);
+              } else {
+                this.state.transition(session.name, "running");
+              }
+            } else {
+              this.state.transition(session.name, "failed", "Restart failed");
+            }
+          } catch (err) {
+            this.log.error(`Auto-restart of '${session.name}' threw: ${err}`, { session: session.name });
+            try { this.state.transition(session.name, "failed", "Restart error"); } catch { /* best effort */ }
           }
-        } else {
-          this.state.transition(session.name, "failed", "Restart failed");
-        }
+        })();
       }, backoffMs);
-      this.restartTimers.add(timer);
+      this.restartTimers.set(session.name, timer);
     }
 
     trace("health:sweep:done");
+  }
+
+  /**
+   * Cancel a pending auto-restart for `name`, if any.
+   *
+   * Must be called by every path that deliberately changes a session's fate —
+   * stop, close, manual restart — otherwise the armed timer fires later and
+   * undoes the user's action.
+   */
+  cancelRestart(name: string): void {
+    const t = this.restartTimers.get(name);
+    if (!t) return;
+    clearTimeout(t);
+    this.restartTimers.delete(name);
+    this.log.debug(`Cancelled pending auto-restart for '${name}'`, { session: name });
   }
 
   // -- Session registry ---------------------------------------------------------

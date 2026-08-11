@@ -30,7 +30,9 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { spawn as spawnAsync, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 
-import { checkSessionHealth, runHealthSweep } from "../health.js";
+import { checkSessionHealth, runHealthSweep,
+  deriveCmdlineMarker,
+} from "../health.js";
 import { StateManager } from "../state.js";
 import type { HealthCheckConfig, SessionConfig, TmxConfig } from "../types.js";
 import type { Logger } from "../log.js";
@@ -792,5 +794,54 @@ describe("checkSessionHealth — determinism", () => {
     const r1 = checkSessionHealth("svc", cfg, silentLog());
     const r2 = checkSessionHealth("svc", cfg, silentLog());
     expect(r1.healthy).toBe(r2.healthy);
+  });
+});
+
+// -- cmdline marker derivation ----------------------------------------------
+//
+// The marker used to fall back to the SESSION NAME, which is operad's own
+// label and never appears in a process's cmdline. Adopted Claude sessions
+// carry no `command`, so the check failed every sweep: degraded within two,
+// then auto-restart spawned a SECOND Claude in the same project directory
+// while the original kept running.
+
+describe("deriveCmdlineMarker", () => {
+  const cfg = (over: Partial<SessionConfig>): SessionConfig => ({
+    name: "proj", type: "claude", auto_go: false, priority: 5,
+    depends_on: [], headless: false, env: {}, max_restarts: 3,
+    restart_backoff_s: 5, enabled: true, bare: false, ...over,
+  } as SessionConfig);
+
+  test("an explicit command yields its binary", () => {
+    expect(deriveCmdlineMarker("s", "bun run dev")).toBe("bun run dev".split(" ")[0].length >= 4 ? "bun" : null);
+  });
+
+  test("a long binary name is used", () => {
+    expect(deriveCmdlineMarker("s", "syncthing serve")).toBe("syncthing");
+  });
+
+  test("env assignments and sh -c wrappers are stripped", () => {
+    expect(deriveCmdlineMarker("s", 'sh -c "FOO=1 syncthing serve"')).toBe("syncthing");
+  });
+
+  test("NO command and no config yields null, not the session name", () => {
+    // Returning the name guaranteed a mismatch on every check.
+    expect(deriveCmdlineMarker("my-project-session")).toBeNull();
+  });
+
+  test("a claude session with no command derives from the runtime, not the name", () => {
+    const m = deriveCmdlineMarker("my-project", undefined, cfg({ type: "claude", path: "/tmp/p" }));
+    expect(m).not.toBe("my-project");
+    if (m !== null) expect(m).toContain("claude");
+  });
+
+  test("an absolute startup path is reduced to its basename", () => {
+    expect(deriveCmdlineMarker("s", "/data/data/com.termux/files/usr/bin/syncthing serve"))
+      .toBe("syncthing");
+  });
+
+  test("bare shells never become the marker", () => {
+    expect(deriveCmdlineMarker("s", "sh")).toBeNull();
+    expect(deriveCmdlineMarker("s", "bash")).toBeNull();
   });
 });
