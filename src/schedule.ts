@@ -105,9 +105,21 @@ export function nextCronTime(expr: string, after: Date): Date | null {
   const hours = parseField(hourSpec, 0, 23);
   const doms = parseField(domSpec, 1, 31);
   const months = parseField(monSpec, 1, 12);
-  const dows = parseField(dowSpec, 0, 6); // 0=Sunday
+  const dows = parseField(dowSpec, 0, 7); // 0 and 7 both mean Sunday
 
   if (!minutes || !hours || !doms || !months || !dows) return null;
+
+  // POSIX cron: when BOTH day-of-month and day-of-week are restricted the
+  // match is a union; when only one is restricted the other is ignored.
+  // Expanding `*` into the full set destroyed that distinction, so
+  // `doms.has(dom) || dows.has(dow)` was always true whenever either field
+  // was `*` — i.e. for almost every real expression. `0 9 * * 1` (Mondays)
+  // fired every day, and a weekly agent schedule burned 7× the tokens.
+  const domRestricted = domSpec.trim() !== "*";
+  const dowRestricted = dowSpec.trim() !== "*";
+
+  // Sunday as 7 must also match getUTCDay()'s 0.
+  if (dows.has(7)) dows.add(0);
 
   // Brute-force search: iterate minute by minute from `after`, cap at 366 days
   const maxIter = 366 * 24 * 60;
@@ -121,7 +133,16 @@ export function nextCronTime(expr: string, after: Date): Date | null {
     const mon = candidate.getUTCMonth() + 1;
     const dow = candidate.getUTCDay();
 
-    if (months.has(mon) && (doms.has(dom) || dows.has(dow)) && hours.has(h) && minutes.has(m)) {
+    const dayMatches =
+      domRestricted && dowRestricted
+        ? doms.has(dom) || dows.has(dow)   // both restricted → union
+        : domRestricted
+          ? doms.has(dom)                  // only dom restricted → dow ignored
+          : dowRestricted
+            ? dows.has(dow)                // only dow restricted → dom ignored
+            : true;                        // neither restricted → every day
+
+    if (months.has(mon) && dayMatches && hours.has(h) && minutes.has(m)) {
       return candidate;
     }
 

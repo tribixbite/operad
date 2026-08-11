@@ -10,8 +10,8 @@
  */
 
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, resolve, dirname, basename, extname } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
+import { join, resolve, dirname, basename, extname, sep } from "node:path";
 import { homedir } from "node:os";
 import type { MemoryDb } from "./memory-db.js";
 import type { Logger } from "./log.js";
@@ -1291,14 +1291,66 @@ export class ToolExecutor {
 
 // -- Path safety helpers ------------------------------------------------------
 
-/** Check if a path is within allowed directories (project dirs, ~/.claude/, etc.) */
-function isAllowedPath(filePath: string): boolean {
-  // Resolve home from $HOME (homedir() fallback). os.homedir() caches its first
-  // result process-wide and ignores later $HOME changes, which makes this gate
-  // brittle under anything that relocates HOME; reading the env var keeps it
-  // correct and matches the conventional way a relocated home is honoured.
+/**
+ * Is `filePath` inside a directory agent tools may touch?
+ *
+ * The previous rule was "anything under $HOME, minus .ssh/.gnupg/.aws/.kube".
+ * That is far too broad for tools an agent can invoke on its own:
+ * `file-read` is category `observe`, auto-approved at every autonomy level, so
+ * it could read `~/.claude.json` (OAuth token), `~/.npmrc` (registry token),
+ * `~/.git-credentials`, `~/.netrc` and `~/.docker/config.json`. `file-write`
+ * could append hooks to `~/.claude/settings.json` or a `[[tool]]` block to
+ * operad's own config — both of which are arbitrary command execution on the
+ * next run.
+ *
+ * Three separate weaknesses are fixed here:
+ *  - prefix matching had no separator boundary, so `/home/user` also matched
+ *    `/home/userbackup`;
+ *  - comparisons were case-sensitive, so `.SSH` / `.Env` slipped past on
+ *    macOS and Windows, whose filesystems are case-insensitive;
+ *  - the deny-list named four directories and two files.
+ *
+ * Symlinks are resolved before the check where the path exists, so a link
+ * planted inside an allowed directory cannot point out of it.
+ */
+export function isAllowedPath(filePath: string): boolean {
   const home = process.env.HOME || homedir();
-  const allowedPrefixes = [
+  const resolved = resolveForPolicy(filePath);
+
+  // Credential and config locations that must never be reachable, even though
+  // they sit under an otherwise-allowed root.
+  const deniedDirs = [
+    join(home, ".ssh"),
+    join(home, ".gnupg"),
+    join(home, ".aws"),
+    join(home, ".kube"),
+    join(home, ".docker"),
+    join(home, ".gradle"),
+    join(home, ".m2"),
+    join(home, ".cargo", "credentials"),
+    join(home, ".config", "gh"),
+    join(home, ".config", "gcloud"),
+  ];
+  const deniedFiles = [
+    // Claude Code's own state and settings. settings.json carries `hooks`,
+    // which execute shell commands on the next Claude run.
+    join(home, ".claude.json"),
+    join(home, ".claude", "settings.json"),
+    join(home, ".claude", "settings.local.json"),
+    join(home, ".claude", ".credentials.json"),
+    // operad's own config defines [[tool]] shell commands.
+    join(home, ".config", "operad", "operad.toml"),
+    // Shell startup files — writing any of these is persistence.
+    join(home, ".bashrc"), join(home, ".bash_profile"), join(home, ".profile"),
+    join(home, ".zshrc"), join(home, ".zshenv"), join(home, ".zprofile"),
+    join(home, ".npmrc"), join(home, ".netrc"), join(home, ".git-credentials"),
+    "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+  ];
+
+  if (deniedFiles.some((f) => pathEquals(resolved, f))) return false;
+  if (deniedDirs.some((d) => pathEquals(resolved, d) || isUnder(resolved, d))) return false;
+
+  const allowedRoots = [
     join(home, ".claude"),
     join(home, "git"),
     join(home, "projects"),
@@ -1307,29 +1359,62 @@ function isAllowedPath(filePath: string): boolean {
     join(home, ".config", "operad"),
     join(home, ".local", "share", "operad"),
   ];
+  if (allowedRoots.some((r) => isUnder(resolved, r))) return true;
+  return isUnder(resolved, home);
+}
 
-  // Allow any path under home that's not sensitive
-  const sensitivePaths = [
-    join(home, ".ssh"),
-    join(home, ".gnupg"),
-    join(home, ".aws"),
-    join(home, ".kube"),
-    "/etc/shadow",
-    "/etc/passwd",
-  ];
+/**
+ * Resolve a path for policy decisions, following symlinks when the target
+ * exists. A dangling path still resolves lexically so new-file writes work.
+ */
+function resolveForPolicy(filePath: string): string {
+  const abs = resolve(filePath);
+  try {
+    return realpathSync(abs);
+  } catch {
+    // Does not exist yet — resolve the deepest existing ancestor so a
+    // symlinked parent directory cannot be used to escape.
+    try {
+      const parent = realpathSync(dirname(abs));
+      return join(parent, basename(abs));
+    } catch {
+      return abs;
+    }
+  }
+}
 
-  if (sensitivePaths.some((s) => filePath.startsWith(s))) return false;
+/** Case-insensitive on platforms whose filesystems are. */
+function samePathCase(p: string): string {
+  return process.platform === "linux" || process.platform === "android"
+    ? p
+    : p.toLowerCase();
+}
 
-  // Must be under home or a project directory
-  return filePath.startsWith(home) || allowedPrefixes.some((p) => filePath.startsWith(p));
+function pathEquals(a: string, b: string): boolean {
+  return samePathCase(resolve(a)) === samePathCase(resolve(b));
+}
+
+/** Is `child` strictly inside `parent`? Boundary-aware, so /a/b !== /a/bc. */
+function isUnder(child: string, parent: string): boolean {
+  const c = samePathCase(resolve(child));
+  const p = samePathCase(resolve(parent)).replace(/[/\\]+$/, "");
+  return c === p || c.startsWith(p + sep);
 }
 
 /** Check if a file is protected from agent writes */
-function isProtectedFile(filePath: string): boolean {
+export function isProtectedFile(filePath: string): boolean {
   const name = basename(filePath);
   const ext = extname(filePath);
-  const protectedNames = [".env", ".env.local", ".env.production", "credentials.json", "secrets.json"];
-  const protectedExts = [".pem", ".key", ".p12"];
+  // Case-folded: on macOS and Windows `.ENV` and `SECRETS.JSON` are the same
+  // file, and the previous exact-match list let them straight through.
+  const lower = name.toLowerCase();
+  const protectedNames = [
+    ".env", ".env.local", ".env.production", ".env.development",
+    "credentials.json", "secrets.json", "id_rsa", "id_ed25519",
+  ];
+  const protectedExts = [".pem", ".key", ".p12", ".pfx", ".jks"];
 
-  return protectedNames.includes(name) || protectedExts.includes(ext);
+  // Any .env variant (.env.staging, .env.foo) rather than only the listed ones.
+  if (lower.startsWith(".env")) return true;
+  return protectedNames.includes(lower) || protectedExts.includes(ext.toLowerCase());
 }

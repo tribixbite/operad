@@ -214,22 +214,23 @@ describe("nextCronTime — list syntax (A,B,C)", () => {
 
 describe("nextCronTime — day-of-week / day-of-month", () => {
   /**
-   * Standard unix cron semantics: dom OR dow — when dom is *, doms includes
-   * ALL days (1-31), so doms.has(dom) is always true. The dom+dow match
-   * is an OR not an AND when either field is *.
+   * POSIX cron semantics: the dom/dow union applies ONLY when both fields are
+   * restricted. When just one is restricted the other is ignored entirely.
    *
-   * This means "0 9 * * 1" fires at 09:00 every day (because *dom* is *),
-   * not just on Mondays. To restrict to Mondays only, use a specific dom
-   * that only Mondays can satisfy. These tests validate the actual behavior.
+   * The previous implementation expanded `*` into the full set, losing the
+   * "is this restricted?" distinction, so the OR was always satisfied and
+   * "0 9 * * 1" fired daily. This docblock and the test below described that
+   * as intended behaviour; it was a bug, and a costly one — every weekly
+   * agent schedule ran 7x.
    */
-  test("'0 9 * * 1' fires at 09:00 next day (dom=* matches every day)", () => {
-    // 2025-01-15 is Wednesday at 09:00:00 UTC
+  test("'0 9 * * 1' fires only on Mondays", () => {
+    // 2025-01-15 is a Wednesday at 09:00:00 UTC; the next Monday is Jan 20.
     const after = new Date("2025-01-15T09:00:00Z");
     const next = nextCronTime("0 9 * * 1", after)!;
-    // dom is *, so doms.has(dom) is always true → fires at next 09:00 (Jan 16)
     expect(next.getUTCHours()).toBe(9);
     expect(next.getUTCMinutes()).toBe(0);
-    expect(next.getUTCDate()).toBe(16); // next day = Thursday Jan 16
+    expect(next.getUTCDay()).toBe(1);
+    expect(next.getUTCDate()).toBe(20);
   });
 
   test("'0 9 1 * 1' fires at 09:00 on the next Monday or 1st (whichever comes first)", () => {
@@ -586,5 +587,77 @@ describe("ScheduleEngine — start/stop lifecycle", () => {
     // Do NOT start — running=false
     await engine.poll();
     expect(calls).toBe(0);
+  });
+});
+
+// -- POSIX day-of-month / day-of-week semantics -----------------------------
+//
+// `*` was expanded into the full set, which destroyed the "is this field
+// restricted?" information POSIX cron needs. `doms.has(dom) || dows.has(dow)`
+// was therefore always true whenever either field was `*`, so almost every
+// real expression fired daily — a weekly agent schedule burned 7x the tokens.
+
+describe("nextCronTime — dom/dow restriction semantics", () => {
+  // A Tuesday, so a Monday-only rule must skip ahead rather than match today.
+  const TUE = new Date("2026-08-11T00:00:00Z");
+  const dayOf = (d: Date | null) =>
+    d ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()] : null;
+
+  test("dow-only restriction lands on that weekday, not tomorrow", () => {
+    const d = nextCronTime("0 9 * * 1", TUE);
+    expect(dayOf(d)).toBe("Mon");
+    expect(d!.toISOString()).toBe("2026-08-17T09:00:00.000Z");
+  });
+
+  test("dom-only restriction lands on that date", () => {
+    expect(nextCronTime("0 0 5 * *", TUE)!.getUTCDate()).toBe(5);
+    expect(nextCronTime("0 9 1 * *", TUE)!.getUTCDate()).toBe(1);
+  });
+
+  test("a weekday range excludes the weekend", () => {
+    // Walk a fortnight of fires; none may be Sat/Sun.
+    let cur = TUE;
+    for (let i = 0; i < 40; i++) {
+      cur = nextCronTime("*/15 9-17 * * 1-5", cur)!;
+      expect(["Sat", "Sun"]).not.toContain(dayOf(cur));
+    }
+  });
+
+  test("both fields restricted is a union, per POSIX", () => {
+    // 1st of the month OR any Monday.
+    const d = nextCronTime("0 0 1 * 1", TUE)!;
+    const isFirst = d.getUTCDate() === 1;
+    const isMonday = dayOf(d) === "Mon";
+    expect(isFirst || isMonday).toBe(true);
+  });
+
+  test("neither field restricted fires every day", () => {
+    const d = nextCronTime("0 3 * * *", TUE)!;
+    expect(d.toISOString()).toBe("2026-08-11T03:00:00.000Z");
+  });
+
+  test("dow=7 is Sunday, the common alias that used to return null", () => {
+    const d = nextCronTime("0 0 * * 7", TUE);
+    expect(d).not.toBeNull();
+    expect(dayOf(d)).toBe("Sun");
+  });
+
+  test("dow=0 and dow=7 agree", () => {
+    expect(nextCronTime("0 0 * * 0", TUE)!.toISOString())
+      .toBe(nextCronTime("0 0 * * 7", TUE)!.toISOString());
+  });
+
+  test("a weekly schedule fires 7 days apart, not daily", () => {
+    const first = nextCronTime("0 9 * * 1", TUE)!;
+    const second = nextCronTime("0 9 * * 1", first)!;
+    const days = (second.getTime() - first.getTime()) / 86_400_000;
+    expect(days).toBe(7);
+  });
+
+  test("a monthly schedule does not fire again the next day", () => {
+    const first = nextCronTime("0 0 5 * *", TUE)!;
+    const second = nextCronTime("0 0 5 * *", first)!;
+    const days = (second.getTime() - first.getTime()) / 86_400_000;
+    expect(days).toBeGreaterThan(27);
   });
 });

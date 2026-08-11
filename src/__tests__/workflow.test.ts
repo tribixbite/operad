@@ -11,6 +11,7 @@ import { Database } from "bun:sqlite";
 import {
   WorkflowEngine,
   validateSpec,
+  dedupeEdges,
   type WorkflowSpec,
   type TaskRunner,
   type TaskResult,
@@ -303,7 +304,11 @@ describe("WorkflowEngine.run", () => {
     db.close();
   });
 
-  test("multi-incoming OR semantics: any fired edge runs the node", async () => {
+  // This previously asserted OR: the join ran because ONE parent succeeded,
+  // even though the other had failed. For `deploy` depending on `build` and
+  // `test` that means deploying after a failed test, so `all` is now the
+  // default and `any` is opt-in.
+  test("multi-incoming defaults to AND: a failed parent blocks the node", async () => {
     const db = freshDb();
     const order: string[] = [];
     const engine = new WorkflowEngine(
@@ -311,22 +316,97 @@ describe("WorkflowEngine.run", () => {
       log,
       makeFakeRunner({ b: "fail" }, order),
     );
-    engine.upsert("or-join", {
+    engine.upsert("and-join", {
       nodes: [
         { id: "a", type: "task", command: "ok" },
         { id: "b", type: "task", command: "fail" },
         { id: "join", type: "task", command: "ok" },
       ],
       edges: [
-        { from: "a", to: "join" }, // success → fires
-        { from: "b", to: "join" }, // failed → blocked
+        { from: "a", to: "join" },
+        { from: "b", to: "join" },
       ],
     });
 
-    const result = await engine.run("or-join");
-    expect(result.status).toBe("failed"); // b failed, so run is failed
-    expect(result.nodes.join.status).toBe("success"); // but join still ran via a
+    const result = await engine.run("and-join");
+    expect(result.status).toBe("failed");
+    expect(result.nodes.join.status).toBe("skipped");
+    expect(order).not.toContain("join");
     db.close();
+  });
+
+  test('join: "any" opts back into the fan-in behaviour', async () => {
+    const db = freshDb();
+    const order: string[] = [];
+    const engine = new WorkflowEngine(
+      makeMemDb(db),
+      log,
+      makeFakeRunner({ b: "fail" }, order),
+    );
+    engine.upsert("any-join", {
+      nodes: [
+        { id: "a", type: "task", command: "ok" },
+        { id: "b", type: "task", command: "fail" },
+        { id: "join", type: "task", command: "ok", join: "any" },
+      ],
+      edges: [
+        { from: "a", to: "join" },
+        { from: "b", to: "join" },
+      ],
+    });
+
+    const result = await engine.run("any-join");
+    expect(result.nodes.join.status).toBe("success");
+    db.close();
+  });
+
+  test("all parents succeeding runs the node under the default join", async () => {
+    const db = freshDb();
+    const order: string[] = [];
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, order));
+    engine.upsert("and-ok", {
+      nodes: [
+        { id: "a", type: "task", command: "ok" },
+        { id: "b", type: "task", command: "ok" },
+        { id: "join", type: "task", command: "ok" },
+      ],
+      edges: [{ from: "a", to: "join" }, { from: "b", to: "join" }],
+    });
+    const result = await engine.run("and-ok");
+    expect(result.status).toBe("success");
+    expect(result.nodes.join.status).toBe("success");
+    db.close();
+  });
+
+  // A duplicate edge gave the node in-degree 2 with only one decrement, so
+  // Kahn never reached it: no run-node row at all, and the run still said
+  // "success". `needs: ["a", "a"]` in TOML produces exactly this.
+  test("a duplicate edge does not deadlock the node", async () => {
+    const db = freshDb();
+    const order: string[] = [];
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, order));
+    engine.upsert("dup-edge", {
+      nodes: [
+        { id: "a", type: "task", command: "ok" },
+        { id: "b", type: "task", command: "ok" },
+      ],
+      edges: [{ from: "a", to: "b" }, { from: "a", to: "b" }],
+    });
+    const result = await engine.run("dup-edge");
+    expect(result.nodes.b).toBeDefined();
+    expect(result.nodes.b.status).toBe("success");
+    expect(order).toContain("b");
+    expect(result.status).toBe("success");
+    db.close();
+  });
+
+  test("dedupeEdges keeps edges that differ only by their `on` condition", () => {
+    const out = dedupeEdges([
+      { from: "a", to: "b", on: "success" },
+      { from: "a", to: "b", on: "success" },
+      { from: "a", to: "b", on: "error" },
+    ]);
+    expect(out).toHaveLength(2);
   });
 
   test("noop nodes always succeed and don't invoke the runner", async () => {

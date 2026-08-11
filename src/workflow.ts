@@ -47,6 +47,11 @@ export interface WorkflowNode {
   env?: Record<string, string>;
   /** Hard kill after this many seconds. Defaults to 600 (10 min). */
   timeout_s?: number;
+  /**
+   * Fan-in rule when this node has several incoming edges. `all` (default)
+   * requires every one to fire; `any` requires one. See {@link WorkflowJoin}.
+   */
+  join?: WorkflowJoin;
 }
 
 /**
@@ -61,6 +66,19 @@ export interface WorkflowEdge {
   to: string;
   on?: "success" | "error" | "always";
 }
+
+/**
+ * How a node with several incoming edges decides to run.
+ *
+ * `all` (the default) requires every incoming edge to fire; `any` requires
+ * one. The default used to be `any` with no way to change it, which made
+ * `needs: ["build", "test"]` mean "build OR test" — so a deploy node ran
+ * after its test dependency had failed. For a task runner that is the worst
+ * possible reading, and the module's own example (`test → alert-on-failure`)
+ * is precisely the shape that invites it. Fan-in cleanup branches that really
+ * do want "whichever finished" set `join: "any"` explicitly.
+ */
+export type WorkflowJoin = "all" | "any";
 
 /** A workflow as stored in the DB (spec_json is parsed into this shape). */
 export interface WorkflowSpec {
@@ -277,10 +295,36 @@ export function validateSpec(spec: WorkflowSpec): void {
 }
 
 /** Build adjacency list (source id → target ids). */
+/**
+ * Collapse duplicate edges.
+ *
+ * adjacencyList de-duplicated by `to` while reverseEdges did not, so a spec
+ * containing the same edge twice gave a node an in-degree of 2 but only one
+ * decrement. Kahn then never reached 0 for it, the node was silently never
+ * executed — no run-node row at all — and the run still reported `success`.
+ * `needs: ["a", "a"]` in TOML compiles to exactly that, and the REST API
+ * accepts arbitrary edge lists. Both directions now consume the same
+ * de-duplicated set.
+ *
+ * Two edges between the same pair with different `on` conditions are distinct
+ * and are both kept; only exact duplicates collapse.
+ */
+export function dedupeEdges(edges: WorkflowEdge[]): WorkflowEdge[] {
+  const seen = new Set<string>();
+  const out: WorkflowEdge[] = [];
+  for (const e of edges) {
+    const key = `${e.from}\u0000${e.to}\u0000${e.on ?? "success"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+  }
+  return out;
+}
+
 function adjacencyList(spec: WorkflowSpec): Map<string, string[]> {
   const adj = new Map<string, string[]>();
   for (const n of spec.nodes) adj.set(n.id, []);
-  for (const e of spec.edges) {
+  for (const e of dedupeEdges(spec.edges)) {
     const list = adj.get(e.from);
     if (list && !list.includes(e.to)) list.push(e.to);
   }
@@ -291,7 +335,7 @@ function adjacencyList(spec: WorkflowSpec): Map<string, string[]> {
 function reverseEdges(spec: WorkflowSpec): Map<string, WorkflowEdge[]> {
   const rev = new Map<string, WorkflowEdge[]>();
   for (const n of spec.nodes) rev.set(n.id, []);
-  for (const e of spec.edges) rev.get(e.to)?.push(e);
+  for (const e of dedupeEdges(spec.edges)) rev.get(e.to)?.push(e);
   return rev;
 }
 
@@ -476,20 +520,35 @@ export class WorkflowEngine {
       const node = nodeMap.get(currentId);
       if (!node) continue;
 
-      // Decide: execute or skip? Skip iff the node has incoming edges AND
-      // none of them fired. Roots (no incoming edges) always execute.
+      // Decide: execute or skip. Roots (no incoming edges) always execute.
+      // Otherwise apply the node's join: `all` (default) needs every incoming
+      // edge to fire, `any` needs one. This was hardcoded to "any", so a node
+      // depending on both build and test ran when only build succeeded.
       const incoming = rev.get(currentId) ?? [];
-      let shouldExec = incoming.length === 0;
-      if (!shouldExec) {
-        for (const edge of incoming) {
+      const join: WorkflowJoin = node.join ?? "all";
+      let shouldExec: boolean;
+      if (incoming.length === 0) {
+        shouldExec = true;
+      } else if (join === "any") {
+        shouldExec = incoming.some((edge) => {
           const src = results.get(edge.from);
-          if (src && edgeFires(edge, src)) { shouldExec = true; break; }
-        }
+          return src != null && edgeFires(edge, src);
+        });
+      } else {
+        shouldExec = incoming.every((edge) => {
+          const src = results.get(edge.from);
+          return src != null && edgeFires(edge, src);
+        });
       }
 
       let nodeResult: NodeResult;
       if (!shouldExec) {
-        nodeResult = { status: "skipped", error: "no incoming edge fired" };
+        nodeResult = {
+          status: "skipped",
+          error: join === "any"
+            ? "no incoming edge fired"
+            : "not all incoming edges fired (join=all)",
+        };
         persistNode(currentId, nodeResult);
       } else if (node.type === "noop") {
         nodeResult = { status: "success", output: "" };

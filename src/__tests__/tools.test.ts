@@ -29,7 +29,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ToolExecutor } from "../tools.js";
+import { ToolExecutor, isAllowedPath, isProtectedFile } from "../tools.js";
 import type {
   ToolDef,
   ToolContext,
@@ -1178,5 +1178,100 @@ describe("execute() with generation pinning", () => {
     const r1 = await ex.execute("gen1-only", {}, ctx, 0);
     expect(r1.success).toBe(false);
     expect(r1.summary).toContain("Unknown tool");
+  });
+});
+
+// -- file access policy -----------------------------------------------------
+//
+// file-read is category `observe` and file-write `mutate`; both are reachable
+// by an agent. The old rule was "anything under $HOME minus four dot-dirs",
+// which left every credential file and both code-executing config files
+// readable/writable.
+
+describe("isAllowedPath — credential and config denial", () => {
+  const HOME = process.env.HOME || "";
+
+  test("ordinary project files are still allowed", () => {
+    expect(isAllowedPath(join(HOME, "git", "proj", "src", "a.ts"))).toBe(true);
+    expect(isAllowedPath(join(HOME, "notes.md"))).toBe(true);
+  });
+
+  test("Claude Code state and settings are denied", () => {
+    // settings.json carries `hooks`, which run shell commands.
+    expect(isAllowedPath(join(HOME, ".claude.json"))).toBe(false);
+    expect(isAllowedPath(join(HOME, ".claude", "settings.json"))).toBe(false);
+    expect(isAllowedPath(join(HOME, ".claude", ".credentials.json"))).toBe(false);
+  });
+
+  test("operad's own config is denied — it defines [[tool]] shell commands", () => {
+    expect(isAllowedPath(join(HOME, ".config", "operad", "operad.toml"))).toBe(false);
+  });
+
+  test("credential files are denied", () => {
+    for (const f of [".npmrc", ".netrc", ".git-credentials"]) {
+      expect(isAllowedPath(join(HOME, f))).toBe(false);
+    }
+  });
+
+  test("shell startup files are denied (persistence)", () => {
+    for (const f of [".bashrc", ".zshrc", ".profile", ".bash_profile"]) {
+      expect(isAllowedPath(join(HOME, f))).toBe(false);
+    }
+  });
+
+  test("credential directories are denied, including new ones", () => {
+    for (const d of [".ssh", ".gnupg", ".aws", ".kube", ".docker"]) {
+      expect(isAllowedPath(join(HOME, d, "anything"))).toBe(false);
+    }
+    expect(isAllowedPath(join(HOME, ".config", "gh", "hosts.yml"))).toBe(false);
+  });
+
+  test("system credential files are denied", () => {
+    expect(isAllowedPath("/etc/shadow")).toBe(false);
+    expect(isAllowedPath("/etc/passwd")).toBe(false);
+  });
+
+  test("a sibling directory sharing a prefix is not treated as inside", () => {
+    // The old startsWith had no separator boundary: /home/user matched
+    // /home/userbackup.
+    expect(isAllowedPath("/definitely/not/home/x")).toBe(false);
+  });
+
+  test("traversal out of an allowed root is denied", () => {
+    expect(isAllowedPath(join(HOME, "git", "..", "..", "etc", "shadow"))).toBe(false);
+  });
+
+  test("skill/plan markdown under ~/.claude stays readable", () => {
+    expect(isAllowedPath(join(HOME, ".claude", "skills", "x.md"))).toBe(true);
+  });
+});
+
+describe("isProtectedFile — write denial", () => {
+  test("every .env variant is protected, not just the listed three", () => {
+    for (const n of [".env", ".env.local", ".env.staging", ".env.whatever"]) {
+      expect(isProtectedFile("/p/" + n)).toBe(true);
+    }
+  });
+
+  test("key material is protected by extension", () => {
+    for (const n of ["a.pem", "a.key", "a.p12", "a.pfx", "a.jks"]) {
+      expect(isProtectedFile("/p/" + n)).toBe(true);
+    }
+  });
+
+  test("private key filenames are protected", () => {
+    expect(isProtectedFile("/p/id_rsa")).toBe(true);
+    expect(isProtectedFile("/p/id_ed25519")).toBe(true);
+  });
+
+  test("case variants are protected on case-insensitive filesystems", () => {
+    expect(isProtectedFile("/p/.ENV")).toBe(true);
+    expect(isProtectedFile("/p/SECRETS.JSON")).toBe(true);
+    expect(isProtectedFile("/p/A.PEM")).toBe(true);
+  });
+
+  test("ordinary source files are not protected", () => {
+    expect(isProtectedFile("/p/index.ts")).toBe(false);
+    expect(isProtectedFile("/p/README.md")).toBe(false);
   });
 });
