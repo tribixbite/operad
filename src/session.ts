@@ -605,7 +605,7 @@ export function runScriptInTab(scriptPath: string, cwd: string, tabName: string,
  * Catches detached children (setsid, double-fork) that process group
  * signals would miss. Returns the full tree including the root PID.
  */
-function findProcessTree(rootPid: number): number[] {
+export function findProcessTree(rootPid: number): number[] {
   // Build pid→ppid map from /proc
   const ppidMap = new Map<number, number>();
   try {

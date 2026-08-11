@@ -867,7 +867,10 @@ export class Daemon {
       // process is running (reparented to init), adopt the real PID
       if (pattern) {
         setTimeout(() => {
-          if (!existsSync(`/proc/${pid}`)) {
+          // Platform-aware: /proc is Linux/Android-only, so a direct
+          // existsSync here always said "dead" on macOS and Windows and
+          // re-adopted whatever the pattern happened to match.
+          if (!detectPlatform().isProcessAlive(pid)) {
             const realPid = findBareServicePid(pattern);
             if (realPid) {
               this.log.info(`Bare session '${name}' shell exited, adopting real PID ${realPid}`, { session: name });
@@ -982,6 +985,22 @@ export class Daemon {
       }
 
       for (const pid of pidsToKill) {
+        // Never signal a PID we cannot vouch for.
+        //
+        // adoptedPids retains entries indefinitely — rescanBareClaudeSessions
+        // deliberately keeps a PID when it finds no replacement, and the
+        // memory poll only prunes running/degraded sessions — so an entry can
+        // outlive its process. With Android's default pid_max of 32768, reuse
+        // within hours is realistic, and `process.kill(-pid)` then SIGTERMs an
+        // entire unrelated process GROUP. A dead PID must simply be dropped.
+        if (!Number.isInteger(pid) || pid <= 1) {
+          this.log.warn(`Refusing to signal implausible PID ${pid} for '${name}'`, { session: name });
+          continue;
+        }
+        if (!detectPlatform().isProcessAlive(pid)) {
+          this.log.info(`Adopted PID ${pid} for '${name}' is already gone — not signalling`, { session: name });
+          continue;
+        }
         this.log.info(`Killing bare process '${name}' (PID ${pid})`, { session: name });
         try {
           // Kill process group first (catches children like xfce4-session, dbus-launch)
@@ -992,9 +1011,11 @@ export class Daemon {
         }
       }
       await sleep(1500);
-      // Force-kill any survivors
+      // Force-kill any survivors. Was a /proc check, so on macOS and Windows
+      // the SIGKILL escalation never ran and processes that ignore SIGTERM
+      // leaked.
       for (const pid of pidsToKill) {
-        if (existsSync(`/proc/${pid}`)) {
+        if (detectPlatform().isProcessAlive(pid)) {
           try { process.kill(pid, "SIGKILL"); } catch { /* already dead — race between PID check and kill */ }
         }
       }
@@ -1110,7 +1131,7 @@ export class Daemon {
       if (this.adoptedPids.has(cfg.name)) {
         // Verify existing adopted PID is still alive
         const pid = this.adoptedPids.get(cfg.name)!;
-        if (!existsSync(`/proc/${pid}`)) {
+        if (!detectPlatform().isProcessAlive(pid)) {
           // PID died — try to find replacement
           const pattern = this.getBareServicePattern(cfg);
           const newPid = pattern ? findBareServicePid(pattern) : null;

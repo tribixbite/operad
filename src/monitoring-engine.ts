@@ -11,12 +11,13 @@
  *   - stopTimers() — called by Daemon.shutdown() to cancel intervals
  */
 
-import { existsSync } from "node:fs";
 import { detectPlatform } from "./platform/platform.js";
 import {
   suspendSession,
   resumeSession,
   capturePane,
+  getAttachedClients,
+  findProcessTree,
 } from "./session.js";
 import {
   appendNotification,
@@ -114,8 +115,16 @@ export class MonitoringEngine {
       const adoptedPid = this.ctx.adoptedPids.get(session.name);
       let pid: number | null = null;
       if (adoptedPid !== undefined) {
-        // Verify adopted PID is still alive
-        if (existsSync(`/proc/${adoptedPid}`)) {
+        // Verify adopted PID is still alive.
+        //
+        // This used to test existsSync("/proc/<pid>") directly. /proc does not
+        // exist on macOS or Windows, so the answer there was ALWAYS false:
+        // every adopted session was declared exited on the first 5s poll,
+        // dropped from adoptedPids and forced to "stopped", then re-adopted by
+        // the next health sweep and killed again — permanent flapping that
+        // made bare sessions unusable off Linux. The platform layer has a
+        // working implementation for each OS.
+        if (detectPlatform().isProcessAlive(adoptedPid)) {
           pid = adoptedPid;
         } else {
           // Bare process died — remove from adopted, mark stopped
@@ -175,6 +184,24 @@ export class MonitoringEngine {
   }
 
   /**
+   * Is `pid` anywhere in this session's process tree?
+   *
+   * Used to keep the daemon from SIGSTOPping itself. Returns false when the
+   * tree cannot be determined — the caller then falls back to its other
+   * guards rather than refusing to shed at all.
+   */
+  private treeContainsPid(sessionName: string, pid: number): boolean {
+    try {
+      const rootPid = this.memory.getSessionPid(sessionName);
+      if (rootPid == null) return false;
+      if (rootPid === pid) return true;
+      return findProcessTree(rootPid).includes(pid);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Auto-suspend idle sessions when memory pressure is critical/emergency.
    * Auto-resume previously auto-suspended sessions when pressure returns to normal.
    * This is the key mechanism that prevents OOM death spirals during heavy builds.
@@ -187,11 +214,39 @@ export class MonitoringEngine {
       // Sort running, non-suspended sessions by RSS descending (biggest first)
       const candidates: Array<{ name: string; rss: number }> = [];
       const sessions = this.ctx.state.getState().sessions;
+      const selfPid = process.pid;
       for (const [name, s] of Object.entries(sessions)) {
         if (s.suspended) continue;
         if (s.status !== "running" && s.status !== "degraded") continue;
         // Only auto-suspend idle sessions — don't freeze active builds
         if (s.activity !== "idle") continue;
+
+        // "Idle" means three consecutive zero-CPU polls (~15s), which is
+        // exactly what a Claude session sitting at its prompt looks like while
+        // the user reads or types. Freezing one makes the terminal hang with
+        // no explanation. If a tmux client is attached, somebody is looking at
+        // it — leave it alone.
+        try {
+          if (getAttachedClients(name) > 0) {
+            this.ctx.log.debug(`Not suspending '${name}' — a tmux client is attached`, { session: name });
+            continue;
+          }
+        } catch { /* tmux unavailable — fall through to the self-PID guard */ }
+
+        // Never suspend a tree containing the daemon itself. signalSessionTree
+        // SIGSTOPs every descendant of the pane PID, and the daemon IS a
+        // descendant when it was launched in the foreground inside a managed
+        // pane, or during the window in which `operad stream` is still its
+        // parent. Stopping ourselves mid-loop is unrecoverable: nothing is
+        // left running that could ever SIGCONT anything.
+        if (this.treeContainsPid(name, selfPid)) {
+          this.ctx.log.warn(
+            `Not suspending '${name}' — the operad daemon (PID ${selfPid}) is inside its process tree`,
+            { session: name },
+          );
+          continue;
+        }
+
         candidates.push({ name, rss: s.rss_mb ?? 0 });
       }
       candidates.sort((a, b) => b.rss - a.rss);
