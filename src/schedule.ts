@@ -50,6 +50,14 @@ export interface ScheduleInput {
 export type ScheduleHandler = (schedule: ScheduleRecord) => Promise<{
   success: boolean;
   costUsd?: number;
+  /**
+   * The run did not happen for a transient reason — the SDK was attached to a
+   * session, the bridge was busy, quota was exhausted. This is NOT a failure:
+   * counting it as one auto-disabled the schedule after three polls, so
+   * attaching to a session for 90 seconds permanently killed the user's
+   * nightly job with no event and no notification.
+   */
+  deferred?: boolean;
 }>;
 
 // -- Minimal cron parser (5-field: min hour dom month dow) --------------------
@@ -167,6 +175,15 @@ export class ScheduleEngine {
   private handler: ScheduleHandler;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /**
+   * Schedules with a handler currently in flight.
+   *
+   * The poll awaited the handler — an SDK agent run, often minutes — before
+   * writing next_run_at, so the next 30s tick saw the same row still due and
+   * fired it again, and again. Tracking in-flight ids per schedule keeps one
+   * long run from being re-entered while still letting other schedules fire.
+   */
+  private inFlight = new Set<number>();
 
   constructor(db: MemoryDb, log: Logger, handler: ScheduleHandler) {
     this.db = db;
@@ -224,7 +241,15 @@ export class ScheduleEngine {
     );
 
     this.log.info(`Schedule "${input.scheduleName}" for ${input.agentName}: next run at ${nextRun ? new Date(nextRun * 1000).toISOString() : "none"}`);
-    return Number(result.lastInsertRowid);
+
+    // On the ON CONFLICT … DO UPDATE branch SQLite reports the connection's
+    // last *insert* rowid, which belongs to some other row entirely. Callers
+    // returned that as the schedule id, so the dashboard then PATCHed — and
+    // disabled — the wrong schedule. Read the real id back instead.
+    const row = db.prepare(
+      `SELECT id FROM agent_schedules WHERE agent_name = ? AND schedule_name = ?`,
+    ).get(input.agentName, input.scheduleName) as { id: number } | undefined;
+    return row ? row.id : Number(result.lastInsertRowid);
   }
 
   /** Delete a schedule */
@@ -268,22 +293,38 @@ export class ScheduleEngine {
 
     for (const schedule of due) {
       if (!this.running) break;
+      if (this.inFlight.has(schedule.id)) {
+        this.log.debug(`Schedule "${schedule.schedule_name}" still running — not re-entering`);
+        continue;
+      }
 
       this.log.info(`Schedule firing: "${schedule.schedule_name}" for ${schedule.agent_name}`);
 
+      this.inFlight.add(schedule.id);
       try {
         const result = await this.handler(schedule);
 
-        // Update schedule state
-        const nextRun = this.computeNextRun(schedule.cron_expr, schedule.interval_minutes, now);
-        if (result.success) {
+        // Schedule from a FRESH clock, not the one captured before the handler
+        // ran. A run lasting longer than the interval otherwise produced a
+        // next_run_at already in the past, so the very next tick refired it.
+        const doneAt = Math.floor(Date.now() / 1000);
+        const nextRun = this.computeNextRun(schedule.cron_expr, schedule.interval_minutes, doneAt);
+
+        if (result.deferred) {
+          // Transient: reschedule, do not touch the failure counter, and do
+          // not bump run_count — nothing ran.
+          this.db.requireDb().prepare(
+            `UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`,
+          ).run(nextRun, schedule.id);
+          this.log.debug(`Schedule "${schedule.schedule_name}" deferred; next attempt at ${nextRun}`);
+        } else if (result.success) {
           db.prepare(
             `UPDATE agent_schedules SET
               last_run_at = ?, next_run_at = ?,
               run_count = run_count + 1, consecutive_failures = 0,
               total_cost_usd = total_cost_usd + ?
              WHERE id = ?`,
-          ).run(now, nextRun, result.costUsd ?? 0, schedule.id);
+          ).run(doneAt, nextRun, result.costUsd ?? 0, schedule.id);
         } else {
           const newFailures = schedule.consecutive_failures + 1;
           const shouldDisable = newFailures >= MAX_CONSECUTIVE_FAILURES;
@@ -293,7 +334,7 @@ export class ScheduleEngine {
               run_count = run_count + 1, consecutive_failures = ?,
               enabled = ?, total_cost_usd = total_cost_usd + ?
              WHERE id = ?`,
-          ).run(now, shouldDisable ? null : nextRun, newFailures, shouldDisable ? 0 : 1, result.costUsd ?? 0, schedule.id);
+          ).run(doneAt, shouldDisable ? null : nextRun, newFailures, shouldDisable ? 0 : 1, result.costUsd ?? 0, schedule.id);
 
           if (shouldDisable) {
             this.log.warn(`Schedule "${schedule.schedule_name}" auto-disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive failures`);
@@ -301,16 +342,21 @@ export class ScheduleEngine {
         }
       } catch (err) {
         this.log.warn(`Schedule "${schedule.schedule_name}" execution error: ${err}`);
-        // Count as failure
+        // Count as failure. run_count is bumped here too so the accounting
+        // matches the success:false branch, which it previously did not.
+        const doneAt = Math.floor(Date.now() / 1000);
         const newFailures = schedule.consecutive_failures + 1;
         const shouldDisable = newFailures >= MAX_CONSECUTIVE_FAILURES;
-        const nextRun = this.computeNextRun(schedule.cron_expr, schedule.interval_minutes, now);
+        const nextRun = this.computeNextRun(schedule.cron_expr, schedule.interval_minutes, doneAt);
         db.prepare(
           `UPDATE agent_schedules SET
             last_run_at = ?, next_run_at = ?,
+            run_count = run_count + 1,
             consecutive_failures = ?, enabled = ?
            WHERE id = ?`,
-        ).run(now, shouldDisable ? null : nextRun, newFailures, shouldDisable ? 0 : 1, schedule.id);
+        ).run(doneAt, shouldDisable ? null : nextRun, newFailures, shouldDisable ? 0 : 1, schedule.id);
+      } finally {
+        this.inFlight.delete(schedule.id);
       }
     }
   }

@@ -661,3 +661,125 @@ describe("nextCronTime — dom/dow restriction semantics", () => {
     expect(days).toBeGreaterThan(27);
   });
 });
+
+// -- poll robustness --------------------------------------------------------
+
+describe("ScheduleEngine — poll re-entrancy, deferrals and id accounting", () => {
+  /** Make a schedule that is already due. */
+  function makeDue(engine: TestableScheduleEngine, name: string): number {
+    const id = engine.upsert({
+      agentName: "optimizer",
+      scheduleName: name,
+      intervalMinutes: 60,
+      prompt: "x",
+    });
+    // start() must precede the due-time write: it calls recomputeAllNextRuns,
+    // and pollDueSchedules returns early unless the engine is running.
+    engine.start();
+    db.requireDb().prepare(
+      `UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`,
+    ).run(Math.floor(Date.now() / 1000) - 10, id);
+    return id;
+  }
+
+  /** Re-arm a schedule as due for another poll. */
+  function reArm(id: number): void {
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`)
+      .run(Math.floor(Date.now() / 1000) - 10, id);
+  }
+
+  const rec = (id: number) =>
+    db.requireDb().prepare(`SELECT * FROM agent_schedules WHERE id = ?`).get(id) as any;
+
+  // The poll awaited the handler (an SDK run, minutes long) before writing
+  // next_run_at, so the next 30s tick saw the row still due and fired it again.
+  test("a long-running handler is not re-entered by a concurrent poll", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => {
+      calls++;
+      await gate;
+      return { success: true };
+    });
+    makeDue(engine, "slow");
+
+    const first = engine.poll();
+    await new Promise((r) => setTimeout(r, 10));
+    await engine.poll();          // second tick while the first is in flight
+    release();
+    await first;
+    engine.stop();
+
+    expect(calls).toBe(1);
+  });
+
+  test("the in-flight entry is released so the schedule can fire again", async () => {
+    let calls = 0;
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => {
+      calls++;
+      return { success: true };
+    });
+    const id = makeDue(engine, "twice");
+    await engine.poll();
+    reArm(id);
+    await engine.poll();
+    engine.stop();
+    expect(calls).toBe(2);
+  });
+
+  // Deferrals are transient (SDK attached/busy, quota exhausted). Counting
+  // them as failures auto-disabled the schedule after three polls.
+  test("a deferred result does not increment consecutive_failures", async () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => ({
+      success: false, deferred: true,
+    }));
+    const id = makeDue(engine, "deferring");
+    for (let i = 0; i < 5; i++) {
+      reArm(id);
+      await engine.poll();
+    }
+    engine.stop();
+    const r = rec(id);
+    expect(r.consecutive_failures).toBe(0);
+    expect(r.enabled).toBe(1);
+    expect(r.run_count).toBe(0); // nothing actually ran
+  });
+
+  test("a genuine failure still disables after the threshold", async () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => ({
+      success: false,
+    }));
+    const id = makeDue(engine, "failing");
+    for (let i = 0; i < 3; i++) {
+      reArm(id);
+      await engine.poll();
+    }
+    engine.stop();
+    expect(rec(id).enabled).toBe(0);
+  });
+
+  test("a throwing handler bumps run_count like the failure branch", async () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => {
+      throw new Error("boom");
+    });
+    const id = makeDue(engine, "throwing");
+    await engine.poll();
+    engine.stop();
+    const r = rec(id);
+    expect(r.run_count).toBe(1);
+    expect(r.consecutive_failures).toBe(1);
+  });
+
+  // SQLite reports the connection's last INSERT rowid even on the
+  // ON CONFLICT … DO UPDATE branch, so upsert returned a foreign id and the
+  // dashboard PATCHed the wrong schedule.
+  test("re-upserting an existing schedule returns ITS id, not another row's", () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), successHandler());
+    const a = engine.upsert({ agentName: "optimizer", scheduleName: "A", intervalMinutes: 60, prompt: "x" });
+    const b = engine.upsert({ agentName: "optimizer", scheduleName: "B", intervalMinutes: 60, prompt: "x" });
+    expect(b).not.toBe(a);
+    const aAgain = engine.upsert({ agentName: "optimizer", scheduleName: "A", intervalMinutes: 30, prompt: "y" });
+    expect(aAgain).toBe(a);
+  });
+});

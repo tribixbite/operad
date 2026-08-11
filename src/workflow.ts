@@ -199,27 +199,72 @@ export const shellRunner: TaskRunner = (node, signal) => {
   }
 
   const command = node.command;
-  const timeoutMs = (node.timeout_s ?? 600) * 1000;
+  // `?? 600` does not catch an explicit 0, which meant "kill instantly".
+  // Treat 0 / negative / non-finite as "use the default".
+  const rawTimeout = node.timeout_s;
+  const timeoutSec =
+    typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0
+      ? rawTimeout
+      : 600;
+  const timeoutMs = timeoutSec * 1000;
 
   return new Promise<TaskResult>((resolve) => {
     let stdout = "";
     let stderr = "";
     let killed = false;
+    let settled = false;
+
+    /**
+     * Resolve exactly once.
+     *
+     * The old code only resolved from `close`, which fires when every stdio
+     * pipe closes — and a backgrounded grandchild inherits those pipes. A
+     * task of `sleep 30 & echo hi; wait` with timeout_s: 1 therefore blocked
+     * the whole DAG for the full 30s and still reported "timed out after 1s".
+     */
+    const settle = (r: TaskResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(r);
+    };
 
     const child = spawn("sh", ["-c", command], {
       cwd: node.cwd,
       env: { ...process.env, ...(node.env ?? {}) },
       stdio: ["ignore", "pipe", "pipe"],
+      // Own process group, so the kill below reaches grandchildren too.
+      // Killing just the `sh` left every backgrounded descendant running.
+      detached: true,
     });
+
+    /** SIGKILL the whole process group, falling back to the direct pid. */
+    const killTree = (sig: NodeJS.Signals) => {
+      if (child.pid == null) return;
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        try { child.kill(sig); } catch { /* already gone */ }
+      }
+    };
 
     const timer = setTimeout(() => {
       killed = true;
-      child.kill("SIGKILL");
+      killTree("SIGKILL");
+      // Do not wait for `close`: if a grandchild is holding the pipes open it
+      // may never arrive. Report the timeout now; the group is already dead.
+      settle({
+        success: false,
+        exit_code: -1,
+        output: stdout,
+        error: `timed out after ${timeoutSec}s`,
+      });
     }, timeoutMs);
 
     const onAbort = () => {
       killed = true;
-      child.kill("SIGTERM");
+      killTree("SIGTERM");
     };
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
@@ -228,24 +273,21 @@ export const shellRunner: TaskRunner = (node, signal) => {
     child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
 
     child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ success: false, exit_code: -1, output: stdout, error: err.message });
+      settle({ success: false, exit_code: -1, output: stdout, error: err.message });
     });
 
     child.on("close", (code) => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
       if (killed) {
-        resolve({
+        settle({
           success: false,
           exit_code: code ?? -1,
           output: stdout,
-          error: signal.aborted ? "cancelled" : `timed out after ${node.timeout_s ?? 600}s`,
+          error: signal.aborted ? "cancelled" : `timed out after ${timeoutSec}s`,
         });
         return;
       }
       const exit = code ?? -1;
-      resolve({
+      settle({
         success: exit === 0,
         exit_code: exit,
         output: stdout,

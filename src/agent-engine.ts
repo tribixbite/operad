@@ -993,14 +993,17 @@ export class AgentEngine {
    * gate (§3.7) blocks while a scheduled run is in flight, matching
    * the behaviour for OODA cycles.
    */
-  async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
+  async executeScheduledRun(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number; deferred?: boolean }> {
     const { agentConfigs, config, log } = this.ctx;
     const sdkBridge = this.ctx.getSdkBridge();
     const memoryDb = this.ctx.getMemoryDb();
-    if (!sdkBridge || !memoryDb) return { success: false };
+    // Missing subsystems and a busy bridge are transient, not failures. Three
+    // consecutive polls in either state used to auto-disable the schedule
+    // permanently — so attaching to a session for 90s killed a nightly job.
+    if (!sdkBridge || !memoryDb) return { success: false, deferred: true };
     if (sdkBridge.isAttached || sdkBridge.isBusy) {
       log.debug(`Scheduled run "${schedule.schedule_name}" deferred — SDK busy`);
-      return { success: false };
+      return { success: false, deferred: true };
     }
 
     const pin = this.ctx.getConsumerTracker().acquire(
@@ -1013,17 +1016,18 @@ export class AgentEngine {
     }
   }
 
-  private async _executeScheduledRunInner(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number }> {
+  private async _executeScheduledRunInner(schedule: ScheduleRecord): Promise<{ success: boolean; costUsd?: number; deferred?: boolean }> {
     const { agentConfigs, config, log } = this.ctx;
     const sdkBridge = this.ctx.getSdkBridge();
     const memoryDb = this.ctx.getMemoryDb();
-    if (!sdkBridge || !memoryDb) return { success: false };
+    if (!sdkBridge || !memoryDb) return { success: false, deferred: true };
 
-    // Quota check: don't run if exceeded
+    // Quota check: don't run if exceeded. Also transient — the window rolls
+    // over — so it must not burn down the failure budget.
     const quota = computeQuotaStatus(memoryDb, config.orchestrator);
     if (quota.weekly_level === "exceeded") {
       log.warn(`Scheduled run "${schedule.schedule_name}" blocked — quota exceeded`);
-      return { success: false };
+      return { success: false, deferred: true };
     }
 
     const agent = agentConfigs.find((a) => a.name === schedule.agent_name && a.enabled);
