@@ -137,8 +137,15 @@ export class LinuxPlatform implements Platform {
         // temp file is optional — many desktop batteries don't expose it
       }
 
+      // A garbage/absent capacity read must not look like a flat battery:
+      // 0% + not-charging trips the low-battery action, which calls
+      // disableRadios() — wifi and mobile data off. That takes the device
+      // off the network (including adb-over-wifi and the dashboard) on one
+      // failed read. null means "unknown" and the monitor holds.
+      if (isNaN(capacity)) return null;
+
       return {
-        percentage: isNaN(capacity) ? 0 : capacity,
+        percentage: capacity,
         charging: statusStr === "Charging" || statusStr === "Full",
         temperature,
         health: "UNKNOWN", // Desktop Linux doesn't expose battery health like Android

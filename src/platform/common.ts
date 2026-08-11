@@ -11,10 +11,23 @@ import type { SystemMemoryInfo } from "./platform.js";
 
 /**
  * Pure parser: extract SystemMemoryInfo from the text content of /proc/meminfo.
- * Missing fields default to 0; non-matching lines are ignored.
+ *
+ * Returns **null** when the two load-bearing fields are absent, rather than
+ * defaulting them to 0.
+ *
+ * Defaulting was actively dangerous: `available_kb: 0` is not "unknown", it is
+ * "no memory left". A truncated or unusual /proc/meminfo therefore classified
+ * as `emergency`, which SIGSTOPs every idle session and force-stops flagged
+ * Android apps every 5s — and because the reading never improves, pressure
+ * never returns to `normal`, so the auto-resume branch never runs and the
+ * sessions stay frozen. Callers already treat null as "unknown" and hold at
+ * `normal`, which is the correct fail-safe direction.
+ *
+ * Swap fields keep the 0 default: absent swap genuinely means zero swap.
+ *
  * Extracted so it can be unit-tested with fixture strings.
  */
-export function parseMeminfo(content: string): SystemMemoryInfo {
+export function parseMeminfo(content: string): SystemMemoryInfo | null {
   const fields = new Map<string, number>();
 
   for (const line of content.split("\n")) {
@@ -24,9 +37,15 @@ export function parseMeminfo(content: string): SystemMemoryInfo {
     }
   }
 
+  const total = fields.get("MemTotal");
+  const available = fields.get("MemAvailable");
+  // MemTotal of 0 is equally nonsensical and would make every percentage
+  // computation divide by zero.
+  if (total == null || available == null || total <= 0) return null;
+
   return {
-    total_kb: fields.get("MemTotal") ?? 0,
-    available_kb: fields.get("MemAvailable") ?? 0,
+    total_kb: total,
+    available_kb: available,
     swap_total_kb: fields.get("SwapTotal") ?? 0,
     swap_free_kb: fields.get("SwapFree") ?? 0,
   };

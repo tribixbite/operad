@@ -198,68 +198,72 @@ Writeback:             0 kB
 describe("parseMeminfo", () => {
   test("parses all four expected fields correctly", () => {
     const result = parseMeminfo(FULL_MEMINFO);
-    expect(result.total_kb).toBe(16_384_000);
-    expect(result.available_kb).toBe(12_288_000);
-    expect(result.swap_total_kb).toBe(4_194_304);
-    expect(result.swap_free_kb).toBe(4_194_304);
+    expect(result).not.toBeNull();
+    expect(result!.total_kb).toBe(16_384_000);
+    expect(result!.available_kb).toBe(12_288_000);
+    expect(result!.swap_total_kb).toBe(4_194_304);
+    expect(result!.swap_free_kb).toBe(4_194_304);
   });
 
-  test("missing MemAvailable defaults to 0", () => {
+  // These previously asserted a 0 default. 0 available memory is not
+  // "unknown", it is "emergency" — which SIGSTOPs every idle session on a
+  // 5s timer and never recovers, because the reading never improves. The
+  // parser must say "I don't know" so callers can hold at normal.
+  test("missing MemAvailable returns null rather than 0", () => {
     const content = `MemTotal:       8388608 kB\nSwapTotal:      1048576 kB\nSwapFree:       1048576 kB\n`;
-    const result = parseMeminfo(content);
-    expect(result.total_kb).toBe(8_388_608);
-    expect(result.available_kb).toBe(0);
+    expect(parseMeminfo(content)).toBeNull();
   });
 
-  test("missing SwapTotal defaults to 0", () => {
+  test("missing MemTotal returns null", () => {
+    expect(parseMeminfo(`MemAvailable:   2097152 kB\n`)).toBeNull();
+  });
+
+  test("a zero MemTotal returns null (would divide by zero)", () => {
+    expect(parseMeminfo(`MemTotal: 0 kB\nMemAvailable: 0 kB\n`)).toBeNull();
+  });
+
+  test("completely empty content returns null", () => {
+    expect(parseMeminfo("")).toBeNull();
+  });
+
+  test("garbage content returns null", () => {
+    expect(parseMeminfo("not meminfo at all\n<html>502</html>\n")).toBeNull();
+  });
+
+  // Absent swap genuinely means zero swap, so 0 stays the right default there.
+  test("missing swap fields still default to 0 when core fields are present", () => {
     const content = `MemTotal:       4194304 kB\nMemAvailable:   2097152 kB\n`;
     const result = parseMeminfo(content);
-    expect(result.swap_total_kb).toBe(0);
-    expect(result.swap_free_kb).toBe(0);
+    expect(result).not.toBeNull();
+    expect(result!.swap_total_kb).toBe(0);
+    expect(result!.swap_free_kb).toBe(0);
   });
 
-  test("completely empty content returns all zeros", () => {
-    const result = parseMeminfo("");
-    expect(result.total_kb).toBe(0);
-    expect(result.available_kb).toBe(0);
-    expect(result.swap_total_kb).toBe(0);
-    expect(result.swap_free_kb).toBe(0);
-  });
-
-  test("non-matching lines are silently ignored", () => {
-    const content = `# This is a comment\nSomeGarbage: xyz\nMemTotal:       2097152 kB\nnotakbfield: 9999 MB\n`;
+  test("a legitimately near-full system is still reported, not nulled", () => {
+    const content = `MemTotal:       8388608 kB\nMemAvailable:   1024 kB\n`;
     const result = parseMeminfo(content);
-    expect(result.total_kb).toBe(2_097_152);
-    // Garbage lines don't affect other fields
-    expect(result.available_kb).toBe(0);
+    expect(result!.available_kb).toBe(1024);
   });
 
-  test("fields without ' kB' suffix are not matched", () => {
-    // Some /proc/meminfo fields have no unit (HugePages_Total, etc.)
-    const content = `HugePages_Total:       0\nMemTotal:       1048576 kB\n`;
-    const result = parseMeminfo(content);
-    expect(result.total_kb).toBe(1_048_576);
+  test("unit-less fields and duplicates do not corrupt the result", () => {
+    // Some /proc/meminfo rows have no kB unit (HugePages_Total); a repeated
+    // key must take the last value, matching Map.set semantics.
+    const content =
+      `MemTotal:       4194304 kB\nHugePages_Total:       0\n`
+      + `MemAvailable:   1048576 kB\nMemTotal:       8388608 kB\n`;
+    const r = parseMeminfo(content);
+    expect(r!.total_kb).toBe(8_388_608);
+    expect(r!.available_kb).toBe(1_048_576);
   });
 
-  test("duplicate field: last occurrence wins", () => {
-    // Map.set overwrites — if MemTotal appears twice, second wins
-    const content = `MemTotal:       1000 kB\nMemTotal:       2000 kB\n`;
-    const result = parseMeminfo(content);
-    expect(result.total_kb).toBe(2000);
-  });
-
-  test("returns a fresh object (no shared mutation between calls)", () => {
-    const r1 = parseMeminfo(FULL_MEMINFO);
-    const r2 = parseMeminfo(FULL_MEMINFO);
-    expect(r1).not.toBe(r2); // different object references
-    expect(r1).toEqual(r2);
+  test("parsing is pure — repeated calls agree", () => {
+    expect(parseMeminfo(FULL_MEMINFO)).toEqual(parseMeminfo(FULL_MEMINFO));
   });
 });
 
 // ---------------------------------------------------------------------------
 // Integration: real /proc/self/stat (platform-guarded)
 // ---------------------------------------------------------------------------
-
 const hasProcSelf =
   process.platform === "linux" && existsSync("/proc/self/stat");
 
@@ -299,12 +303,16 @@ describe("real /proc/meminfo (integration — linux only)", () => {
   test.skipIf(!hasProcMeminfo)("parseMeminfo returns positive MemTotal", () => {
     const content = readFileSync("/proc/meminfo", "utf-8");
     const info = parseMeminfo(content);
-    expect(info.total_kb).toBeGreaterThan(0);
+    // A real /proc/meminfo always has both core fields, so null here would
+    // itself be a bug worth failing on.
+    expect(info).not.toBeNull();
+    expect(info!.total_kb).toBeGreaterThan(0);
   });
 
   test.skipIf(!hasProcMeminfo)("parseMeminfo available_kb ≤ total_kb", () => {
     const content = readFileSync("/proc/meminfo", "utf-8");
     const info = parseMeminfo(content);
-    expect(info.available_kb).toBeLessThanOrEqual(info.total_kb);
+    expect(info).not.toBeNull();
+    expect(info!.available_kb).toBeLessThanOrEqual(info!.total_kb);
   });
 });
