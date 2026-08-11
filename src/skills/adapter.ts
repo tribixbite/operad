@@ -53,7 +53,7 @@ export function readSkillManifests(opts: AdapterReadOpts): AdapterReadResult {
   const warnings: string[] = [];
 
   // 1. Claude-plugin marketplace.json (optional)
-  const marketplace = readMarketplaceJson(opts.extracted_path);
+  const marketplace = readMarketplaceJson(opts.extracted_path, warnings);
 
   // 2. .operad/operad.toml (preferred path)
   const operadTomlNested = join(opts.extracted_path, ".operad", "operad.toml");
@@ -138,15 +138,22 @@ interface MarketplaceJson {
   // them — they're consumed by claude-code directly.
 }
 
-function readMarketplaceJson(extractedPath: string): MarketplaceJson | null {
+function readMarketplaceJson(
+  extractedPath: string,
+  warnings: string[],
+): MarketplaceJson | null {
   const path = join(extractedPath, ".claude-plugin", "marketplace.json");
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, "utf8")) as MarketplaceJson;
   } catch (err) {
-    // Schema problem in marketplace.json is not fatal — operad can
-    // still read .operad/operad.toml. But surface a warning rather
-    // than crashing.
+    // A malformed marketplace.json is not fatal — .operad/operad.toml can
+    // still be read — but it silently changed the skill's name, description
+    // and MCP list. The comment here promised a warning and never pushed one.
+    warnings.push(
+      `marketplace.json at ${path} could not be parsed (${(err as Error).message}); `
+      + `name/description/mcpServers from it were ignored`,
+    );
     return null;
   }
 }

@@ -157,6 +157,29 @@ export interface ProviderListing {
   popularity?: number;
 }
 
+/** One installable skill found by {@link SkillManager.search}. */
+export interface SkillSearchHit {
+  provider: Provider;
+  locator: string;
+  name: string;
+  description?: string;
+  latest_version?: string;
+  popularity?: number;
+  /** Tier the skill would install at — drives the UI's trust badge. */
+  trust_tier: TrustTier;
+  /** Whether this (provider, locator) already has an active install. */
+  installed: boolean;
+}
+
+/**
+ * Search across providers. `errors` is per-provider and non-fatal: one
+ * unreachable registry must not hide results from the others.
+ */
+export interface SkillSearchResult {
+  items: SkillSearchHit[];
+  errors: Array<{ provider: Provider; error: string }>;
+}
+
 /**
  * Result of a `ProviderModule.fetch()` call. The provider extracts
  * the bundle into `<cacheDir>/<provider>/<sanitized-locator>/<version>/`
@@ -179,7 +202,18 @@ export interface FetchResult {
 export type ProviderReadResult = Omit<
   OperadSkill,
   "id" | "source" | "trust_tier" | "enabled"
->;
+> & {
+  /**
+   * Non-fatal problems found while reading the bundle — a bare `operad.toml`
+   * shadowed by `.operad/operad.toml`, an unsupported MCP lifecycle, an
+   * unparseable `marketplace.json`.
+   *
+   * The adapter has always produced these; the type omitted them and
+   * SkillManager.install discarded them, so users never saw any of it. Part of
+   * the install result now.
+   */
+  warnings?: string[];
+};
 
 /**
  * The pluggable provider contract. New providers in v1.1+ implement

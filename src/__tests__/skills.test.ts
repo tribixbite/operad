@@ -1140,3 +1140,46 @@ command = "mcp-fs"
     }
   });
 });
+
+// -- adapter warnings reach the caller --------------------------------------
+//
+// readSkillManifests always produced these, but ProviderReadResult omitted the
+// field and SkillManager.install discarded it, so nobody ever saw them.
+
+describe("adapter warnings are produced and typed", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "operad-warn-")); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("a bare operad.toml shadowed by .operad/operad.toml warns", () => {
+    mkdirSync(join(dir, ".operad"), { recursive: true });
+    writeFileSync(join(dir, ".operad", "operad.toml"), '[skill]\nname = "a"\n');
+    writeFileSync(join(dir, "operad.toml"), '[skill]\nname = "b"\n');
+    const r = readSkillManifests({ extracted_path: dir, trust_tier: "escape" });
+    expect(r.name).toBe("a");
+    expect(r.warnings.join(" ")).toContain("shadowed");
+  });
+
+  test("an unparseable marketplace.json warns instead of failing silently", () => {
+    mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(dir, ".claude-plugin", "marketplace.json"), "{not json");
+    const r = readSkillManifests({ extracted_path: dir, trust_tier: "escape" });
+    expect(r.warnings.join(" ")).toContain("could not be parsed");
+  });
+
+  test("a clean bundle produces no warnings", () => {
+    mkdirSync(join(dir, ".operad"), { recursive: true });
+    writeFileSync(join(dir, ".operad", "operad.toml"), '[skill]\nname = "clean"\n');
+    const r = readSkillManifests({ extracted_path: dir, trust_tier: "escape" });
+    expect(r.warnings).toEqual([]);
+  });
+
+  test("warnings are part of the ProviderReadResult contract", () => {
+    // Compile-time: warnings must be assignable on the narrower type the
+    // ProviderModule.read() signature returns.
+    const asRead: import("../skills/types.js").ProviderReadResult = {
+      name: "x", description: "", warnings: ["w"],
+    };
+    expect(asRead.warnings).toEqual(["w"]);
+  });
+});

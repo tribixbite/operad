@@ -30,6 +30,8 @@ import {
   type TrustTier,
   buildSkillId,
   SkillError,
+  type SkillSearchHit,
+  type SkillSearchResult,
 } from "./types.js";
 import { SkillStore } from "./store.js";
 import { writeClaudeJson } from "./claude-json.js";
@@ -237,6 +239,12 @@ export class SkillManager {
       // Step 3: adapter read.
       const manifest = await providerMod.read(fetch.extracted_path);
 
+      // Surface the adapter's non-fatal findings. These were produced and then
+      // dropped on the floor, so problems like "bare operad.toml shadowed" or
+      // "unsupported MCP lifecycle, treating as config-only" never reached the
+      // person running the install.
+      if (manifest.warnings?.length) warnings.push(...manifest.warnings);
+
       // Phase A1+: the adapter's per-tool autonomy_cap comes from
       // whichever tier the provider's read() hardcoded into the
       // readSkillManifests call (git+url hardcodes "escape"). But
@@ -432,6 +440,72 @@ export class SkillManager {
 
   get(skillId: string): OperadSkill | null {
     return this.store.get(skillId);
+  }
+
+  /**
+   * Search providers for installable skills.
+   *
+   * `ProviderModule.list()` has been implemented by `mcp-official` and
+   * `operad-curated` since Phase B but was reachable from nothing — no REST
+   * route, no IPC command — so the marketplace UI could only install a URL you
+   * already knew. This is the discovery half.
+   *
+   * A provider that fails (network down, registry 500) contributes an entry in
+   * `errors` rather than failing the whole search: a broken registry should not
+   * hide results from the ones that work. `git+url` and `claude-marketplace`
+   * legitimately return nothing — there is no index to search.
+   */
+  async search(opts: {
+    query?: string;
+    provider?: Provider;
+    limit?: number;
+    cursor?: string;
+  } = {}): Promise<SkillSearchResult> {
+    const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
+    const providers = opts.provider
+      ? ([opts.provider] as Provider[])
+      : (Object.keys(this.opts.providers) as Provider[]);
+
+    const results: SkillSearchHit[] = [];
+    const errors: Array<{ provider: Provider; error: string }> = [];
+
+    await Promise.all(providers.map(async (id) => {
+      const mod = this.opts.providers[id];
+      if (!mod) return;
+      try {
+        const r = await mod.list({ query: opts.query, limit, cursor: opts.cursor });
+        for (const item of r.items ?? []) {
+          results.push({
+            provider: id,
+            locator: item.locator,
+            name: item.name,
+            description: item.description,
+            latest_version: item.latest_version,
+            popularity: item.popularity,
+            trust_tier: mod.trustTier(item.locator),
+            // Lets the UI mark an entry as already present without a second call.
+            installed: this.store.getActive(id, item.locator) != null,
+          });
+        }
+      } catch (err) {
+        errors.push({ provider: id, error: (err as Error).message });
+      }
+    }));
+
+    // Client-side filter for providers whose list() ignores `query`.
+    const q = opts.query?.trim().toLowerCase();
+    const filtered = q
+      ? results.filter((r) =>
+          r.name.toLowerCase().includes(q) ||
+          r.locator.toLowerCase().includes(q) ||
+          (r.description ?? "").toLowerCase().includes(q))
+      : results;
+
+    // Most popular first, then alphabetical for a stable order.
+    filtered.sort((a, b) =>
+      (b.popularity ?? 0) - (a.popularity ?? 0) || a.name.localeCompare(b.name));
+
+    return { items: filtered.slice(0, limit), errors };
   }
 
   // -- internals -----------------------------------------------------------

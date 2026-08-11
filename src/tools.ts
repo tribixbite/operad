@@ -9,7 +9,7 @@
  * remain model-agnostic — they output text, the daemon parses.
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve, dirname, basename, extname } from "node:path";
 import { homedir } from "node:os";
@@ -72,6 +72,12 @@ export interface ToolResult {
   /** List of side effects produced (for audit trail) */
   sideEffects: string[];
   duration_ms: number;
+  /**
+   * Set when the call was refused because the caller's autonomy level does not
+   * auto-approve this tool's category (or it is in `protected_tools`). Callers
+   * can surface this as "needs approval" rather than a generic failure.
+   */
+  requiresApproval?: boolean;
 }
 
 /** Full tool definition — registered in the executor */
@@ -122,6 +128,30 @@ export interface TomlToolConfig {
 }
 
 /** Category privilege ordering (lower = safer) */
+/**
+ * Single-quote a value for POSIX `sh`.
+ *
+ * `JSON.stringify` was used for this in several places, which produces a
+ * *double*-quoted word — and `sh` still performs `$(…)`, backtick and `$VAR`
+ * expansion inside double quotes, so a value of `$(id)` executed. Single
+ * quotes suppress every expansion; the only character needing care is the
+ * quote itself, closed and reopened around an escaped literal.
+ */
+export function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Reject a git ref that could be read as an option or smuggle shell syntax.
+ * Refs reach `git` as positional arguments, where a leading `-` is parsed as
+ * a flag even with no shell in play.
+ */
+export function isSafeGitRef(ref: string): boolean {
+  if (!ref || ref.length > 256) return false;
+  if (ref.startsWith("-")) return false;
+  return /^[A-Za-z0-9._/~^@{}-]+$/.test(ref) && !ref.includes("..");
+}
+
 const CATEGORY_LEVEL: Record<ToolCategory, number> = {
   observe: 0,
   analyze: 1,
@@ -321,10 +351,27 @@ export class ToolExecutor {
         execute: async (input, _ctx) => {
           const start = Date.now();
           try {
-            // Substitute {{param}} placeholders in command
+            // Substitute {{param}} placeholders in the operator-authored
+            // command. The template is theirs, but the VALUES come from a
+            // model-emitted ```tool block and are untrusted: `{{file}}` =
+            // "/etc/hosts; id" used to run both commands. Each value is now
+            // single-quoted, suppressing every form of sh expansion.
+            //
+            // A single combined pass also fixes two lesser bugs: the key was
+            // interpolated into a RegExp unescaped (a param named `a(b` threw
+            // SyntaxError), and sequential passes let a value containing
+            // `{{other}}` be re-substituted by a later iteration.
+            const escapeRe = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const paramKeys = Object.keys(input);
             let cmd = t.command;
-            for (const [key, value] of Object.entries(input)) {
-              cmd = cmd.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), String(value));
+            if (paramKeys.length > 0) {
+              const placeholder = new RegExp(
+                "\\{\\{(" + paramKeys.map(escapeRe).join("|") + ")\\}\\}",
+                "g",
+              );
+              cmd = cmd.replace(placeholder, (_m: string, key: string) =>
+                shellQuote(String(input[key])),
+              );
             }
 
             const output = execSync(cmd, {
@@ -440,6 +487,15 @@ export class ToolExecutor {
     params: Record<string, unknown>,
     ctx: ToolContext,
     gen?: number,
+    /**
+     * Autonomy context for the caller. Omitted only by trusted internal
+     * callers (tests, direct CLI invocation) that are not acting on behalf of
+     * an agent.
+     */
+    approval?: {
+      autonomyLevel: AutonomyLevel;
+      protectedCheckpoints?: ProtectedCheckpoints;
+    },
   ): Promise<ToolResult> {
     const tool = this.getTool(toolName, gen);
     if (!tool) {
@@ -462,6 +518,34 @@ export class ToolExecutor {
         sideEffects: [],
         duration_ms: 0,
       };
+    }
+
+    // Enforce the autonomy gate.
+    //
+    // isAutoApproved() existed but was never called from anywhere — grep found
+    // only its definition and a unit test. Every tool therefore ran regardless
+    // of the agent's declared autonomy level, and `protected_tools` in the
+    // config was inert. Worse, the audit row below hardcoded approval: approval ? "auto" : "unchecked",
+    // so the forensic trail asserted an approval decision that never happened.
+    if (approval) {
+      const allowed = this.isAutoApproved(
+        tool.name,
+        tool.category,
+        approval.autonomyLevel,
+        approval.protectedCheckpoints,
+      );
+      if (!allowed) {
+        return {
+          success: false,
+          data: null,
+          summary:
+            `Tool '${tool.name}' (category '${tool.category}') requires approval at `
+            + `autonomy level '${approval.autonomyLevel}'`,
+          sideEffects: [],
+          duration_ms: 0,
+          requiresApproval: true,
+        };
+      }
     }
 
     const start = Date.now();
@@ -508,7 +592,7 @@ export class ToolExecutor {
         result_summary: result.summary,
         side_effects: result.sideEffects,
         duration_ms: result.duration_ms || (Date.now() - start),
-        approval: "auto",
+        approval: approval ? "auto" : "unchecked",
         error,
       });
     } catch (logErr) {
@@ -867,12 +951,25 @@ export class ToolExecutor {
 
         try {
           // Use grep with -r, -n, -I (skip binaries), limited output
-          const result = execSync(
-            `grep -rnI --include='*.ts' --include='*.js' --include='*.json' --include='*.md' --include='*.toml' --include='*.yaml' --include='*.yml' --include='*.py' --include='*.sh' -- ${JSON.stringify(pattern)} ${JSON.stringify(searchPath)} | head -${limit}`,
+          // argv array, no shell. This used execSync with the pattern wrapped
+          // in JSON.stringify (double quotes), which sh still expands — a
+          // pattern of `$(id)` executed. grep is category `analyze`, which is
+          // auto-approved at every autonomy level, so this was RCE from an
+          // ostensibly read-only tool.
+          const includes = [
+            "*.ts", "*.js", "*.json", "*.md", "*.toml",
+            "*.yaml", "*.yml", "*.py", "*.sh",
+          ].map((g) => `--include=${g}`);
+          const gproc = spawnSync(
+            "grep",
+            ["-rnI", ...includes, "--", pattern, searchPath],
             { encoding: "utf-8", timeout: 15000, maxBuffer: 1024 * 1024 },
-          ).trim();
-
-          const lines = result ? result.split("\n") : [];
+          );
+          if (gproc.error) throw gproc.error;
+          const allOut = (gproc.stdout ?? "").trim();
+          // Replaces the `| head -N` pipe with an in-process slice.
+          const lines = allOut ? allOut.split("\n").slice(0, limit) : [];
+          const result = lines.join("\n");
           return {
             success: true,
             data: { pattern, path: searchPath, matchCount: lines.length },
@@ -949,11 +1046,26 @@ export class ToolExecutor {
           return { success: false, data: null, summary: `Path not allowed: ${repoPath}`, sideEffects: [], duration_ms: Date.now() - start };
         }
 
+        // Refs were interpolated into a shell string with no quoting, so
+        // `ref2 = "x; rm -rf ~"` executed. Validate, then pass as argv.
+        if (!isSafeGitRef(ref1) || !isSafeGitRef(ref2)) {
+          return {
+            success: false,
+            data: null,
+            summary: "Invalid git ref (no leading '-', '..', whitespace or shell metacharacters)",
+            sideEffects: [],
+            duration_ms: Date.now() - start,
+          };
+        }
+
         try {
-          const diff = execSync(
-            `git diff ${ref1}..${ref2} --stat`,
-            { cwd: repoPath, encoding: "utf-8", timeout: 5000 },
-          ).trim();
+          const dproc = spawnSync(
+            "git",
+            ["diff", `${ref1}..${ref2}`, "--stat"],
+            { cwd: repoPath, encoding: "utf-8", timeout: 5000, maxBuffer: 1024 * 1024 },
+          );
+          if (dproc.error) throw dproc.error;
+          const diff = (dproc.stdout ?? "").trim();
 
           return {
             success: true,
@@ -1115,7 +1227,13 @@ export class ToolExecutor {
         try {
           // Use termux-notification if available, otherwise log-only
           try {
-            execSync(`termux-notification --title ${JSON.stringify(title)} --content ${JSON.stringify(content)}`, { timeout: 3000 });
+            // argv form — JSON.stringify only double-quotes, which sh expands.
+            const nproc = spawnSync(
+              "termux-notification",
+              ["--title", title, "--content", content],
+              { timeout: 3000, stdio: "ignore" },
+            );
+            if (nproc.error) throw nproc.error;
           } catch {
             ctx.log.info(`[notify] ${title}: ${content}`);
           }

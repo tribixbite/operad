@@ -143,6 +143,23 @@ export class AgentEngine {
 
     if (urgentMessages.length > 0) {
       log.info(`OODA trigger: ${urgentMessages.length} unread messages older than 5min`);
+      // Mark them read BEFORE the cycle, not after.
+      //
+      // markMessagesRead had no production caller at all, so the inbox never
+      // drained: one message made the 60s cognitive timer fire a full paid SDK
+      // cycle forever. It self-fed too — getUnreadMessages matches to_agent
+      // '*', which the master controller's own broadcast blocks produce — and
+      // every unread message's full text is injected into the prompt, so the
+      // prompt grew without bound alongside the spend.
+      //
+      // Marking first (rather than in a finally) means a cycle that throws
+      // does not re-trigger on the same messages; they are still readable in
+      // the history, and a genuinely new message re-arms the trigger.
+      memoryDb.markMessagesRead(
+        urgentMessages
+          .map((m) => m.id as number)
+          .filter((id) => typeof id === "number"),
+      );
       await this.runOodaCycle();
       return;
     }
@@ -280,15 +297,32 @@ export class AgentEngine {
    * Called after parseOodaResponse() returns structured actions.
    * Moved here from Daemon so the OODA loop is fully self-contained in AgentEngine.
    */
-  async executeOodaActions(actions: OodaAction[]): Promise<void> {
+  /**
+   * Apply the actions parsed out of an agent response.
+   *
+   * `actingAgent` is the agent the actions belong to. It used to be hardcoded
+   * to "master-controller" throughout, which meant a scheduled run of any
+   * other agent had its tool calls, trust deltas, goals, decisions, messages,
+   * strategy changes and learnings all attributed to — and authorised as —
+   * master-controller. A read-only `optimizer` schedule could therefore run
+   * mutate tools, and a ```strategy``` block from any scheduled agent
+   * overwrote master-controller's active strategy.
+   */
+  async executeOodaActions(
+    actions: OodaAction[],
+    actingAgent = "master-controller",
+  ): Promise<void> {
     const { agentConfigs, config, log } = this.ctx;
     const memoryDb = this.ctx.getMemoryDb();
     if (!memoryDb) return;
 
     // Per-run tool call budget tracking
-    const masterAgent = agentConfigs.find((a) => a.name === "master-controller");
-    const maxToolCalls = masterAgent?.max_tool_calls_per_run ?? 20;
+    const actor = agentConfigs.find((a) => a.name === actingAgent);
+    const maxToolCalls = actor?.max_tool_calls_per_run ?? 20;
     let toolCallCount = 0;
+    // The gate that decides whether a tool runs unattended. Falls back to the
+    // most restrictive level when the agent has no explicit setting.
+    const actorAutonomy = actor?.autonomy_level ?? "observe";
 
     // Quota-level tool restriction: when critical/exceeded, block non-observe tools
     const quotaLevel = computeQuotaStatus(memoryDb, config.orchestrator).weekly_level;
@@ -302,13 +336,13 @@ export class AgentEngine {
               description: action.description,
               parentId: action.parentId,
               priority: action.priority,
-              agentName: "master-controller",
+              agentName: actingAgent,
             });
             log.info(`OODA: created goal "${action.title}"`);
             break;
 
           case "decision":
-            memoryDb.recordDecision("master-controller", action.action, action.rationale, {
+            memoryDb.recordDecision(actingAgent, action.action, action.rationale, {
               goalId: action.goalId,
               alternatives: action.alternatives ? [action.alternatives] : undefined,
               expectedOutcome: action.expectedOutcome,
@@ -317,12 +351,12 @@ export class AgentEngine {
             break;
 
           case "message": {
-            const msgId = memoryDb.sendAgentMessage("master-controller", action.to, action.content, {
+            const msgId = memoryDb.sendAgentMessage(actingAgent, action.to, action.content, {
               messageType: action.messageType,
             });
             // Broadcast to dashboard for real-time message viewer
             this.ctx.broadcast("agent_message", {
-              id: msgId, from_agent: "master-controller", to_agent: action.to,
+              id: msgId, from_agent: actingAgent, to_agent: action.to,
               message_type: action.messageType, content: action.content,
               created_at: Math.floor(Date.now() / 1000),
             });
@@ -331,19 +365,19 @@ export class AgentEngine {
           }
 
           case "strategy":
-            memoryDb.evolveStrategy("master-controller", action.text, action.rationale);
+            memoryDb.evolveStrategy(actingAgent, action.text, action.rationale);
             log.info(`OODA: evolved strategy`);
             break;
 
           case "learning":
-            memoryDb.addLearning("master-controller", action.category, action.content, {
+            memoryDb.addLearning(actingAgent, action.category, action.content, {
               confidence: action.confidence,
             });
             log.info(`OODA: learned [${action.category}] ${action.content.slice(0, 60)}`);
             break;
 
           case "personality":
-            memoryDb.setPersonalityTrait("master-controller", action.trait, action.value, action.evidence);
+            memoryDb.setPersonalityTrait(actingAgent, action.trait, action.value, action.evidence);
             log.info(`OODA: personality ${action.trait}=${action.value}`);
             break;
 
@@ -378,23 +412,26 @@ export class AgentEngine {
             }
             const toolEngine = this.ctx.getToolEngine();
             const toolCtx = toolEngine
-              ? toolEngine.buildToolContext("master-controller")
+              ? toolEngine.buildToolContext(actingAgent)
               : null;
             if (!toolCtx) break;
-            const result = await toolExecutor.execute(action.name, action.params, toolCtx);
+            const result = await toolExecutor.execute(action.name, action.params, toolCtx, undefined, {
+              autonomyLevel: actorAutonomy,
+              protectedCheckpoints: config.orchestrator.protected_checkpoints,
+            });
             toolCallCount++;
             log.info(`OODA: tool ${action.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
             // Trust calibration: success → +2, failure → -5
             memoryDb.recordTrustDelta(
-              "master-controller",
+              actingAgent,
               result.success ? 2 : -5,
               `tool ${action.name}: ${result.success ? "success" : "failed"}`,
             );
             // Track lease usage if applicable
-            memoryDb.incrementLeaseUsage("master-controller", action.name);
+            memoryDb.incrementLeaseUsage(actingAgent, action.name);
             // Broadcast tool result to dashboard
             this.ctx.broadcast("tool_result", {
-              agent: "master-controller", tool: action.name,
+              agent: actingAgent, tool: action.name,
               success: result.success, summary: result.summary,
               duration_ms: result.duration_ms,
             });
@@ -406,7 +443,7 @@ export class AgentEngine {
             if (!toolExecutor || !memoryDb) break;
             const toolEngine = this.ctx.getToolEngine();
             const toolCtx = toolEngine
-              ? toolEngine.buildToolContext("master-controller")
+              ? toolEngine.buildToolContext(actingAgent)
               : null;
             if (!toolCtx) break;
             log.info(`OODA: executing tool sequence (${action.steps.length} steps): ${action.reason}`);
@@ -424,16 +461,19 @@ export class AgentEngine {
                   continue; // skip this step but continue sequence
                 }
               }
-              const result = await toolExecutor.execute(step.name, step.params, toolCtx);
+              const result = await toolExecutor.execute(step.name, step.params, toolCtx, undefined, {
+                autonomyLevel: actorAutonomy,
+                protectedCheckpoints: config.orchestrator.protected_checkpoints,
+              });
               toolCallCount++;
               log.info(`OODA: seq step ${step.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}`);
               // Trust calibration for sequence steps
               memoryDb.recordTrustDelta(
-                "master-controller",
+                actingAgent,
                 result.success ? 2 : -5,
                 `seq ${step.name}: ${result.success ? "success" : "failed"}`,
               );
-              memoryDb.incrementLeaseUsage("master-controller", step.name);
+              memoryDb.incrementLeaseUsage(actingAgent, step.name);
               if (!result.success) {
                 log.warn(`OODA: tool sequence aborted at ${step.name}: ${result.summary}`);
                 break;
@@ -444,7 +484,7 @@ export class AgentEngine {
 
           case "persistent_schedule": {
             const id = this.ctx.upsertSchedule({
-              agentName: "master-controller",
+              agentName: actingAgent,
               scheduleName: action.name,
               cronExpr: action.cronExpr,
               intervalMinutes: action.intervalMinutes,
@@ -589,6 +629,13 @@ export class AgentEngine {
     if (!memoryDb || !responseText) return;
     const actions = parseOodaResponse(responseText);
     for (const action of actions) {
+      // Per-action isolation. This loop runs INSIDE the caller's try, after
+      // the run has already been recorded as successful, so a throw here used
+      // to be caught by the caller's `catch` and turned into
+      // completeAgentRun(runId, "failed", …) — erasing the output the user
+      // paid for. A malformed block from the model must not invalidate the
+      // run, and must not stop the remaining blocks from applying.
+      try {
       if (action.type === "learning") {
         memoryDb.addLearning(agentName, action.category, action.content, {
           confidence: action.confidence,
@@ -609,6 +656,12 @@ export class AgentEngine {
       } else if (action.type === "personality") {
         memoryDb.setPersonalityTrait(agentName, action.trait, action.value, action.evidence);
         log.info(`Agent ${agentName} personality: ${action.trait}=${action.value}`);
+      }
+      } catch (err) {
+        log.warn(
+          `Agent ${agentName}: skipping malformed '${action.type}' block — `
+          + `${(err as Error).message}`,
+        );
       }
     }
   }
@@ -1005,7 +1058,8 @@ export class AgentEngine {
       if (result.responseText) {
         const actions = parseOodaResponse(result.responseText);
         if (actions.length > 0) {
-          await this.executeOodaActions(actions);
+          // Attribute to the scheduled agent, not master-controller.
+          await this.executeOodaActions(actions, schedule.agent_name);
         }
         this.extractAgentActions(schedule.agent_name, result.responseText);
       }

@@ -119,6 +119,7 @@ export class IpcHandler {
       case "skill.list":
       case "skill.info":
       case "skill.events":
+      case "skill.search":
         return this.handleSkillCommand(cmd);
 
       case "tool.autonomy.list":
@@ -178,6 +179,15 @@ export class IpcHandler {
           ok: true,
           data: mgr.list(cmd.provider as import("./skills/types.js").Provider | undefined),
         };
+      }
+      if (cmd.cmd === "skill.search") {
+        const r = await mgr.search({
+          query: cmd.query,
+          provider: cmd.provider as import("./skills/types.js").Provider | undefined,
+          limit: cmd.limit,
+          cursor: cmd.cursor,
+        });
+        return { ok: true, data: r };
       }
       if (cmd.cmd === "skill.info") {
         const s = mgr.get(cmd.id);

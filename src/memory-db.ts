@@ -722,6 +722,18 @@ function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
+/**
+ * Clamp to 0..1, mapping non-finite input to 0.
+ *
+ * `Math.max(0, Math.min(1, NaN))` is NaN — the clamp did not clamp. A
+ * ```personality``` block with a non-numeric value (`value: high`) produced
+ * NaN and hit `NOT NULL constraint failed: agent_personality.trait_value`,
+ * which propagated out and failed the whole agent run.
+ */
+function clamp01(v: number): number {
+  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+}
+
 export class MemoryDb {
   private db: DbHandle | null = null;
   private dbPath: string;
@@ -1163,17 +1175,35 @@ export class MemoryDb {
     },
   ): void {
     const db = this.requireDb();
+    // COALESCE on the value-bearing columns: a later call must never blank
+    // what an earlier one recorded.
+    //
+    // These were plain `= ?` with `?? null` / `?? 0` defaults, so a failure
+    // AFTER a successful run destroyed that run's output. The real sequence:
+    // the success path writes response_text/cost, then post-processing (e.g.
+    // parsing a ```personality``` block with a non-numeric value) throws, and
+    // the catch calls completeAgentRun(runId, "failed", { error }) — which
+    // overwrote response_text and thinking_text with NULL and cost/tokens with
+    // 0. The user paid for output that was then erased.
+    //
+    // Passing an explicit empty string still clears a field; only `undefined`
+    // (absent) preserves the prior value.
     db.prepare(
       `UPDATE agent_runs SET
-        status = ?, finished_at = unixepoch(), session_id = ?,
-        cost_usd = ?, input_tokens = ?, output_tokens = ?,
-        turns = ?, error = ?,
-        response_text = ?, thinking_text = ?
+        status = ?, finished_at = unixepoch(),
+        session_id     = COALESCE(?, session_id),
+        cost_usd       = COALESCE(?, cost_usd),
+        input_tokens   = COALESCE(?, input_tokens),
+        output_tokens  = COALESCE(?, output_tokens),
+        turns          = COALESCE(?, turns),
+        error          = COALESCE(?, error),
+        response_text  = COALESCE(?, response_text),
+        thinking_text  = COALESCE(?, thinking_text)
       WHERE id = ?`,
     ).run(
       status, result.sessionId ?? null,
-      result.costUsd ?? 0, result.inputTokens ?? 0, result.outputTokens ?? 0,
-      result.turns ?? 0, result.error ?? null,
+      result.costUsd ?? null, result.inputTokens ?? null, result.outputTokens ?? null,
+      result.turns ?? null, result.error ?? null,
       result.responseText ?? null, result.thinkingText ?? null,
       runId,
     );
@@ -1713,7 +1743,7 @@ export class MemoryDb {
     agentName: string, domain: string, confidence: number, evidence?: string,
   ): number {
     const db = this.requireDb();
-    const clamped = Math.max(0, Math.min(1, confidence));
+    const clamped = clamp01(confidence);
 
     const existing = db.prepare(
       `SELECT id, confidence, reinforcement_count FROM agent_specializations WHERE agent_name = ? AND domain = ?`,
@@ -1788,7 +1818,7 @@ export class MemoryDb {
   /** Set or update a personality trait. Creates new version for history tracking. */
   setPersonalityTrait(agentName: string, traitName: string, value: number, evidence?: string): number {
     const db = this.requireDb();
-    const clampedValue = Math.max(0, Math.min(1, value));
+    const clampedValue = clamp01(value);
 
     // Get current version for this trait
     const current = db.prepare(

@@ -12,11 +12,11 @@
  * - Future tool-lifecycle hooks (e.g. lease expiry, audit flushing) belong here.
  */
 
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { ToolContext } from "./tools.js";
-import { sendKeys } from "./session.js";
+import { sendKeys, formatTmuxTarget } from "./session.js";
 
 export class ToolEngine {
   constructor(private ctx: OrchestratorContext) {}
@@ -54,10 +54,22 @@ export class ToolEngine {
           : null,
       captureSessionOutput: (name: string, lines: number) => {
         try {
-          const output = execSync(
-            `tmux capture-pane -t ${JSON.stringify(name)} -p -S -${lines}`,
-            { encoding: "utf-8", timeout: 3000 },
-          ).trim();
+          // argv array, no shell. JSON.stringify only double-quotes the
+          // session name, and sh expands `$(…)` inside double quotes — a name
+          // of `$(id > /tmp/pwn)nosuch` executed the payload and then reported
+          // failure, so the injection was invisible in the tool output. This
+          // is reachable from the `session-output` tool, category `observe`,
+          // which is auto-approved at every autonomy level.
+          const safeLines = Number.isFinite(lines)
+            ? Math.max(1, Math.min(10_000, Math.floor(lines)))
+            : 100;
+          const proc = spawnSync(
+            "tmux",
+            ["capture-pane", "-t", formatTmuxTarget(name, true), "-p", "-S", `-${safeLines}`],
+            { encoding: "utf-8", timeout: 3000, maxBuffer: 4 * 1024 * 1024 },
+          );
+          if (proc.error || proc.status !== 0) return null;
+          const output = (proc.stdout ?? "").trim();
           return output || null;
         } catch { return null; }
       },

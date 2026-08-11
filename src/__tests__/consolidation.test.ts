@@ -263,8 +263,15 @@ describe("runConsolidation — decay phase", () => {
 
   test("decay floors at 0.1 — confidence at 0.1 is not reduced further", () => {
     const id = db.addLearning("agent-a", "insight", "floored knowledge", { confidence: 0.1 });
+    // reinforcement_count > 1 keeps the prune phase from removing this row.
+    // Pruning previously never matched anything (its predicate required
+    // reinforcement_count = 0, but the column defaults to 1), so this test did
+    // not have to account for it; now that pruning works, the fixture has to
+    // be explicit about which phase it is exercising.
     db.requireDb().prepare(
-      `UPDATE agent_learnings SET last_reinforced_at = ?, confidence = 0.1 WHERE id = ?`,
+      `UPDATE agent_learnings
+         SET last_reinforced_at = ?, confidence = 0.1, reinforcement_count = 5
+       WHERE id = ?`,
     ).run(epoch(-60 * 86400), id);
 
     // decayLearnings guards with `confidence > 0.1` so a row at exactly 0.1 isn't touched
@@ -374,11 +381,14 @@ describe("runConsolidation — merge phase", () => {
     // The merge key is: category + first 8 chars of content_hash.
     // Insert two rows with the same category + same first 8 chars of hash,
     // different confidence so merge has a clear winner.
+    // Contents must be genuinely near-identical: a shared 8-char prefix is
+    // only 32 bits, so merging on the prefix alone destroyed unrelated
+    // learnings. The merge now normalises and compares the bodies.
     const sharedHashPrefix = "aabbccdd";
     db.requireDb().prepare(
       `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, reinforcement_count)
-       VALUES ('agent-a', 'insight', 'weaker version', '${sharedHashPrefix}11111111', 0.4, 1),
-              ('agent-a', 'insight', 'stronger version', '${sharedHashPrefix}22222222', 0.7, 1)`,
+       VALUES ('agent-a', 'insight', 'the build is flaky', '${sharedHashPrefix}11111111', 0.4, 1),
+              ('agent-a', 'insight', 'The build is flaky!', '${sharedHashPrefix}22222222', 0.7, 1)`,
     ).run();
 
     const result = runConsolidation(db, ["agent-a"], silentLog());
@@ -392,7 +402,7 @@ describe("runConsolidation — merge phase", () => {
 
     // The surviving row should be the higher-confidence one
     const learnings = db.getAgentLearnings("agent-a");
-    expect(learnings[0].content).toBe("stronger version");
+    expect(learnings[0].content).toBe("The build is flaky!");
   });
 
   test("learnings with different category are NOT merged even if hash prefix matches", () => {
@@ -417,9 +427,11 @@ describe("runConsolidation — merge phase", () => {
     const sharedHashPrefix = "cafebabe";
     // Insert weaker (0.3) and stronger (0.8) — stronger should survive and be boosted
     db.requireDb().prepare(
+      // Same fact, different phrasing — the merge requires the bodies to be
+      // near-identical after normalisation, not merely hash-prefix siblings.
       `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, reinforcement_count)
-       VALUES ('agent-a', 'insight', 'weaker', '${sharedHashPrefix}11', 0.3, 1),
-              ('agent-a', 'insight', 'stronger', '${sharedHashPrefix}22', 0.8, 2)`,
+       VALUES ('agent-a', 'insight', 'retries are needed', '${sharedHashPrefix}11', 0.3, 1),
+              ('agent-a', 'insight', 'Retries are needed.', '${sharedHashPrefix}22', 0.8, 2)`,
     ).run();
 
     runConsolidation(db, ["agent-a"], silentLog());
@@ -433,6 +445,45 @@ describe("runConsolidation — merge phase", () => {
     // where existing = weaker(count=1), c = stronger(count=2)
     // → stronger's new count = 2 + (1+1) = 4
     expect(surviving!.reinforcement_count).toBeGreaterThan(2);
+  });
+
+
+  test("hash-prefix collision with UNRELATED content does NOT merge", () => {
+    // The merge key is only 32 bits of hash. Because addLearning already
+    // dedupes on the full hash, a prefix match between two surviving rows is a
+    // birthday collision between unrelated facts — merging deleted one of them
+    // permanently. Both must survive.
+    const prefix = "f00dface";
+    db.requireDb().prepare(
+      `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, reinforcement_count)
+       VALUES ('agent-a', 'insight', 'the database uses WAL mode', '${prefix}11111111', 0.9, 4),
+              ('agent-a', 'insight', 'the deploy runs on Tuesdays', '${prefix}22222222', 0.4, 7)`,
+    ).run();
+
+    const result = runConsolidation(db, ["agent-a"], silentLog());
+    expect(result.learnings_merged).toBe(0);
+    const remaining = (db.requireDb().prepare(
+      `SELECT COUNT(*) as c FROM agent_learnings WHERE agent_name = 'agent-a'`,
+    ).get() as { c: number }).c;
+    expect(remaining).toBe(2);
+  });
+
+  test("a NULL content_hash row is skipped instead of crashing", () => {
+    // content_hash is nullable; `.slice()` on NULL threw out of the
+    // consolidation tick and killed the daemon.
+    db.requireDb().prepare(
+      `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, reinforcement_count)
+       VALUES ('agent-a', 'insight', 'no hash here', NULL, 0.5, 3)`,
+    ).run();
+    expect(() => runConsolidation(db, ["agent-a"], silentLog())).not.toThrow();
+  });
+
+  test("a low-confidence learning created via addLearning is now prunable", () => {
+    // The prune predicate required reinforcement_count = 0, but addLearning
+    // inserts 1, so pruning never removed anything.
+    db.addLearning("agent-a", "insight", "barely believed", { confidence: 0.05 });
+    const result = runConsolidation(db, ["agent-a"], silentLog());
+    expect(result.learnings_pruned).toBeGreaterThan(0);
   });
 
   test("single learning per category/prefix: no merge, count=0", () => {

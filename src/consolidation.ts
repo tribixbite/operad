@@ -297,12 +297,21 @@ export function getConsolidationHistory(db: MemoryDb, limit = 10): Consolidation
 
 // -- Internal helpers ---------------------------------------------------------
 
-/** Prune learnings below confidence threshold with zero reinforcement */
+/**
+ * Prune learnings below the confidence threshold that have never been
+ * reinforced beyond their initial insert.
+ *
+ * The predicate was `reinforcement_count = 0`, but the column is
+ * `INTEGER DEFAULT 1` and addLearning never sets it to 0 — so the DELETE
+ * matched nothing, ever. Pruning was dead, `learnings_pruned` was always 0,
+ * agent_learnings grew without bound, and mergeSimilarLearnings' full-table
+ * scan degraded along with it. `<= 1` is the real "never reinforced" test.
+ */
 function pruneLowConfidenceLearnings(db: MemoryDb, agentName: string, threshold: number): number {
   const dbHandle = db.requireDb();
   return dbHandle.prepare(
     `DELETE FROM agent_learnings
-     WHERE agent_name = ? AND confidence < ? AND reinforcement_count = 0`,
+     WHERE agent_name = ? AND confidence < ? AND reinforcement_count <= 1`,
   ).run(agentName, threshold).changes;
 }
 
@@ -324,14 +333,27 @@ function mergeSimilarLearnings(db: MemoryDb, agentName: string): number {
   }>;
 
   let merged = 0;
-  const seen = new Map<string, { id: number; confidence: number; reinforcement_count: number }>();
+  const seen = new Map<string, { id: number; confidence: number; reinforcement_count: number; content: string }>();
 
   for (const c of candidates) {
+    // content_hash is nullable in the schema. A NULL row threw
+    // "null is not an object (evaluating 'c.content_hash.slice')", which
+    // escaped runConsolidation into the unguarded 60s interval and killed the
+    // daemon. Such rows simply cannot be merged, so skip them.
+    if (typeof c.content_hash !== "string" || c.content_hash.length === 0) continue;
     // Group key: category + first 8 chars of hash
     const key = `${c.category}:${c.content_hash.slice(0, 8)}`;
     const existing = seen.get(key);
 
     if (existing) {
+      // A shared 8-char prefix is only 32 bits. Because addLearning already
+      // dedupes on the FULL hash, a prefix match between two surviving rows is
+      // a birthday collision between semantically unrelated facts — and the
+      // loser was DELETEd with no backup. Confirm the contents really are
+      // near-identical before destroying either one.
+      if (!contentsAreSimilar(c.content, existing.content)) {
+        continue;
+      }
       // Merge: keep the one with higher confidence, delete the other
       if (c.confidence > existing.confidence) {
         // New one is better — delete old, update map
@@ -340,7 +362,7 @@ function mergeSimilarLearnings(db: MemoryDb, agentName: string): number {
         dbHandle.prepare(
           `UPDATE agent_learnings SET reinforcement_count = reinforcement_count + ? WHERE id = ?`,
         ).run(existing.reinforcement_count + 1, c.id);
-        seen.set(key, { id: c.id, confidence: c.confidence, reinforcement_count: c.reinforcement_count });
+        seen.set(key, { id: c.id, confidence: c.confidence, reinforcement_count: c.reinforcement_count + existing.reinforcement_count + 1, content: c.content });
       } else {
         // Existing is better — delete new
         dbHandle.prepare(`DELETE FROM agent_learnings WHERE id = ?`).run(c.id);
@@ -350,11 +372,28 @@ function mergeSimilarLearnings(db: MemoryDb, agentName: string): number {
       }
       merged++;
     } else {
-      seen.set(key, { id: c.id, confidence: c.confidence, reinforcement_count: c.reinforcement_count });
+      seen.set(key, { id: c.id, confidence: c.confidence, reinforcement_count: c.reinforcement_count, content: c.content });
     }
   }
 
   return merged;
+}
+
+/**
+ * Are two learning bodies near-identical?
+ *
+ * Normalises case, punctuation and whitespace, then requires exact equality.
+ * This is deliberately conservative: merging deletes a row permanently, so a
+ * false negative (two similar learnings both kept) is cheap while a false
+ * positive destroys a memory the user may never recover.
+ */
+export function contentsAreSimilar(a: string, b: string): boolean {
+  const norm = (v: string) =>
+    v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return false;
+  return na === nb;
 }
 
 /** Log a consolidation run to the database */
