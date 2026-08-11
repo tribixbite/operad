@@ -117,6 +117,9 @@ async function main(): Promise<void> {
     case "init":
       return runInit();
 
+    case "token":
+      return runToken();
+
     case "doctor":
       return runDoctor();
 
@@ -542,6 +545,43 @@ dashboard_port = 18970
 }
 
 /**
+ * Print the dashboard URL including its access token.
+ *
+ * The dashboard API can start and kill processes and install skills, so it is
+ * token-gated. Opening this URL once exchanges the token for a SameSite=Strict
+ * cookie; after that the browser is authenticated and the token no longer
+ * appears in the address bar.
+ */
+async function runToken(): Promise<void> {
+  const { loadOrCreateToken } = await import("./auth.js");
+  const { dirname: pathDirname } = await import("node:path");
+
+  let stateFile: string;
+  let port = 18970;
+  try {
+    const config = loadConfig(getConfigFlag());
+    stateFile = config.orchestrator.state_file;
+    port = config.orchestrator.dashboard_port;
+  } catch {
+    const plat = detectPlatform();
+    stateFile = plat.defaultStatePath();
+  }
+
+  const token = loadOrCreateToken(pathDirname(stateFile));
+  const url = `http://localhost:${port}/?token=${token}`;
+
+  if (subArgs.includes("--raw")) {
+    console.log(token);
+    return;
+  }
+  console.log(`\n${BOLD}Dashboard URL${RESET} (opens and authenticates in one step):\n`);
+  console.log(`  ${CYAN}${url}${RESET}\n`);
+  console.log(`${DIM}Token only:  ${token}${RESET}`);
+  console.log(`${DIM}Header form: Authorization: Bearer ${token}${RESET}`);
+  console.log(`${DIM}Script use:  operad token --raw${RESET}\n`);
+}
+
+/**
  * Install tmux via the platform's package manager. Prompts on TTY.
  */
 async function runInstallTmux(): Promise<void> {
@@ -706,13 +746,16 @@ ${BOLD}SUB-COMMANDS${RESET}
                                  flags: ${DIM}--force-take-ownership${RESET}  ${DIM}--accept-cap-downgrade${RESET}
   ${CYAN}remove <id>${RESET}                      uninstall by skill id
                                  flags: ${DIM}--force-revoke${RESET}
+  ${CYAN}search <query>${RESET}                   discover installable skills across providers
+                                 flags: ${DIM}--provider=<p>${RESET}  ${DIM}--limit=<n>${RESET}
   ${CYAN}list [--provider=<p>]${RESET}            list installed skills
   ${CYAN}info <id>${RESET}                        show full manifest for a skill
   ${CYAN}events [--limit=<n>]${RESET}             recent install/update/uninstall events (default 30)
 
 ${BOLD}NOTES${RESET}
-  Requires the daemon to be started with --enable-skills-preview.
+  Enabled by default; set [skills] enabled = false in operad.toml to disable.
   Providers: git+url, claude-marketplace, mcp-official, operad-curated.
+  Only mcp-official and operad-curated support search — the others have no index.
   See docs/skills.md for the failure-mode + trust-tier matrix.
 `);
     return;
@@ -806,6 +849,46 @@ ${BOLD}NOTES${RESET}
       process.exit(1);
     }
     console.log(JSON.stringify(resp.data, null, 2));
+    return;
+  }
+
+  if (sub === "search" || sub === "find") {
+    // `operad skill search <query> [--provider=<id>] [--limit=N]`
+    const query = subArgs.slice(1).find((a) => !a.startsWith("--"));
+    const provArg = subArgs.find((a) => a.startsWith("--provider="));
+    const limitArg = subArgs.find((a) => a.startsWith("--limit="));
+    const resp = await client.send({
+      cmd: "skill.search",
+      query,
+      provider: provArg ? provArg.slice("--provider=".length) : undefined,
+      limit: limitArg ? parseInt(limitArg.slice("--limit=".length), 10) : 25,
+    }, 60_000);
+    if (!resp.ok) {
+      console.error(`${RED}${resp.error}${RESET}`);
+      process.exit(1);
+    }
+    const r = resp.data as {
+      items: Array<{
+        provider: string; locator: string; name: string; description?: string;
+        latest_version?: string; trust_tier: string; installed: boolean;
+      }>;
+      errors: Array<{ provider: string; error: string }>;
+    };
+    for (const e of r.errors ?? []) {
+      console.error(`${YELLOW}${e.provider}: ${e.error}${RESET}`);
+    }
+    if (!r.items || r.items.length === 0) {
+      console.log(`${DIM}(no matches)${RESET}`);
+      return;
+    }
+    for (const it of r.items) {
+      const mark = it.installed ? `${GREEN}✓${RESET} ` : "  ";
+      const ver = it.latest_version ? ` ${DIM}${it.latest_version}${RESET}` : "";
+      console.log(`${mark}${BOLD}${it.name}${RESET}${ver}  ${DIM}[${it.trust_tier}]${RESET}`);
+      console.log(`    ${CYAN}${it.provider}${RESET}  ${it.locator}`);
+      if (it.description) console.log(`    ${DIM}${it.description}${RESET}`);
+    }
+    console.log(`\n${DIM}Install with:${RESET} operad skill add <locator>`);
     return;
   }
 
@@ -1645,6 +1728,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}upgrade${RESET}               Rebuild, shutdown daemon, let watchdog auto-restart
   ${CYAN}doctor${RESET}                Diagnose install issues and report fix steps
   ${CYAN}init${RESET}                  Generate a minimal config at ~/.config/operad/operad.toml
+  ${CYAN}token${RESET}                 Print the dashboard URL + access token (--raw for token only)
   ${CYAN}install-tmux${RESET}          Install tmux via the platform's package manager (prompts on TTY)
   ${CYAN}watch${RESET}                 Live-update session status in the terminal (Ctrl+C to exit)
   ${CYAN}switchboard reset${RESET}     Reset cognitive/OODA/mindMeld to opt-in defaults

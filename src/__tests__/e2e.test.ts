@@ -75,11 +75,28 @@ enabled = true
 `;
 }
 
+/**
+ * The dashboard API is token-gated. Pinning a known token through the
+ * documented OPERAD_DASHBOARD_TOKEN override keeps the suite deterministic and
+ * exercises that override at the same time.
+ */
+const TEST_TOKEN = "e2e-fixed-token-for-tests-0123456789abcdef";
+
+/** fetch() against the test daemon with the bearer token attached. */
+function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(`http://localhost:${TEST_PORT}${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), Authorization: `Bearer ${TEST_TOKEN}` },
+  });
+}
+
 async function waitForPort(port: number, timeoutMs = 20000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://localhost:${port}/api/status`);
+      const res = await fetch(`http://localhost:${port}/api/status`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
       if (res.ok) return true;
     } catch { /* not ready yet */ }
     await new Promise(r => setTimeout(r, 200));
@@ -95,7 +112,7 @@ beforeAll(async () => {
   writeFileSync(CONFIG_PATH, makeTestConfig(), "utf8");
 
   daemonProcess = spawn("node", [DAEMON_BIN, "daemon", "--config", CONFIG_PATH], {
-    env: { ...process.env, HOME: TEST_HOME },
+    env: { ...process.env, HOME: TEST_HOME, OPERAD_DASHBOARD_TOKEN: TEST_TOKEN },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -132,7 +149,7 @@ afterAll(async () => {
 
 describe.skipIf(skipReason !== null)("E2E — REST API", () => {
   test("GET /api/status returns daemon state including session list", async () => {
-    const res = await fetch(`http://localhost:${TEST_PORT}/api/status`);
+    const res = await authFetch(`/api/status`);
     expect(res.ok).toBe(true);
     const body = await res.json() as { daemon_start?: string; sessions?: unknown };
     expect(typeof body.daemon_start).toBe("string");
@@ -140,24 +157,58 @@ describe.skipIf(skipReason !== null)("E2E — REST API", () => {
     expect(body.sessions).toBeDefined();
   });
 
+  // The API gates every route; the SPA itself stays open so the browser can
+  // load it and complete the ?token= handshake.
+  test("unauthenticated API access is refused", async () => {
+    const res = await fetch(`http://localhost:${TEST_PORT}/api/status`);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toContain("Bearer");
+  });
+
+  test("a wrong token is refused", async () => {
+    const res = await fetch(`http://localhost:${TEST_PORT}/api/status`, {
+      headers: { Authorization: "Bearer not-the-token" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("the ?token= query form authenticates", async () => {
+    const res = await fetch(
+      `http://localhost:${TEST_PORT}/api/status?token=${TEST_TOKEN}`,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  test("no wildcard CORS origin is emitted", async () => {
+    const res = await authFetch("/api/status", {
+      headers: { Origin: "https://evil.example" },
+    });
+    expect(res.headers.get("access-control-allow-origin")).not.toBe("*");
+  });
+
+  test("the static SPA loads without a token (bootstrap path)", async () => {
+    const res = await fetch(`http://localhost:${TEST_PORT}/`);
+    expect(res.status).toBe(200);
+  });
+
   test("GET /api/memory returns memory snapshot", async () => {
-    const res = await fetch(`http://localhost:${TEST_PORT}/api/memory`);
+    const res = await authFetch(`/api/memory`);
     expect(res.ok).toBe(true);
   });
 
   test("GET /api/health returns health sweep result", async () => {
-    const res = await fetch(`http://localhost:${TEST_PORT}/api/health`);
+    const res = await authFetch(`/api/health`);
     expect(res.ok).toBe(true);
   });
 
   test("GET /api/quota returns <500 OR 503 (when no SQLite driver)", async () => {
-    const res = await fetch(`http://localhost:${TEST_PORT}/api/quota`);
+    const res = await authFetch(`/api/quota`);
     // 200 when memoryDb is available; 503 when bun:sqlite/better-sqlite3 missing
     expect([200, 503]).toContain(res.status);
   });
 
   test("GET /api/telemetry returns <500", async () => {
-    const res = await fetch(`http://localhost:${TEST_PORT}/api/telemetry`);
+    const res = await authFetch(`/api/telemetry`);
     expect(res.status).toBeLessThan(500);
   });
 });
@@ -166,7 +217,7 @@ describe.skipIf(skipReason !== null)("E2E — Dashboard pages", () => {
   const pages = ["/", "/memory", "/logs", "/telemetry", "/settings", "/help"];
   for (const page of pages) {
     test(`GET ${page} returns <400`, async () => {
-      const res = await fetch(`http://localhost:${TEST_PORT}${page}`);
+      const res = await authFetch(`${page}`);
       expect(res.status).toBeLessThan(400);
     });
   }
@@ -177,7 +228,7 @@ describe.skipIf(skipReason !== null)("E2E — SSE", () => {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 3000);
     try {
-      const res = await fetch(`http://localhost:${TEST_PORT}/api/events`, { signal: ctrl.signal });
+      const res = await authFetch(`/api/events`, { signal: ctrl.signal });
       expect(res.ok).toBe(true);
       expect(res.headers.get("content-type")).toContain("text/event-stream");
     } catch (err: any) {

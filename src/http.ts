@@ -10,6 +10,12 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, extname, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Logger } from "./log.js";
+import {
+  AUTH_QUERY_PARAM,
+  buildAuthCookie,
+  presentedToken,
+  tokensMatch,
+} from "./auth.js";
 
 /** MIME types for static file serving */
 const MIME_TYPES: Record<string, string> = {
@@ -81,11 +87,39 @@ export class DashboardServer {
   /** Ping interval for WS keepalive */
   private wsPingInterval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(port: number, staticDir: string, apiHandler: ApiHandler, log: Logger) {
+  /** Shared secret required for every /api request. */
+  private authToken: string;
+  /** Interface to bind. Defaults to loopback. */
+  private bindAddress: string;
+  /** Extra origins allowed to make cross-origin API calls. */
+  private allowedOrigins: Set<string>;
+
+  constructor(
+    port: number,
+    staticDir: string,
+    apiHandler: ApiHandler,
+    log: Logger,
+    opts: {
+      authToken: string;
+      bindAddress?: string;
+      allowedOrigins?: string[];
+    },
+  ) {
     this.port = port;
     this.log = log;
     this.staticDir = staticDir;
     this.apiHandler = apiHandler;
+    this.authToken = opts.authToken;
+    // Loopback by default. The server exposes process control and a skill
+    // installer; binding it to every interface should be a deliberate act,
+    // not the out-of-the-box behaviour.
+    this.bindAddress = opts.bindAddress ?? "127.0.0.1";
+    this.allowedOrigins = new Set(opts.allowedOrigins ?? []);
+  }
+
+  /** The URL a user should open, including the bootstrap token. */
+  dashboardUrl(host = "localhost"): string {
+    return `http://${host}:${this.port}/?${AUTH_QUERY_PARAM}=${this.authToken}`;
   }
 
   /** Set handler for incoming WS messages */
@@ -124,6 +158,21 @@ export class DashboardServer {
 
       this.server.on("upgrade", (req, socket, head) => {
         const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+        // The WebSocket carries the same command surface as the REST API, so
+        // it needs the same gate. Upgrades bypass handleRequest entirely, so
+        // without this check the socket was an unauthenticated side door.
+        if (!this.isAuthorized(req, url)) {
+          // end() flushes before closing; destroy() alone can discard the
+          // buffered response and the client just sees an empty reply.
+          socket.end(
+            "HTTP/1.1 401 Unauthorized\r\n"
+            + "Connection: close\r\n"
+            + "Content-Length: 0\r\n"
+            + 'WWW-Authenticate: Bearer realm="operad"\r\n'
+            + "\r\n",
+          );
+          return;
+        }
         if (url.pathname === "/ws" && this.wss) {
           this.wss.handleUpgrade(req, socket, head, (ws) => {
             this.wss!.emit("connection", ws, req);
@@ -151,8 +200,15 @@ export class DashboardServer {
         reject(err);
       });
 
-      this.server.listen(this.port, "0.0.0.0", () => {
-        this.log.info(`Dashboard server listening on http://0.0.0.0:${this.port}`);
+      this.server.listen(this.port, this.bindAddress, () => {
+        this.log.info(`Dashboard server listening on http://${this.bindAddress}:${this.port}`);
+        this.log.info(`Open: ${this.dashboardUrl()}`);
+        if (this.bindAddress !== "127.0.0.1" && this.bindAddress !== "localhost") {
+          this.log.warn(
+            `Dashboard is bound to ${this.bindAddress} — reachable from the network. `
+            + `Access requires the token; keep it secret.`,
+          );
+        }
         resolve();
       });
     });
@@ -326,10 +382,18 @@ export class DashboardServer {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const path = url.pathname;
 
-    // CORS headers for local development
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    // CORS. The wildcard that used to be here let any web page the user
+    // visited read every API response and fire simple requests at the daemon.
+    // Same-origin needs no CORS header at all, so one is emitted only for
+    // origins the operator explicitly allow-listed.
+    const origin = req.headers.origin;
+    if (origin && this.allowedOrigins.has(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    }
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -338,6 +402,42 @@ export class DashboardServer {
     }
 
     try {
+      // Token handshake: `/?token=…` exchanges the token for a SameSite=Strict
+      // cookie and redirects to a clean URL, so the secret does not linger in
+      // the address bar, browser history, or a Referer header.
+      const queryToken = url.searchParams.get(AUTH_QUERY_PARAM);
+      if (queryToken && !path.startsWith("/api/")) {
+        if (tokensMatch(queryToken, this.authToken)) {
+          const clean = new URL(url.toString());
+          clean.searchParams.delete(AUTH_QUERY_PARAM);
+          res.writeHead(302, {
+            "Set-Cookie": buildAuthCookie(this.authToken, false),
+            Location: clean.pathname + (clean.search || ""),
+          });
+          res.end();
+          return;
+        }
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Invalid token");
+        return;
+      }
+
+      if (path.startsWith("/api/")) {
+        if (!this.isAuthorized(req, url)) {
+          res.writeHead(401, {
+            "Content-Type": "application/json",
+            // Signals a token is expected without prompting a browser
+            // basic-auth dialog.
+            "WWW-Authenticate": 'Bearer realm="operad"',
+          });
+          res.end(JSON.stringify({
+            error: "Unauthorized — supply the dashboard token",
+            hint: "Open the URL printed at daemon startup, or send Authorization: Bearer <token>. Print it with: operad token",
+          }));
+          return;
+        }
+      }
+
       // SSE endpoint
       if (path === "/api/events") {
         this.handleSse(req, res);
@@ -351,13 +451,31 @@ export class DashboardServer {
         return;
       }
 
-      // Static files
+      // Static files. Deliberately unauthenticated: the SPA bundle is public
+      // code, and requiring auth here would break the token handshake above
+      // (the browser has to load the page before it can present anything).
+      // Every route that exposes data or performs an action lives under /api.
       this.handleStatic(res, path);
     } catch (err) {
       this.log.error(`HTTP error: ${err}`);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Internal server error" }));
     }
+  }
+
+  /**
+   * Is this request allowed to touch /api?
+   *
+   * Accepts `Authorization: Bearer`, a `token` query parameter (EventSource
+   * and browser WebSocket cannot set headers), or the session cookie.
+   */
+  private isAuthorized(req: http.IncomingMessage, url: URL): boolean {
+    const presented = presentedToken(
+      req.headers.authorization,
+      url.searchParams.get(AUTH_QUERY_PARAM),
+      req.headers.cookie,
+    );
+    return tokensMatch(presented, this.authToken);
   }
 
   /** Handle SSE connection */
@@ -378,7 +496,6 @@ export class DashboardServer {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
     });
 
     const clientId = ++this.sseIdCounter;

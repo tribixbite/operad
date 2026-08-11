@@ -1,13 +1,8 @@
 <script lang="ts">
   import { addMcpServer, updateMcpServer, deleteMcpServer, toggleMcpServer, fetchCustomization } from "$lib/api";
+  import { shortenHomePath as shortenPath } from "$lib/env.svelte";
   import type { McpServerInfo, CustomizationResponse } from "$lib/types";
 
-  const HOME_PREFIX = "/data/data/com.termux/files/home/";
-
-  function shortenPath(p: string): string {
-    if (p.startsWith(HOME_PREFIX)) return "~/" + p.slice(HOME_PREFIX.length);
-    return p;
-  }
 
   interface Props {
     servers: McpServerInfo[];

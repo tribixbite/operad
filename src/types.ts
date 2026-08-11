@@ -227,6 +227,17 @@ export interface OrchestratorConfig {
   wake_lock_policy: WakeLockPolicy;
   /** HTTP dashboard port (0 = disabled) */
   dashboard_port: number;
+  /**
+   * Interface the dashboard binds to. Defaults to 127.0.0.1 — the API can
+   * start/kill processes and install skills, so exposing it to the network is
+   * opt-in. Set "0.0.0.0" to reach it from other devices (still token-gated).
+   */
+  bind: string;
+  /**
+   * Extra browser origins permitted to make cross-origin API calls. Empty by
+   * default; the dashboard itself is same-origin and needs no entry here.
+   */
+  allowed_origins: string[];
   /** MemAvailable threshold for warning pressure (MB) */
   memory_warning_mb: number;
   /** MemAvailable threshold for critical pressure (MB) */
@@ -470,6 +481,7 @@ export type IpcCommand =
   | { cmd: "skill.list"; provider?: string }
   | { cmd: "skill.info"; id: string }
   | { cmd: "skill.events"; limit?: number }
+  | { cmd: "skill.search"; query?: string; provider?: string; limit?: number; cursor?: string }
   | { cmd: "tool.autonomy.list" }
   | { cmd: "tool.autonomy.set"; tool_id: string; bucket: string };
 

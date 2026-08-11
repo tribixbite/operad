@@ -18,7 +18,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { openSync, closeSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { AgentEngine } from "./agent-engine.js";
@@ -158,6 +158,19 @@ export class RestHandler {
         case "status":
           resp = this.ctx.cmdStatus(name);
           break;
+        case "env":
+          // Host facts the dashboard needs for display only. The home
+          // directory is here because several panels shorten absolute paths
+          // to `~/…`; they used to hardcode the Termux home, so on Linux,
+          // WSL, macOS and Windows every path rendered in full.
+          return {
+            status: 200,
+            data: {
+              home: homedir(),
+              platform: detectPlatform().id,
+              path_sep: sep,
+            },
+          };
         case "memory":
           resp = this.ctx.cmdMemory();
           break;
@@ -1746,6 +1759,7 @@ export class RestHandler {
           //                                          accept_cap_downgrade? }
           // POST   /api/skills/<id>/uninstall   → { force_revoke? }
           // GET    /api/skills/events           → recent events timeline
+          // GET    /api/skills/search?q=&provider= → discover installable skills
           const mgr = this.ctx.getSkillManager();
           if (!mgr) {
             return {
@@ -1758,6 +1772,25 @@ export class RestHandler {
           if (method === "GET" && !name) {
             const provider = queryParams.get("provider") ?? undefined;
             return { status: 200, data: mgr.list(provider as any) };
+          }
+          if (method === "GET" && name === "search") {
+            // GET /api/skills/search?q=&provider=&limit=&cursor=
+            // Discovery across providers. ProviderModule.list() had been
+            // implemented since Phase B but was exposed by nothing, so the
+            // marketplace could only install a locator you already knew.
+            try {
+              const r = await mgr.search({
+                query: queryParams.get("q") ?? undefined,
+                provider: (queryParams.get("provider") ?? undefined) as any,
+                limit: queryParams.has("limit")
+                  ? parseInt(queryParams.get("limit") as string, 10)
+                  : undefined,
+                cursor: queryParams.get("cursor") ?? undefined,
+              });
+              return { status: 200, data: r };
+            } catch (err) {
+              return { status: 500, data: { error: `search failed: ${(err as Error).message}` } };
+            }
           }
           if (method === "GET" && name === "events") {
             if (!memoryDb) return { status: 503, data: { error: "memoryDb not initialised" } };

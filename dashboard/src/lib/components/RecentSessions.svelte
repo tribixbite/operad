@@ -2,6 +2,7 @@
   import { fetchRecent, openSession, registerProjects, cloneRepo, createProject, dedupeSessions } from "$lib/api";
   import { refreshStatus } from "$lib/store.svelte";
   import { copyToClipboard } from "$lib/format";
+  import { shortenHomePath } from "$lib/env.svelte";
   import type { RecentProject, DedupeResult } from "$lib/types";
 
   let expanded = $state(false);
@@ -47,12 +48,8 @@
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
-  /** Truncate path for display */
-  function shortPath(path: string): string {
-    const home = "/data/data/com.termux/files/home/";
-    if (path.startsWith(home)) return "~/" + path.slice(home.length);
-    return path;
-  }
+  /** Truncate path for display — home comes from the daemon, not a constant. */
+  const shortPath = shortenHomePath;
 
   /** Status badge color */
   function statusCls(st: RecentProject["status"]): string {

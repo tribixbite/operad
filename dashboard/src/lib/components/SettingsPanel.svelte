@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "$lib/store.svelte";
+  import { shortenHomePath as shortenPath, hostEnv, hostJoin } from "$lib/env.svelte";
   import { fetchCustomization, fetchFileContent, saveFileContent, downloadFile, fetchRecent, fetchConfigOverrides, patchConfigOverrides,
     exportCustomizationBundle, importCustomizationBundle, type ImportBundleReport } from "$lib/api";
   import type {
@@ -23,14 +24,6 @@
   import SkillManagerPanel from "./SkillManagerPanel.svelte";
 
   // -- Constants --------------------------------------------------------------
-
-  const HOME_PREFIX = "/data/data/com.termux/files/home/";
-
-  /** Shorten absolute paths: /data/data/com.termux/files/home/... → ~/... */
-  function shortenPath(p: string): string {
-    if (p.startsWith(HOME_PREFIX)) return "~/" + p.slice(HOME_PREFIX.length);
-    return p;
-  }
 
   // -- State ------------------------------------------------------------------
 
@@ -591,8 +584,13 @@ Example usage or output
     if (newSkillScope === "project" && selectedProject) {
       targetPath = `${selectedProject}/.claude/skills/${filename}`;
     } else {
-      const home = "/data/data/com.termux/files/home";
-      targetPath = `${home}/.claude/skills/${filename}`;
+      // Was a hardcoded Termux home, so on any other host this wrote to a
+      // directory that does not exist. hostEnv.home comes from the daemon.
+      if (!hostEnv.home) {
+        error = "Host home directory not known yet — retry in a moment";
+        return;
+      }
+      targetPath = hostJoin(hostEnv.home, ".claude", "skills", filename);
     }
 
     savingNewSkill = true;

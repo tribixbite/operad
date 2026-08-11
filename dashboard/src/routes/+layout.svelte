@@ -2,8 +2,14 @@
   import "../app.css";
   import { page } from "$app/stores";
   import NotificationBell from "$lib/components/NotificationBell.svelte";
+  import { loadEnv } from "$lib/env.svelte";
 
   let { children } = $props();
+
+  // Host facts (home dir, path separator) come from the daemon and are needed
+  // by every panel that renders a filesystem path. Fetched once here so no
+  // individual component has to.
+  loadEnv();
 
   const navItems = [
     { href: "/", label: "Overview", id: "overview",

@@ -27,6 +27,7 @@ import { MemoryMonitor } from "./memory.js";
 import { ActivityDetector } from "./activity.js";
 import { BatteryMonitor } from "./battery.js";
 import { Registry } from "./registry.js";
+import { loadOrCreateToken } from "./auth.js";
 import { DashboardServer } from "./http.js";
 import { TelemetrySinkServer } from "./telemetry-sink.js";
 import { SdkBridge } from "./sdk-bridge.js";
@@ -1303,12 +1304,23 @@ export class Daemon {
       : __dirname ?? process.cwd();
     const staticDir = join(scriptDir, "..", "dashboard", "dist");
 
+    // The token is stored next to the rest of operad's state, not in
+    // operad.toml — configs get shared and committed, and a token in one is an
+    // easy credential leak to miss.
+    const stateDir = dirname(this.config.orchestrator.state_file);
+    const authToken = loadOrCreateToken(stateDir);
+
     this.dashboard = new DashboardServer(
       port,
       staticDir,
       (method, path, body, contentType) =>
         this.restHandler.handleDashboardApi(method, path, body, contentType),
       this.log,
+      {
+        authToken,
+        bindAddress: this.config.orchestrator.bind,
+        allowedOrigins: this.config.orchestrator.allowed_origins,
+      },
     );
 
     try {
@@ -1536,19 +1548,34 @@ export class Daemon {
       this.state.flush();
 
       // Start cognitive timer — checks OODA trigger conditions every 60s
+      // Every step is individually guarded. A synchronous throw anywhere in a
+      // setInterval callback is an uncaught exception, and an uncaught
+      // exception kills the daemon — one malformed row (e.g. a NULL
+      // content_hash reaching mergeSimilarLearnings) took the whole process
+      // down. Isolating each step also stops one failing subsystem from
+      // starving the others on the same tick.
+      const guard = (label: string, fn: () => void): void => {
+        try {
+          fn();
+        } catch (err) {
+          this.log.warn(`Cognitive timer: ${label} failed — ${(err as Error).message}`);
+        }
+      };
       this.cognitiveTimer = setInterval(() => {
         this.agentEngine.maybeTriggerOoda().catch((err) => {
           this.log.warn(`Cognitive timer error: ${err}`);
         });
         // Expire stale tool leases on each tick
-        if (this.memoryDb) {
-          const expired = this.memoryDb.expireLeases();
-          if (expired > 0) this.log.debug(`Expired ${expired} tool lease(s)`);
-        }
+        guard("expireLeases", () => {
+          if (this.memoryDb) {
+            const expired = this.memoryDb.expireLeases();
+            if (expired > 0) this.log.debug(`Expired ${expired} tool lease(s)`);
+          }
+        });
         // Daily agent snapshot (check every tick, only run once per day)
-        this.persistenceEngine.maybeDailySnapshot();
+        guard("dailySnapshot", () => this.persistenceEngine.maybeDailySnapshot());
         // Memory consolidation during idle periods
-        this.persistenceEngine.maybeConsolidate();
+        guard("consolidation", () => this.persistenceEngine.maybeConsolidate());
       }, 60_000);
 
       // Verify SDK is available (non-blocking, log result)

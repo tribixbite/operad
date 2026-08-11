@@ -15,6 +15,7 @@
    */
 
   import { fetchAllCustomization } from "$lib/api";
+  import { shortenHomePath as shortenPath } from "$lib/env.svelte";
   import type { AgentsMdFile, AllProjectsCustomizationResponse } from "$lib/types";
   import { formatBytes, formatRelativeTime, copyToClipboard } from "$lib/format";
 
@@ -42,11 +43,6 @@
   let allLoading = $state(false);
   let allError: string | null = $state(null);
 
-  const HOME_PREFIX = "/data/data/com.termux/files/home/";
-  function shortenPath(p: string): string {
-    if (p.startsWith(HOME_PREFIX)) return "~/" + p.slice(HOME_PREFIX.length);
-    return p;
-  }
 
   // -- Derived ----------------------------------------------------------------
 

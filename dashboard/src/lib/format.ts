@@ -4,13 +4,14 @@
  * that replaces the wide path column in the panel tables.
  */
 
-const HOME_PREFIX = "/data/data/com.termux/files/home/";
-
-/** Render a fs path with $HOME collapsed to ~/. */
-export function shortenHomePath(p: string): string {
-  if (p.startsWith(HOME_PREFIX)) return "~/" + p.slice(HOME_PREFIX.length);
-  return p;
-}
+/**
+ * Render a fs path with the host's $HOME collapsed to `~/`.
+ *
+ * Re-exported from env.svelte.ts, which learns the real home from the daemon.
+ * This used to hardcode the Termux home, so on every other platform paths
+ * rendered in full.
+ */
+export { shortenHomePath } from "./env.svelte";
 
 /**
  * Render a byte count as a 1-3 char label: "412 B", "8.4 KB", "1.2 MB".
