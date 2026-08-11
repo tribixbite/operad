@@ -75,6 +75,7 @@ export function makeSession(name: string, overrides: Partial<SessionConfig> = {}
     path: `/tmp/${name}`,
     command: undefined,
     auto_go: false,
+    cleanup_patterns: [],
     priority: 50,
     depends_on: [],
     headless: false,

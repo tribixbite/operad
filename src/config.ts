@@ -254,6 +254,7 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
       restart_backoff_s: asNumber(s.restart_backoff_s, `${prefix}.restart_backoff_s`, 5),
       enabled: asBool(s.enabled, `${prefix}.enabled`, true),
       bare: asBool(s.bare, `${prefix}.bare`, false),
+      cleanup_patterns: asStringArray(s.cleanup_patterns, `${prefix}.cleanup_patterns`, []),
       // Optional Android package whose launcher activity is exposed via the
       // dashboard's "Launch app" button. Empty string omitted so consumers
       // can rely on `!!cfg.launch_package` as a presence check.

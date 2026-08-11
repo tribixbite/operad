@@ -365,17 +365,13 @@ export function killAllNotifyProcesses(): void {
  * Called on daemon startup to clean up orphans from previous daemon instances
  * that were SIGKILL'd by Android OOM killer (no cleanup handler fires on SIGKILL).
  *
- * Uses `pkill -9 -f` to match the process command line pattern.
- * This is aggressive but safe — termux-api processes are ephemeral and
- * the daemon immediately re-emits the current status notification.
+ * Matches on the EXACT process name (`pkill -9 -x`), not the full command
+ * line. termux-api helper processes are ephemeral and the daemon immediately
+ * re-emits the current status notification, so killing them is safe — but a
+ * `-f` substring match over every command line on the device was not: it also
+ * matched unrelated processes that merely mentioned "termux-api".
  *
- * Also opportunistically reaps `[crond] <defunct>` zombies. operad no
- * longer starts crond itself (cronie's inotify mode was leaking helper
- * forks at ~5/min, accumulating thousands of zombies that exhausted
- * the PID table) — but the user, or another orchestrator on the same
- * device, may. When we see crond zombies on boot we pkill the parent
- * and let init reap. No restart this time, since operad has no use
- * for crond and ScheduleEngine handles everything natively.
+ * Does NOT touch crond. See the comment at the call site below.
  */
 function killStaleTermuxApiProcesses(): number {
   let killed = 0;
@@ -390,29 +386,27 @@ function killStaleTermuxApiProcesses(): number {
     killed = parseInt(countResult.stdout?.trim() ?? "0", 10);
   } catch { /* non-fatal */ }
 
-  // Kill all termux-api processes (Notification, BatteryStatus, etc.)
+  // Kill stale termux-api helper processes by EXACT process name.
+  //
+  // This was `pkill -9 -f termux-api`, which matches the whole command line of
+  // every process on the device — so it also killed the user's own
+  // `termux-api` invocation, an editor with a termux-api path open, or a
+  // running `pkg install termux-api`. `-x` matches the process name only.
   try {
-    spawnSync("pkill", ["-9", "-f", "termux-api"], {
+    spawnSync("pkill", ["-9", "-x", "termux-api"], {
       timeout: 5000,
       stdio: "ignore",
     });
   } catch { /* non-fatal — pkill returns 1 if no match */ }
 
-  // Reap any leaked crond zombies left over from a previous daemon boot
-  // or a separately-launched crond. Without restart — operad doesn't
-  // use it and re-spawning would just start the leak fresh.
-  try {
-    const zombieCount = spawnSync("sh", ["-c", "ps -e 2>/dev/null | grep -c '\\[crond\\]'"], {
-      encoding: "utf-8",
-      timeout: 3000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const zCount = parseInt(zombieCount.stdout?.trim() ?? "0", 10);
-    if (zCount > 0) {
-      spawnSync("pkill", ["-9", "crond"], { timeout: 3000, stdio: "ignore" });
-      killed += zCount;
-    }
-  } catch { /* non-fatal */ }
+  // NOTE: operad deliberately does NOT kill crond.
+  //
+  // The previous code counted `[crond]` zombies and, if any existed, ran
+  // `pkill -9 crond`. A zombie is already dead and cannot be signalled — so
+  // the only process that call could actually kill was the user's LIVE crond,
+  // which on Termux is typically started from ~/.termux/boot/ and owns all
+  // their cron jobs. One leftover zombie silently destroyed cron on every
+  // operad boot. Zombies are reaped by their parent, not by us.
 
   return killed;
 }

@@ -264,29 +264,47 @@ export class SessionCommands {
 
     // Step 2: wide sweep. Derive the pattern set from session config.
     const cfg = this.ctx.config.sessions.find((s) => s.name === resolved);
-    const patterns: string[] = [];
-    if (cfg?.command) {
-      const cmd = cfg.command;
-      if (cmd.includes("termux-x11")) patterns.push("com.termux.x11.Loader", "Xtermux-x11");
-      if (cmd.includes("playwright")) patterns.push("playwright.*mcp", "chromium.*--type=");
-      if (cmd.includes("run_gui.sh") || cmd.includes("/x2d")) {
-        patterns.push("run_gui\\.sh", "BambuStudio", "bambu-studio", "x2d_bridge");
-      }
-      if (cmd.includes("xfce4-session")) patterns.push("xfce4-session", "xfdesktop", "xfce4-panel");
-    }
+    // Patterns are opt-in per session via `cleanup_patterns`.
+    //
+    // These used to be guessed from the session's command string, with
+    // hardcoded entries including `chromium.*--type=` and `xfce4-session`.
+    // `pkill -9 -f` matches against EVERY process on the machine, so cleaning
+    // up a playwright session SIGKILLed every Chromium renderer the user had
+    // open, and an xfce session killed their entire desktop. Those guesses
+    // were also specific to one developer's setup and shipped to everyone.
+    const patterns: string[] = cfg?.cleanup_patterns ?? [];
 
-    const sweep: Array<{ pattern: string; killed: number }> = [];
+    // Never let a pattern match the daemon itself or anything it descends
+    // from — a self-match here is unrecoverable.
+    const selfPids = new Set<number>();
+    selfPids.add(process.pid);
+    if (typeof process.ppid === "number") selfPids.add(process.ppid);
+
+    const sweep: Array<{ pattern: string; killed: number; skipped?: number }> = [];
     for (const p of patterns) {
       try {
-        // -e prints PID for each match — count lines for telemetry.
         const before = spawnSync("pgrep", ["-f", p], { encoding: "utf-8", timeout: 3000 });
-        const beforeCount = before.status === 0
-          ? (before.stdout ?? "").trim().split("\n").filter(Boolean).length
-          : 0;
-        if (beforeCount > 0) {
-          spawnSync("pkill", ["-9", "-f", p], { timeout: 3000, stdio: "ignore" });
+        const pids = before.status === 0
+          ? (before.stdout ?? "")
+              .trim()
+              .split("\n")
+              .map((line) => Number(line.trim()))
+              .filter((n) => Number.isInteger(n) && n > 0)
+          : [];
+        const targets = pids.filter((pid) => !selfPids.has(pid));
+        const skipped = pids.length - targets.length;
+        // Signal each surviving PID individually rather than `pkill -9 -f`,
+        // so the self-protection filter above actually applies.
+        let killed = 0;
+        for (const pid of targets) {
+          try {
+            process.kill(pid, "SIGKILL");
+            killed++;
+          } catch {
+            // Already gone, or not ours to signal.
+          }
         }
-        sweep.push({ pattern: p, killed: beforeCount });
+        sweep.push({ pattern: p, killed, ...(skipped > 0 ? { skipped } : {}) });
       } catch {
         sweep.push({ pattern: p, killed: 0 });
       }

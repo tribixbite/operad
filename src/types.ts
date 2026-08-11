@@ -105,6 +105,18 @@ export interface SessionConfig {
   enabled: boolean;
   /** Spawn as detached process instead of tmux session (for commands that crash in tmux PTY) */
   bare: boolean;
+  /**
+   * Extra `pkill -f` patterns for `operad cleanup <session>`, for GUI helpers
+   * that escape the tmux tree and are reparented to init.
+   *
+   * Opt-in and empty by default. This replaces a set of hardcoded heuristics
+   * that guessed patterns from the session's command string — including
+   * `chromium.*--type=` and `xfce4-session`, which match the user's own
+   * browser and desktop session and killed them system-wide.
+   *
+   * Patterns still never match the daemon or any of its ancestors.
+   */
+  cleanup_patterns?: string[];
   /** Claude session ID for --resume (multi-instance support) */
   session_id?: string;
   /**

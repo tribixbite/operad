@@ -489,10 +489,19 @@ export class RestHandler {
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Package or component required" } };
           return this.ctx.launchApp(name);
-        case "autostop":
+        case "autostop": {
           if (!name) return { status: 200, data: this.ctx.getAutoStopList() };
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          // Validate at write time as well as at use time. The auto-stop list
+          // is persisted and replayed into `adb shell` on every memory-pressure
+          // event, so an unvalidated entry here is a stored command injection
+          // against the device shell.
+          const { AndroidEngine: AE } = await import("./android-engine.js");
+          if (!AE.isValidPackageName(name)) {
+            return { status: 400, data: { error: "Invalid package name" } };
+          }
           return this.ctx.toggleAutoStop(name);
+        }
         case "adb":
           if (!name) {
             return { status: 200, data: this.adbRoutes.getAdbDevices() };

@@ -564,9 +564,19 @@ export function createTermuxTab(sessionName: string, log: Logger): boolean {
  * running inside each tmux pane — their process groups contain the actual work.
  */
 export function getSessionPanePids(sessionName: string): number[] {
-  // list-panes uses target-window, so `=name:` (trailing colon) is required
-  // for exact-match — see capturePane() for the full explanation.
-  const output = tmux("list-panes", "-t", formatTmuxTarget(sessionName, true), "-F", "#{pane_pid}");
+  // `-s` makes this session-scoped rather than window-scoped.
+  //
+  // Without it, list-panes resolves to the session's CURRENT window only, so a
+  // session with more than one tmux window (routine once the user opens a
+  // second) exposed only part of its process tree. Two consequences, both
+  // observed: suspend/resume SIGSTOPped one window's tree while reporting the
+  // whole session paused, and — if the current window changed between suspend
+  // and resume — resume SIGCONTed a *different* tree, leaving the original
+  // processes stopped with no code path able to reach them again.
+  //
+  // With `-s` the target is a session, so the exact-match sigil is the bare
+  // `=name` form (no trailing colon).
+  const output = tmux("list-panes", "-s", "-t", formatTmuxTarget(sessionName), "-F", "#{pane_pid}");
   if (!output) return [];
   return output
     .split("\n")

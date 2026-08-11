@@ -604,9 +604,21 @@ export class AndroidEngine {
   /** Force-stop all auto-stop flagged apps — called during memory pressure */
   autoStopFlaggedApps(): void {
     if (this.autoStopPkgs.size === 0) return;
+    // Same local-target guard as forceStopApp: this fires automatically on
+    // memory pressure, so without it a second attached device gets its apps
+    // killed by pressure on this one.
+    if (!this.isLocalAdbDevice()) {
+      this.ctx.log.warn("Skipping auto-stop: adb target is not this device");
+      return;
+    }
     const stopped: string[] = [];
     for (const pkg of this.autoStopPkgs) {
       if (AndroidEngine.SYSTEM_PACKAGES.has(pkg)) continue;
+      // The persisted list can predate validation, so re-check on use.
+      if (!AndroidEngine.isValidPackageName(pkg)) {
+        this.ctx.log.warn(`Skipping auto-stop of invalid package name: ${pkg}`);
+        continue;
+      }
       try {
         const result = spawnSync(ADB_BIN, this.adbShellArgs("am", "force-stop", pkg), {
           encoding: "utf-8",
@@ -714,7 +726,24 @@ export class AndroidEngine {
     if (!target || !target.includes(".")) {
       return { status: 400, data: { error: "Invalid package or component" } };
     }
+    // A component spec is `<pkg>/<activity>`; a bare target is a package. Both
+    // halves reach a device shell via `adb shell monkey`, so validate each.
     const slash = target.indexOf("/");
+    if (slash === -1) {
+      if (!AndroidEngine.isValidPackageName(target)) {
+        return { status: 400, data: { error: "Invalid package name" } };
+      }
+    } else {
+      const pkgPart = target.slice(0, slash);
+      const actPart = target.slice(slash + 1);
+      if (
+        !AndroidEngine.isValidPackageName(pkgPart)
+        || !/^[A-Za-z0-9_.$]+$/.test(actPart)
+        || actPart.length === 0
+      ) {
+        return { status: 400, data: { error: "Invalid component spec" } };
+      }
+    }
     if (slash !== -1) {
       // Caller provided an explicit component spec.
       const result = spawnSync("am", ["start", "-n", target], {
@@ -769,13 +798,47 @@ export class AndroidEngine {
     };
   }
 
+  /**
+   * Is this a syntactically valid Android package name?
+   *
+   * The only check was `pkg.includes(".")`. That matters because `adb shell`
+   * concatenates the remote argv and runs it through the DEVICE's /system/bin/sh
+   * — so argv separation on our side does not prevent injection on theirs. A
+   * package of `com.x;id>/data/local/tmp/pwn` executed as uid shell (2000),
+   * which is a privilege escalation relative to the Termux uid operad runs as.
+   * `POST /api/autostop/<pkg>` also persisted such a value and replayed it on
+   * every memory-pressure event.
+   */
+  static isValidPackageName(pkg: string): boolean {
+    return /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg) && pkg.length <= 255;
+  }
+
+  /**
+   * Refuse app-control operations unless the adb target is this device.
+   *
+   * `applyPhantomFix` already guarded with isLocalAdbDevice(), but none of the
+   * force-stop / launch / auto-stop paths did. resolveSerialFromList falls back
+   * to the first online device, so with a second phone attached over USB,
+   * memory pressure here issued `am force-stop` on THAT phone.
+   */
+  private assertLocalTarget(action: string): { status: number; data: unknown } | null {
+    if (this.isLocalAdbDevice()) return null;
+    this.ctx.log.warn(`Refusing ${action}: adb target is not this device`);
+    return {
+      status: 409,
+      data: { error: `Refusing ${action} — the adb target is not this device` },
+    };
+  }
+
   forceStopApp(pkg: string): { status: number; data: unknown } {
-    if (!pkg || !pkg.includes(".")) {
+    if (!AndroidEngine.isValidPackageName(pkg)) {
       return { status: 400, data: { error: "Invalid package name" } };
     }
     if (AndroidEngine.SYSTEM_PACKAGES.has(pkg)) {
       return { status: 403, data: { error: `Cannot stop system package: ${pkg}` } };
     }
+    const notLocal = this.assertLocalTarget(`force-stop ${pkg}`);
+    if (notLocal) return notLocal;
 
     try {
       const result = spawnSync(ADB_BIN, this.adbShellArgs("am", "force-stop", pkg), {
