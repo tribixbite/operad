@@ -1382,9 +1382,19 @@ export class RestHandler {
             if (sdkBridge?.isAttached) {
               return { status: 409, data: { error: "SDK session active" } };
             }
-            this.agentEngine.runOodaCycle().catch((err) => {
-              this.ctx.log.error(`Manual OODA trigger failed: ${err}`);
-            });
+            if (sdkBridge?.isBusy) {
+              // isAttached alone missed a standalone agent run in progress,
+              // so the dashboard reported "triggered" for a cycle that then
+              // refused itself and logged a failure the user never saw.
+              return { status: 409, data: { error: "SDK bridge busy — an agent run is in progress" } };
+            }
+            this.agentEngine.runOodaCycle()
+              .then((started) => {
+                if (!started) this.ctx.log.info("Manual OODA trigger did not start — a cycle was already running");
+              })
+              .catch((err) => {
+                this.ctx.log.error(`Manual OODA trigger failed: ${err}`);
+              });
             return { status: 202, data: { ok: true, message: "OODA cycle triggered" } };
           }
 
@@ -1783,11 +1793,20 @@ export class RestHandler {
             try {
               const b = (typeof body === "string" ? JSON.parse(body) : body) as Record<string, unknown>;
               const topic = String(b.topic ?? "");
-              const agents = (b.agents as string[]) ?? [];
+              // `b.agents as string[]` accepted anything: a bare string made
+              // the engine iterate its characters, and numbers silently
+              // matched no agent. Validate the shape here so a malformed
+              // request is a 400 rather than a no-op that still looks like it
+              // ran.
+              const agents = Array.isArray(b.agents)
+                ? b.agents.filter((a): a is string => typeof a === "string")
+                : [];
               const roundtableCtx = b.context ? String(b.context) : undefined;
 
               if (!topic) return { status: 400, data: { error: "topic required" } };
-              if (!agents.length) return { status: 400, data: { error: "agents array required" } };
+              if (!agents.length) {
+                return { status: 400, data: { error: "agents must be a non-empty array of agent names" } };
+              }
 
               const result = await this.agentEngine.executeRoundtable(topic, agents, roundtableCtx);
               return { status: 200, data: result };

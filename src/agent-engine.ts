@@ -12,6 +12,26 @@ import type { OrchestratorContext } from "./orchestrator-context.js";
 import type WebSocket from "ws";
 
 /**
+ * Most agents a single roundtable will run. Each is a paid SDK run that reads
+ * every prior contribution, so the cost of the whole exercise is quadratic in
+ * this number.
+ */
+const MAX_ROUNDTABLE_PARTICIPANTS = 8;
+
+/** Most transcript text carried into any one participant's prompt. */
+const MAX_ROUNDTABLE_TRANSCRIPT_CHARS = 24_000;
+
+/** How long to wait before retrying a scheduled cycle that found the slot busy. */
+const SCHEDULED_DEFERRAL_MS = 60_000;
+
+/**
+ * Give up re-arming a scheduled cycle after this many consecutive deferrals,
+ * so a wedged cycle cannot keep the timer alive forever. The agent asks again
+ * on its next cycle.
+ */
+const MAX_SCHEDULED_DEFERRALS = 5;
+
+/**
  * AgentEngine — extracted subsystem for agent/cognitive/OODA workflows.
  * Takes an OrchestratorContext at construction — no direct daemon coupling.
  *
@@ -21,6 +41,26 @@ import type WebSocket from "ws";
 export class AgentEngine {
   /** Timer handle for the next scheduled OODA run (set by schedule action blocks). */
   private scheduledOodaTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Whether an OODA cycle is currently running.
+   *
+   * Three separate paths call runOodaCycle — the 60 s cognitive timer, a
+   * `schedule` action's timer, and POST /api/ooda/trigger — and none of them
+   * shared a guard. Two could enter concurrently: both built context, both
+   * inserted an agent_runs row, and the second's `runStandaloneAgent` threw
+   * "SDK session already active" and was recorded as a failed run.
+   *
+   * The wasted work was the least of it. maybeTriggerOoda marks the trigger's
+   * messages read BEFORE starting the cycle (deliberately — see the comment
+   * there), so if that cycle was the one to lose the race the trigger was
+   * consumed and the messages were never acted on. The scheduled path just
+   * dropped a run the agent had explicitly asked for.
+   */
+  private cycleInFlight = false;
+
+  /** Consecutive times a scheduled cycle has been deferred because one was running. */
+  private scheduledDeferrals = 0;
 
   constructor(private ctx: OrchestratorContext) {}
 
@@ -32,6 +72,9 @@ export class AgentEngine {
       clearTimeout(this.scheduledOodaTimer);
       this.scheduledOodaTimer = null;
     }
+    // Reset the deferral counter with the timer, or a later scheduled cycle
+    // inherits a stale count and gives up early.
+    this.scheduledDeferrals = 0;
   }
 
   // ---------------------------------------------------------------------------
@@ -142,6 +185,13 @@ export class AgentEngine {
     const urgentMessages = unread.filter((m) => (m.created_at as number) < fiveMinAgo);
 
     if (urgentMessages.length > 0) {
+      // Do not consume the trigger if a cycle cannot start. Messages are
+      // marked read BEFORE the cycle (see below), so calling into a cycle
+      // that immediately refuses would drop them for good.
+      if (this.cycleInFlight) {
+        log.debug("OODA trigger deferred — a cycle is already running");
+        return;
+      }
       log.info(`OODA trigger: ${urgentMessages.length} unread messages older than 5min`);
       // Mark them read BEFORE the cycle, not after.
       //
@@ -181,22 +231,31 @@ export class AgentEngine {
    * in finally — leaks would permanently block installs until daemon
    * restart, see ConsumerTracker stale-pin warning.
    */
-  async runOodaCycle(): Promise<void> {
+  async runOodaCycle(): Promise<boolean> {
     const { state, config, agentConfigs, log } = this.ctx;
     const sdkBridge = this.ctx.getSdkBridge();
     const memoryDb = this.ctx.getMemoryDb();
 
-    if (!sdkBridge || !memoryDb) return;
-    if (sdkBridge.isAttached) {
-      log.debug("OODA cycle skipped — SDK session active");
-      return;
+    if (!sdkBridge || !memoryDb) return false;
+
+    // Refuse re-entry BEFORE any state is touched — no context build, no
+    // agent_runs row, nothing for the caller to have to clean up. Returning
+    // false rather than throwing lets callers that consumed a trigger know
+    // the work did not happen.
+    if (this.cycleInFlight) {
+      log.debug("OODA cycle skipped — one is already running");
+      return false;
+    }
+    if (sdkBridge.isAttached || sdkBridge.isBusy) {
+      log.debug("OODA cycle skipped — SDK session active or busy");
+      return false;
     }
 
     // Check switchboard
     const switchboard = this.ctx.getSwitchboard();
     if (!switchboard.oodaAutoTrigger) {
       log.debug("OODA cycle skipped — disabled by switchboard");
-      return;
+      return false;
     }
 
     // Quota circuit breaker: block when exceeded, warn on critical
@@ -204,7 +263,7 @@ export class AgentEngine {
     if (quota.weekly_level === "exceeded") {
       log.warn(`OODA cycle blocked — weekly quota exceeded (${quota.weekly_pct}%)`);
       this.ctx.broadcast("ooda_status", { running: false, blocked: "quota_exceeded" });
-      return;
+      return false;
     }
     if (quota.weekly_level === "critical") {
       log.warn(`OODA cycle running under critical quota (${quota.weekly_pct}%) — consider reducing activity`);
@@ -242,13 +301,18 @@ export class AgentEngine {
     const pin = this.ctx.getConsumerTracker().acquire("agent_cycle");
     const releasePin = pin.release;
 
+    // Past every guard — claim the slot. Set here rather than at the top so a
+    // cycle refused by the switchboard or the quota breaker does not block
+    // the next legitimate one.
+    this.cycleInFlight = true;
+
     // Hoisted so the catch can finalise the row; it was declared inside the
     // try, which is why the error path could never close it out.
     let runId = 0;
 
     try {
       const masterAgent = agentConfigs.find((a) => a.name === "master-controller");
-      if (!masterAgent) return;
+      if (!masterAgent) return false;
 
       const sdkDef = toSdkAgentMap([masterAgent])["master-controller"];
       const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
@@ -300,7 +364,50 @@ export class AgentEngine {
       }
       this.ctx.broadcast("ooda_status", { running: false, error: String(err) });
     } finally {
+      this.cycleInFlight = false;
       releasePin();
+    }
+    return true;
+  }
+
+  /**
+   * Run a cycle requested by a `schedule` action, re-arming if one is already
+   * running.
+   *
+   * The agent explicitly asked to be run again at this time. Firing straight
+   * into runOodaCycle meant that if anything else held the slot the request
+   * was dropped with a single warn line and never retried. Deferrals are
+   * capped so a wedged cycle cannot keep this timer alive indefinitely — the
+   * agent will ask again on its next cycle.
+   */
+  private async runScheduledCycle(): Promise<void> {
+    const { log } = this.ctx;
+    try {
+      const started = await this.runOodaCycle();
+      if (started) {
+        this.scheduledDeferrals = 0;
+        return;
+      }
+      if (this.scheduledDeferrals >= MAX_SCHEDULED_DEFERRALS) {
+        log.warn(
+          `Scheduled OODA cycle abandoned after ${MAX_SCHEDULED_DEFERRALS} deferrals — `
+          + `something else has held the slot throughout`,
+        );
+        this.scheduledDeferrals = 0;
+        return;
+      }
+      this.scheduledDeferrals++;
+      log.info(
+        `Scheduled OODA cycle deferred (${this.scheduledDeferrals}/${MAX_SCHEDULED_DEFERRALS}) — `
+        + `retrying in ${SCHEDULED_DEFERRAL_MS / 1000}s`,
+      );
+      if (this.scheduledOodaTimer) clearTimeout(this.scheduledOodaTimer);
+      this.scheduledOodaTimer = setTimeout(() => {
+        void this.runScheduledCycle();
+      }, SCHEDULED_DEFERRAL_MS);
+    } catch (err) {
+      log.warn(`Scheduled OODA cycle failed: ${err}`);
+      this.scheduledDeferrals = 0;
     }
   }
 
@@ -386,10 +493,7 @@ export class AgentEngine {
             break;
 
           case "learning":
-            memoryDb.addLearning(actingAgent, action.category, action.content, {
-              confidence: action.confidence,
-            });
-            log.info(`OODA: learned [${action.category}] ${action.content.slice(0, 60)}`);
+            this.applyLearning(actingAgent, action);
             break;
 
           case "personality":
@@ -401,10 +505,9 @@ export class AgentEngine {
             // Schedule next OODA run — timer owned by AgentEngine
             if (this.scheduledOodaTimer) clearTimeout(this.scheduledOodaTimer);
             const delayMs = action.delayMinutes * 60 * 1000;
+            this.scheduledDeferrals = 0;
             this.scheduledOodaTimer = setTimeout(() => {
-              this.runOodaCycle().catch((err) => {
-                log.warn(`Scheduled OODA cycle failed: ${err}`);
-              });
+              void this.runScheduledCycle();
             }, delayMs);
             log.info(`OODA: scheduled next run in ${action.delayMinutes}min (${action.reason})`);
             break;
@@ -645,8 +748,45 @@ export class AgentEngine {
   }
 
   /**
+   * Record a learning and reinforce any specialization it corroborates.
+   *
+   * Shared by the OODA action dispatcher and the chat/standalone extractor so
+   * the two cannot drift. They used to hold separate copies, and the
+   * specialization reinforcement existed in only one of them.
+   */
+  private applyLearning(
+    agentName: string,
+    action: { category: string; content: string; confidence?: number },
+  ): void {
+    const { log } = this.ctx;
+    const memoryDb = this.ctx.getMemoryDb();
+    if (!memoryDb) return;
+
+    memoryDb.addLearning(agentName, action.category, action.content, {
+      confidence: action.confidence,
+    });
+    log.info(`Agent ${agentName} learned: [${action.category}] ${action.content.slice(0, 60)}`);
+
+    // A learning in a domain the agent already claims is evidence for that
+    // claim.
+    try {
+      const specs = memoryDb.getSpecializations(agentName);
+      if (specs.some((sp) => sp.domain === action.category)) {
+        memoryDb.upsertSpecialization(
+          agentName, action.category, action.confidence ?? 0.6,
+          `reinforced by learning: ${action.content.slice(0, 40)}`,
+        );
+      }
+    } catch { /* specialization table may not exist yet */ }
+  }
+
+  /**
    * Extract learning and personality action blocks from agent response text.
    * Used after agent chat responses and standalone runs.
+   *
+   * Do NOT call this after executeOodaActions on the same text — that
+   * dispatcher already applies both block types, and running both applied
+   * every block twice.
    */
   extractAgentActions(agentName: string, responseText: string): void {
     const { log } = this.ctx;
@@ -662,22 +802,7 @@ export class AgentEngine {
       // run, and must not stop the remaining blocks from applying.
       try {
       if (action.type === "learning") {
-        memoryDb.addLearning(agentName, action.category, action.content, {
-          confidence: action.confidence,
-        });
-        log.info(`Agent ${agentName} learned: [${action.category}] ${action.content.slice(0, 60)}`);
-
-        // Auto-reinforce specialization matching the learning category
-        try {
-          const specs = memoryDb.getSpecializations(agentName);
-          const match = specs.find((s) => s.domain === action.category);
-          if (match) {
-            memoryDb.upsertSpecialization(
-              agentName, action.category, action.confidence ?? 0.6,
-              `reinforced by learning: ${action.content.slice(0, 40)}`,
-            );
-          }
-        } catch { /* specialization table may not exist yet */ }
+        this.applyLearning(agentName, action);
       } else if (action.type === "personality") {
         memoryDb.setPersonalityTrait(agentName, action.trait, action.value, action.evidence);
         log.info(`Agent ${agentName} personality: ${action.trait}=${action.value}`);
@@ -777,17 +902,25 @@ export class AgentEngine {
     if (!agent) throw new Error(`Agent not found: ${agentName}`);
 
     // Save user message to conversation history
-    memoryDb.appendConversation(agentName, "user", userPrompt);
+    const currentTurnId = memoryDb.appendConversation(agentName, "user", userPrompt);
 
     // Build the full prompt with context
     const agentContext = this.buildAgentContext(agentName);
     const history = memoryDb.getConversationHistory(agentName, 20);
 
-    // Replay conversation history for multi-turn context
-    const historyText = history.slice(0, -1).map((m) => { // exclude the message we just appended
-      const role = (m.role as string).toUpperCase();
-      return `[${role}]: ${m.content}`;
-    }).join("\n\n");
+    // Replay conversation history for multi-turn context.
+    //
+    // Exclude the turn just appended BY ID. `slice(0, -1)` assumed it was
+    // always the last row, which holds only while the history query returns a
+    // stable order — created_at is a whole-second unixepoch, so every message
+    // of the same turn ties. If the tie broke the other way, the prompt lost
+    // a real turn of history and repeated the current message twice.
+    const historyText = history
+      .filter((m) => m.id !== currentTurnId)
+      .map((m) => {
+        const role = (m.role as string).toUpperCase();
+        return `[${role}]: ${m.content}`;
+      }).join("\n\n");
 
     const promptParts: string[] = [agent.prompt];
     if (agentContext) promptParts.push(agentContext);
@@ -878,13 +1011,49 @@ export class AgentEngine {
     if (!sdkBridge || !memoryDb) throw new Error("SDK bridge or DB not ready");
     if (sdkBridge.isAttached) throw new Error("SDK session already active");
 
+    // A roundtable is the most expensive thing this system does: one paid run
+    // per participant, each seeing every prior contribution, so cost grows
+    // quadratically with the list. It was the ONLY agent path with no quota
+    // check — runOodaCycle blocks at 'exceeded', but an agent whose cycles
+    // were being refused could still emit a `roundtable` action and spend
+    // freely straight through the circuit breaker.
+    const quota = computeQuotaStatus(memoryDb, config.orchestrator);
+    if (quota.weekly_level === "exceeded") {
+      log.warn(`Roundtable blocked — weekly quota exceeded (${quota.weekly_pct}%)`);
+      throw new Error(`Weekly token quota exceeded (${quota.weekly_pct}%) — roundtable refused`);
+    }
+    if (quota.weekly_level === "critical") {
+      log.warn(`Roundtable running under critical quota (${quota.weekly_pct}%)`);
+    }
+
+    // Deduplicate and cap. A repeated name is N paid runs of the same agent
+    // against a transcript it has already seen, and nothing upstream bounded
+    // the list length.
+    const seen = new Set<string>();
+    const participants: string[] = [];
+    for (const raw of agentNames) {
+      if (typeof raw !== "string") continue;
+      const name = raw.trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      participants.push(name);
+      if (participants.length >= MAX_ROUNDTABLE_PARTICIPANTS) break;
+    }
+    if (participants.length < agentNames.length) {
+      log.info(
+        `Roundtable: ${agentNames.length} names requested, running ${participants.length} `
+        + `(duplicates dropped, cap ${MAX_ROUNDTABLE_PARTICIPANTS})`,
+      );
+    }
+    if (participants.length === 0) throw new Error("Roundtable needs at least one valid agent name");
+
     const contributions: Array<{ agent: string; response: string }> = [];
     let transcript = "";
     const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
 
-    this.ctx.broadcast("roundtable_status", { running: true, topic, agents: agentNames });
+    this.ctx.broadcast("roundtable_status", { running: true, topic, agents: participants });
 
-    for (const agentName of agentNames) {
+    for (const agentName of participants) {
       const agent = agentConfigs.find((a) => a.name === agentName);
       if (!agent) {
         log.warn(`Roundtable: agent "${agentName}" not found, skipping`);
@@ -915,7 +1084,7 @@ export class AgentEngine {
 
       // Assemble roundtable prompt for this participant
       const agentContext = this.buildAgentContext(agentName);
-      const otherAgents = agentNames.filter((a) => a !== agentName);
+      const otherAgents = participants.filter((a) => a !== agentName);
       const promptParts: string[] = [];
 
       if (agentContext) promptParts.push(agentContext);
@@ -930,7 +1099,17 @@ export class AgentEngine {
 
       if (transcript) {
         promptParts.push("\n### Prior Contributions\n");
-        promptParts.push(transcript);
+        // Cap what is carried forward. Every participant re-reads the whole
+        // transcript, so an unbounded one makes the prompt — and the bill —
+        // grow with the square of the participant count. The tail is kept
+        // because the most recent contributions are the ones being responded
+        // to.
+        promptParts.push(
+          transcript.length > MAX_ROUNDTABLE_TRANSCRIPT_CHARS
+            ? `_[earlier contributions truncated]_\n\n`
+              + transcript.slice(-MAX_ROUNDTABLE_TRANSCRIPT_CHARS)
+            : transcript,
+        );
       }
 
       promptParts.push("\n### Your Turn");
@@ -1088,9 +1267,19 @@ export class AgentEngine {
         const actions = parseOodaResponse(result.responseText);
         if (actions.length > 0) {
           // Attribute to the scheduled agent, not master-controller.
+          //
+          // executeOodaActions already handles `learning` and `personality`,
+          // so the extractAgentActions call that used to follow applied every
+          // such block a SECOND time. addLearning dedupes by content hash, so
+          // the repeat did not duplicate the row — it reinforced it: every
+          // scheduled-run learning was born with reinforcement_count 1 and
+          // +0.05 confidence. getTopLearnings ranks by
+          // reinforcement_count * confidence, so learnings systematically
+          // outranked identical ones from chat or OODA purely by which code
+          // path produced them. setPersonalityTrait versions on every call,
+          // so traits also gained two history rows per update.
           await this.executeOodaActions(actions, schedule.agent_name);
         }
-        this.extractAgentActions(schedule.agent_name, result.responseText);
       }
 
       // Trust reward for successful scheduled run

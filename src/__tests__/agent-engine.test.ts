@@ -316,3 +316,154 @@ describe("AgentEngine — extractAgentActions", () => {
     expect(snap.some((t) => t.trait_name === "rigor")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// OODA cycle re-entrancy
+//
+// Three paths call runOodaCycle — the 60 s cognitive timer, a `schedule`
+// action's timer, and POST /api/ooda/trigger — and none shared a guard. Two
+// could enter concurrently: both built context, both inserted an agent_runs
+// row, and the second's SDK call threw "SDK session already active" and was
+// recorded as a failed run. Worse, maybeTriggerOoda marks the trigger's
+// messages read BEFORE starting, so a cycle that lost the race consumed the
+// trigger and the messages were never acted on.
+// ---------------------------------------------------------------------------
+
+describe("AgentEngine — OODA cycle re-entrancy", () => {
+  async function ctxWithBridge(bridge: unknown) {
+    return makeFakeContext({
+      withDb: true,
+      switchboard: { cognitive: true, oodaAutoTrigger: true },
+      agentConfigs: [makeAgent("master-controller", { enabled: true })],
+      sdkBridge: bridge,
+    });
+  }
+
+  test("a busy SDK bridge means the cycle does not start", async () => {
+    // isAttached alone missed a standalone agent run already in progress.
+    fc = await ctxWithBridge({ isAttached: false, isBusy: true });
+    eng = new AgentEngine(fc.ctx);
+    expect(await eng.runOodaCycle()).toBe(false);
+  });
+
+  test("an attached SDK session means the cycle does not start", async () => {
+    fc = await ctxWithBridge({ isAttached: true, isBusy: false });
+    eng = new AgentEngine(fc.ctx);
+    expect(await eng.runOodaCycle()).toBe(false);
+  });
+
+  test("a refused cycle leaves NO agent_runs row behind", async () => {
+    // The guard has to sit before startAgentRun, or every refusal shows up in
+    // the dashboard as a failed run the user has to explain away.
+    fc = await ctxWithBridge({ isAttached: false, isBusy: true });
+    eng = new AgentEngine(fc.ctx);
+    const before = fc.db!.getAgentRuns(100).length;
+    await eng.runOodaCycle();
+    expect(fc.db!.getAgentRuns(100).length).toBe(before);
+  });
+
+  test("the message trigger is NOT consumed when a cycle cannot start", async () => {
+    // This is the loss that mattered: markMessagesRead runs before the cycle,
+    // so a refused cycle used to throw the trigger away.
+    fc = await ctxWithBridge({ isAttached: false, isBusy: true });
+    eng = new AgentEngine(fc.ctx);
+
+    const sixMinAgo = Math.floor(Date.now() / 1000) - 360;
+    fc.db!.sendAgentMessage("optimizer", "master-controller", "please look at this");
+    fc.db!.requireDb()
+      .prepare(`UPDATE agent_messages SET created_at = ?`)
+      .run(sixMinAgo);
+
+    expect(fc.db!.getUnreadMessages("master-controller").length).toBe(1);
+    await eng.maybeTriggerOoda();
+    // Still unread — the work was deferred, not discarded.
+    expect(fc.db!.getUnreadMessages("master-controller").length).toBe(1);
+  });
+
+  test("clearScheduledOodaTimer resets the deferral counter", () => {
+    // A stale count would make the next scheduled cycle give up early.
+    fc = undefined as never;
+    return makeFakeContext({ withDb: true }).then((c) => {
+      fc = c;
+      eng = new AgentEngine(fc.ctx);
+      expect(() => eng.clearScheduledOodaTimer()).not.toThrow();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Learning application must not double-count
+// ---------------------------------------------------------------------------
+
+describe("AgentEngine — learning application", () => {
+  beforeEach(async () => {
+    fc = await makeFakeContext({
+      withDb: true,
+      agentConfigs: [makeAgent("optimizer", { enabled: true })],
+    });
+    eng = new AgentEngine(fc.ctx);
+  });
+
+  test("a learning applied once is not pre-reinforced", async () => {
+    // executeScheduledRun used to call executeOodaActions AND
+    // extractAgentActions on the same response. addLearning dedupes by
+    // content hash, so the repeat did not duplicate the row — it REINFORCED
+    // it, so every scheduled-run learning was born with reinforcement_count 1
+    // and +0.05 confidence. getTopLearnings ranks by
+    // reinforcement_count * confidence, so those learnings outranked
+    // identical ones from other paths purely by code path.
+    const actions: OodaAction[] = [
+      { type: "learning", category: "perf", content: "batch the writes", confidence: 0.6 },
+    ];
+    await eng.executeOodaActions(actions, "optimizer");
+
+    const learnings = fc.db!.getAgentLearnings("optimizer", 10);
+    expect(learnings.length).toBe(1);
+    // A fresh row starts at reinforcement_count 1 (schema default) with the
+    // confidence the agent stated. Untouched by a second pass.
+    expect((learnings[0] as any).reinforcement_count).toBe(1);
+    expect((learnings[0] as any).confidence).toBeCloseTo(0.6, 4);
+  });
+
+  test("applying the same learning twice DOES reinforce — which is why one path must not do both", () => {
+    // Pins the mechanism the bug rode on: the repeat is not a duplicate row,
+    // it is a reinforcement, so it silently inflates the ranking signal.
+    const action = {
+      type: "learning" as const, category: "perf", content: "same text", confidence: 0.6,
+    };
+    return eng.executeOodaActions([action], "optimizer")
+      .then(() => eng.extractAgentActions(
+        "optimizer",
+        "```learning\ncategory: perf\ncontent: same text\nconfidence: 0.6\n```",
+      ))
+      .then(() => {
+        const l = fc.db!.getAgentLearnings("optimizer", 10)[0] as any;
+        expect(l.reinforcement_count).toBe(2);
+        expect(l.confidence).toBeCloseTo(0.65, 4);
+      });
+  });
+
+  test("the OODA dispatcher reinforces a matching specialization", () => {
+    // This lived only in extractAgentActions before the two were merged, so
+    // learnings arriving via an OODA cycle never corroborated a domain.
+    fc.db!.upsertSpecialization("optimizer", "perf", 0.5);
+    return eng.executeOodaActions(
+      [{ type: "learning", category: "perf", content: "cache the lookup", confidence: 0.8 }],
+      "optimizer",
+    ).then(() => {
+      const spec = fc.db!.getSpecializations("optimizer").find((sp) => sp.domain === "perf");
+      expect(spec).toBeDefined();
+      expect(spec!.reinforcement_count).toBeGreaterThan(0);
+    });
+  });
+
+  test("a learning in an unclaimed domain does not invent a specialization", () => {
+    return eng.executeOodaActions(
+      [{ type: "learning", category: "cryptography", content: "x", confidence: 0.9 }],
+      "optimizer",
+    ).then(() => {
+      const spec = fc.db!.getSpecializations("optimizer").find((sp) => sp.domain === "cryptography");
+      expect(spec).toBeUndefined();
+    });
+  });
+});

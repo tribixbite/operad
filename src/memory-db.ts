@@ -1502,11 +1502,11 @@ export class MemoryDb {
       (thinking_text IS NOT NULL AND length(thinking_text) > 0) AS has_thinking`;
     if (agentName) {
       return db.prepare(
-        `SELECT ${cols} FROM agent_runs WHERE agent_name = ? ORDER BY started_at DESC LIMIT ?`,
+        `SELECT ${cols} FROM agent_runs WHERE agent_name = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
       ).all(agentName, limit);
     }
     return db.prepare(
-      `SELECT ${cols} FROM agent_runs ORDER BY started_at DESC LIMIT ?`,
+      `SELECT ${cols} FROM agent_runs ORDER BY started_at DESC, id DESC LIMIT ?`,
     ).all(limit);
   }
 
@@ -1722,7 +1722,7 @@ export class MemoryDb {
     return db.prepare(
       `SELECT * FROM agent_messages
        WHERE (to_agent = ? OR to_agent = '*') AND read_at IS NULL
-       ORDER BY created_at ASC`,
+       ORDER BY created_at ASC, id ASC`,
     ).all(agentName);
   }
 
@@ -1912,8 +1912,14 @@ export class MemoryDb {
   /** Get conversation history for an agent */
   getConversationHistory(agentName: string, limit = 50): Record<string, unknown>[] {
     const db = this.requireDb();
+    // `id DESC` breaks the tie. created_at is a whole-second unixepoch, so
+    // every message of one turn shares a timestamp and the order among them
+    // was undefined — it came out right only because SQLite happened to walk
+    // the index in rowid order. The chat replay depends on this ordering to
+    // reconstruct alternating turns, so "happens to work" is not good enough.
     return db.prepare(
-      `SELECT * FROM agent_conversations WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?`,
+      `SELECT * FROM agent_conversations WHERE agent_name = ?
+        ORDER BY created_at DESC, id DESC LIMIT ?`,
     ).all(agentName, limit).reverse(); // chronological order
   }
 
