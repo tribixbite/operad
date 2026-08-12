@@ -4,7 +4,181 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+## [0.5.1] - 2026-08-12
+
+A reliability release. Two independent audits — one of the transport and
+persistence layers, one of the SQLite schema — plus an analysis of a live
+daemon log covering 2300 hours of uptime. The log turned out to be the richest
+source: several of the fixes below are for behaviour that had been broken
+continuously for months without ever surfacing as an error the user would see.
+
+### Fixed — remotely triggerable crashes
+
+- **Two unauthenticated, single-packet ways to kill the daemon.** Both were
+  evaluated before any token check and neither call site was inside a `try`,
+  and the process installed no `uncaughtException` handler — so either killed
+  the supervisor outright, orphaning every managed session and dropping the
+  restart timers and adopted PIDs held only in memory.
+
+      GET / HTTP/1.1\r\nHost:\r\n\r\n        → TypeError: Invalid URL
+      GET /ws  +  Cookie: operad_token=%     → URIError: URI malformed
+
+  `new URL()` rejects Host values Node's own HTTP parser accepts (empty,
+  `a b`, a bare `]`), and `decodeURIComponent` throws on any malformed
+  percent-encoding. The cookie path is worse than it looks: it decodes every
+  cookie set for the host, including ones written by unrelated apps on the
+  same loopback address, so it could also fire by accident. Request URLs are
+  now built by a parser that cannot throw, undecodable cookie values are kept
+  raw, the whole WebSocket upgrade listener is guarded, and an
+  `uncaughtException`/`unhandledRejection` handler logs and keeps the daemon
+  alive as defence in depth.
+
+### Fixed — silently broken since before 0.5.0
+
+- **Claude readiness detection never matched anything.** The patterns are
+  `$`-anchored with no `m` flag but are tested against a whole multi-line pane
+  capture, so `$` could only match the very end of the capture — and the TUI
+  always draws a footer and blank lines below its input row. The current
+  prompt glyph is also `❯`, not `>`. Captures from three live, idle sessions
+  matched zero patterns; the daemon log shows 288 readiness timeouts against 7
+  successes. Every Claude session start burned the full 60 s, and `auto_go`
+  never fired at all, because `sendGoToSession` skips the send unless
+  readiness is positively detected. The same `$`-without-`m` mistake is fixed
+  in the OpenCode and Codex adapters.
+- **A doomed `SIGCONT` retried every five seconds for seventy days.** The
+  auto-resume sweep cleared `auto_suspended` only when the signal succeeded,
+  which cannot happen once the session's processes are gone. One dead session
+  produced 5453 warnings.
+- **Health checks derived markers that could never match.** The cmdline marker
+  was the first token of the startup command, so a guard-style line —
+  `sh -c 'pgrep -f … || (…); cd … && exec ./run_gui.sh'` — yielded `pgrep`, a
+  process that has already exited. A second config yielded `DISPLAY=:1`,
+  because env-stripping ran once, before preamble-stripping. Both sessions
+  were reported degraded, and restart-eligible, on every sweep while being
+  perfectly healthy: 542 failures in the log. Derivation now prefers an `exec`
+  target, walks the command list skipping transient steps, and returns "no
+  marker" rather than one that cannot match.
+
+### Fixed — security
+
+- **`SameSite=Strict` does not isolate localhost, and the comment claiming it
+  did was wrong.** Cookies are not port-scoped, and per RFC 6265bis the "site"
+  for localhost or a bare IP excludes the port — so a page served from
+  `http://localhost:3000`, i.e. any other dev server the user runs, is
+  same-site with the dashboard and the browser attaches the session cookie.
+  Nothing else stopped it: Origin was consulted only to decide whether to emit
+  CORS headers, and almost every route parses its body regardless of
+  Content-Type, so a CORS-simple request needs no preflight.
+  `POST /api/send/<session>` injects arbitrary keystrokes into a live Claude
+  session. Cookie-authenticated requests are now checked against the origin
+  the request arrived on, port included; header and query tokens are not,
+  since a cross-origin page cannot read them.
+- **The IPC socket was world-connectable on Linux and macOS.** `listen()`
+  applies the process umask, giving mode 0755 under the desktop default. The
+  IPC surface is unauthenticated by design and includes `stop`, `shutdown`,
+  `create` and `send`. Now `chmod 0600`. Termux was safe only by accident of
+  Android's per-app umask.
+- **The dashboard token was written in cleartext to a world-readable log.**
+  `tmx.jsonl` is created by `appendFileSync` with no mode, so it is 0644 under
+  a desktop umask; the tokenised URL also went to `daemon-stderr.log` and came
+  back out of `GET /api/logs`. The URL is no longer logged, and both the log
+  and `trace.log` are created 0600.
+- **A symlink inside a project escaped the file-access gate.** Containment was
+  a purely textual comparison, so a link pointing at `~/.ssh/id_rsa` passed
+  and was then followed by `readFileSync`. Real paths are now resolved on both
+  sides first.
+- **Open redirect on the token handshake.** An absolute-form request target
+  gave `url.pathname` a leading `//`, and `Location: //evil.example.com/` is a
+  protocol-relative URL the browser follows off-origin.
+- **A wrong `Authorization: Bearer` shadowed a valid session cookie**, so any
+  proxy or browser extension injecting an Authorization header 401'd the whole
+  dashboard. Every credential a request carries is now tried.
+- **Unhandled errors returned `String(err)` to the client**, leaking absolute
+  paths, SQL text and stack messages. The detail goes to the log.
+- **`switchboard_update` merged the entire WebSocket message as a patch**, so
+  any key a client invented was persisted as switchboard state.
+
+### Fixed — data integrity
+
+- **A failed schema creation left a permanently broken database.** `init()`
+  ran roughly sixty DDL statements with no transaction, so a failure partway
+  through — a SQLite build without FTS5, `SQLITE_BUSY`, a full disk — left
+  half the tables present with no rollback. The caller logs one warning and
+  sets `memoryDb = null`, disabling the entire memory, agent, tools, schedule,
+  skills and workflow subsystem for the daemon's lifetime; the partial schema
+  then made every subsequent boot fail identically. Now one transaction.
+- **No `busy_timeout` was set**, so with WAL a second writer got `SQLITE_BUSY`
+  immediately instead of waiting. `operad upgrade` restarts the daemon in
+  place, so overlapping writers are a real scenario, and the hot write paths
+  have no `try`/`catch`. Set to 5 s.
+- **Corrupt `state.json` and `registry.json` were destroyed, not preserved.**
+  Both loaders logged a warning, returned a default, and the next write —
+  milliseconds later — overwrote the original, taking restart counts,
+  autostart pins, `bound_jsonl_id` and every dynamically registered session
+  with it. Writes here are atomic, so corruption always came from outside
+  operad, which is exactly when the evidence matters. Both now copy to a
+  `.corrupt` sibling first. The registry's version-mismatch branch hit the
+  same path, so running an older operad against a newer registry wiped it.
+- **The registry never validated session names on load**, despite a comment
+  claiming it did. That is the one path bypassing `add()`'s runtime checks,
+  and names reach tmux targets and filesystem paths.
+- **IPC corrupted non-ASCII text.** Each TCP chunk was decoded independently,
+  so a multi-byte UTF-8 sequence split across a chunk boundary silently became
+  U+FFFD — `operad send` with any non-ASCII payload was at risk. Both server
+  and client now use a `StringDecoder`.
+- **`decaySpecializations` reset the clock it filtered on**, so a stale entry
+  decayed exactly once and every later pass was a no-op. This install had 167
+  consolidation runs, nearly all of them doing nothing.
+- **A skill shipping a tool named `%` disabled every scheduled agent run.**
+  Three `LIKE` patterns interpolated caller-supplied text with no `ESCAPE`.
+- **Per-agent spend was under-reported.** The cost summary filtered to
+  `status='completed'`, dropping runs that failed after the model had already
+  produced output — cost that `completeAgentRun` deliberately preserves.
+- **Tool-lease usage was charged to the wrong lease.** The selection ordered
+  by `created_at DESC` with no budget filter, so a newer unscoped lease
+  absorbed the charges while the capped lease stayed at zero and never
+  exhausted.
+
+### Fixed — platform and correctness
+
+- **Static file serving was completely broken on Windows.** Containment
+  compared against a hardcoded `/` prefix while `resolve()` emits `\`, so
+  every asset failed the check and was rewritten to `index.html`: the
+  dashboard served its own HTML shell in place of its JavaScript and CSS and
+  rendered blank.
+- **The database directory was a hardcoded POSIX path.** On Windows the
+  database was created under `C:\Users\<u>\.local\share\operad\`, which
+  nothing else on that platform looks at, so `tmx doctor` reported "No
+  database yet" permanently. Both now resolve through a new
+  `Platform.defaultDataDir()`.
+- **PATCH request bodies were never read**, so toggling a schedule, toggling a
+  workflow and saving config overrides were all dead from the browser (500,
+  405 and 400 respectively). The unit tests missed it by calling the API
+  handler directly and bypassing the transport.
+- **`isRunning()` reported a live daemon dead.** Its HTTP fallback tested
+  `resp.ok`, and a token-gated daemon answers 401 — precisely the
+  socket-missing-but-alive case the fallback exists for. A false "dead"
+  invites the watchdog to start a second daemon. The notification's Pause and
+  Stop buttons and `operad fix-socket` were also silently unauthenticated, and
+  the built-in no-dashboard status page called `/api` with no credential at
+  all.
+- **`?limit=notanumber` returned the entire buffer.** `Number()` gave NaN and
+  `slice(-NaN)` degrades to `slice(0)`; `?limit=-5` skipped the first five
+  records instead of limiting. Sixteen call sites now share a validating
+  parser, and `days`, `goal_id`, `from` and `to` get the same treatment.
+- **`trace.log` grew without bound** — 16 MB on this install — and
+  `readTimeline` reads the whole file on every timeline request. Now rotated
+  at 2 MB. `readTail` also parsed every entry in a 5 MB log to return the last
+  100; the unfiltered path now parses only the tail.
+- **The WebSocket server and its keepalive interval leaked on every listen
+  retry.** Both were created before `listen()` could fail, so an EADDRINUSE
+  retry orphaned them — and a live interval keeps the event loop referenced,
+  so a daemon whose dashboard never bound would not exit on its own.
+- IPC connections had no idle timeout, the 1 MB guard ran before framing (so
+  one large write of many valid messages was dropped wholesale), and `stop()`
+  never destroyed live connections, so `close()` could not complete.
+
+### Fixed — carried from the previous round
 
 - **The dashboard showed no explanation when it was locked.** The API became
   token-gated in 0.5.0 but the client had no notion of it: static assets are

@@ -17,13 +17,32 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:18970/api/status
 
 Browsers use the one-time handshake instead: opening
 `http://host:18970/?token=<token>` exchanges it for an `HttpOnly;
-SameSite=Strict` cookie and redirects to a clean URL. `SameSite=Strict` is what
-makes the API CSRF-resistant — a cross-site page cannot cause the browser to
-attach the cookie at all.
+SameSite=Strict` cookie and redirects to a clean URL.
 
 `EventSource` and browser `WebSocket` cannot set headers, so `?token=<token>`
 is also accepted on `/api/*`. The WebSocket upgrade is gated identically; an
 unauthenticated upgrade is refused with `401`.
+
+A request may carry the token in more than one place (say a stale
+`Authorization` header from a proxy alongside a good cookie). All of them are
+tried; the request is authorised if any matches.
+
+**Origin check.** `SameSite=Strict` is not sufficient on its own here, and
+until 0.5.1 this document claimed otherwise. Cookies are not port-scoped, and
+per RFC 6265bis the "site" for `localhost` or a bare IP excludes the port — so
+a page on `http://localhost:3000`, i.e. any other dev server you happen to be
+running, is same-site with the dashboard and the browser attaches the cookie.
+Requests authenticated **by cookie** are therefore also checked against the
+`Origin` header: it must match the authority the request arrived on (port
+included) or appear in `[operad] allowed_origins`. Requests authenticated by
+`Authorization: Bearer` or `?token=` are not origin-checked, because a
+cross-origin page cannot read the token in the first place. A request with no
+`Origin` at all — curl, the CLI — is allowed; it has no ambient cookie to
+abuse.
+
+If you serve the dashboard from a separate dev server (`bun run dev` in
+`dashboard/`), add its origin to `allowed_origins` or the proxied API calls
+will 401.
 
 Unauthenticated requests get `401` with `WWW-Authenticate: Bearer`. Static
 dashboard assets are served without auth — they are public code, and the
@@ -32,7 +51,8 @@ performs an action is under `/api`.
 
 The token lives in `<state_dir>/dashboard-token` (mode 0600), not in
 `operad.toml` — configs get pasted into issues and committed to dotfile repos.
-`OPERAD_DASHBOARD_TOKEN` overrides it for containers and CI.
+`OPERAD_DASHBOARD_TOKEN` overrides it for containers and CI. It is deliberately
+not written to the log; use `operad token` to retrieve it.
 
 CORS: no `Access-Control-Allow-Origin` header is emitted unless the request's
 origin is in `[operad] allowed_origins`. Same-origin needs none.
@@ -41,8 +61,21 @@ origin is in `[operad] allowed_origins`. Same-origin needs none.
 
 Base URL: `http://localhost:18970` (port configurable via `dashboard_port` in `operad.toml`)
 
-All requests and responses use `application/json`. CORS headers are set to `*`.
-Body size limit: 1 MB. Request body timeout: 10 s.
+All requests and responses use `application/json`.
+Body size limit: 1 MB. Request body timeout: 10 s. Request bodies are read for
+`POST`, `PUT`, `PATCH` and `DELETE`.
+
+### Conventions
+
+**`?limit=`** — where a route accepts it, the value must be a positive
+integer; it is floored and capped at 1000. Anything else (non-numeric,
+negative, zero, infinite) falls back to the route's default rather than
+silently returning the whole collection. `days`, `goal_id`, `from` and `to`
+are validated the same way.
+
+**Error responses** — `4xx` bodies carry a specific `{ "error": … }`. A `500`
+returns a generic message; the detail, including any stack, goes to the daemon
+log. Malformed percent-encoding in a path segment is a `400`, not a `500`.
 
 ---
 
