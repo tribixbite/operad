@@ -17,7 +17,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -550,5 +550,61 @@ describe("getGitInfo — integration (requires git)", () => {
     expect(info.dirty_files).toEqual([]);
     // git log fails → empty recent_commits
     expect(info.recent_commits).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Symlink escape — the containment check is textual, so it has to be applied
+// to the REAL path or a link planted inside the project reads straight past it
+// ---------------------------------------------------------------------------
+
+describe("getFileContent resolves symlinks before the containment check", () => {
+  test("a symlink pointing outside the project is refused", () => {
+    const secretDir = mkdtempSync(join(tmpdir(), "operad-secret-"));
+    const secret = join(secretDir, "id_rsa");
+    writeFileSync(secret, "PRIVATE KEY MATERIAL");
+
+    try {
+      symlinkSync(secret, join(tmpDir, "innocent.txt"));
+    } catch {
+      return; // no symlink permission (Windows without dev mode) — nothing to assert
+    }
+
+    try {
+      // The path is textually inside the project; only the link target is not.
+      expect(() => getFileContent(tmpDir, "innocent.txt")).toThrow(/traversal/i);
+    } finally {
+      rmSync(secretDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlink pointing INSIDE the project is still allowed", () => {
+    writeFileSync(join(tmpDir, "real.txt"), "hello");
+    try {
+      symlinkSync(join(tmpDir, "real.txt"), join(tmpDir, "link.txt"));
+    } catch {
+      return;
+    }
+    expect(getFileContent(tmpDir, "link.txt").content).toContain("hello");
+  });
+
+  test("a directory is rejected rather than surfacing as EISDIR", () => {
+    mkdirSync(join(tmpDir, "adir"), { recursive: true });
+    expect(() => getFileContent(tmpDir, "adir")).toThrow(/not a file/i);
+  });
+
+  test("a symlinked directory cannot be listed outside the project", () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), "operad-outside-"));
+    writeFileSync(join(outsideDir, "leak.txt"), "x");
+    try {
+      symlinkSync(outsideDir, join(tmpDir, "escape"));
+    } catch {
+      return;
+    }
+    try {
+      expect(() => getFileTree(tmpDir, "escape")).toThrow(/traversal/i);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 });

@@ -172,7 +172,16 @@ export class Logger {
       const content = readFileSync(this.logFile, "utf-8");
       const allLines = content.trim().split("\n").filter(Boolean);
 
-      let entries: LogEntry[] = allLines.map((line: string) => {
+      // Parse only the lines that can survive the slice at the end.
+      //
+      // Every entry in a 5 MB file was JSON.parsed on each GET /api/logs just
+      // to throw all but the last 100 away. A session filter still needs the
+      // whole file — the matching entries could be anywhere — but the common
+      // unfiltered call now parses `lines` records instead of tens of
+      // thousands.
+      const candidates = sessionFilter ? allLines : allLines.slice(-lines);
+
+      let entries: LogEntry[] = candidates.map((line: string) => {
         try {
           return JSON.parse(line) as LogEntry;
         } catch {

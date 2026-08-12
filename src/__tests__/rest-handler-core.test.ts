@@ -92,6 +92,54 @@ describe("RestHandler — telemetry route", () => {
   });
 });
 
+/**
+ * `Number(queryParams.get("limit"))` is NaN for a non-numeric value, and the
+ * downstream `slice(-NaN)` degrades to `slice(0)` — the endpoint returned its
+ * ENTIRE buffer rather than the requested page. `?limit=-5` skipped the first
+ * five records instead of limiting. Both failed silently.
+ */
+describe("RestHandler — ?limit= validation", () => {
+  const seen: unknown[] = [];
+
+  const withSink = async () => {
+    fc.cleanup();
+    seen.length = 0;
+    fc = await makeFakeContext({
+      telemetrySink: {
+        getRecent: (limit: number, sdk?: string) => { seen.push(limit); return []; },
+        getStats: () => ({ total: 0, per_hour: 0, by_sdk: {}, started_at: "" }),
+      },
+    });
+    h = build();
+  };
+
+  const cases: Array<[string, number]> = [
+    ["notanumber", 100],   // NaN → default, NOT the whole buffer
+    ["-5", 100],           // negative → default, not a reverse slice
+    ["0", 100],            // zero is not a meaningful page size
+    ["", 100],             // present but empty
+    ["1e999", 100],        // Infinity is not a count → default, not the cap
+    ["99999999", 1000],    // absurd page → clamped to the cap
+    ["7", 7],              // a sane value is passed through
+    ["7.9", 7],            // fractional is floored
+  ];
+
+  for (const [raw, expected] of cases) {
+    test(`?limit=${JSON.stringify(raw)} resolves to ${expected}`, async () => {
+      await withSink();
+      const res = await h.handleDashboardApi("GET", `/api/telemetry?limit=${raw}`, "");
+      expect(res.status).toBe(200);
+      expect(seen).toEqual([expected]);
+    });
+  }
+
+  test("an absent limit uses the route default", async () => {
+    await withSink();
+    await h.handleDashboardApi("GET", "/api/telemetry", "");
+    expect(seen).toEqual([100]);
+  });
+});
+
 describe("RestHandler — POST lifecycle routes require POST", () => {
   const postRoutes = [
     "start", "stop", "restart", "close", "cleanup", "dedupe", "fix-socket",

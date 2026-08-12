@@ -124,10 +124,39 @@ const TRACE_PATH = join(
   detectPlatform().defaultLogDir(),
   "trace.log",
 );
+/**
+ * Rotate the trace log past this size.
+ *
+ * It had no cap at all and reached 16 MB on a long-lived install — and
+ * readTimeline() readFileSync's the WHOLE file and splits it on every
+ * `GET /api/timeline/<session>`. Kept smaller than tmx.jsonl's 5 MB because
+ * this file is only ever read for the recent tail.
+ */
+const MAX_TRACE_SIZE = 2 * 1024 * 1024;
+
+/** Only stat the trace file every N writes — this is on the hot path. */
+const TRACE_ROTATE_CHECK_INTERVAL = 500;
+let traceWritesSinceCheck = TRACE_ROTATE_CHECK_INTERVAL;
+
+function rotateTraceIfNeeded(): void {
+  if (++traceWritesSinceCheck < TRACE_ROTATE_CHECK_INTERVAL) return;
+  traceWritesSinceCheck = 0;
+  try {
+    if (!existsSync(TRACE_PATH)) return;
+    if (statSync(TRACE_PATH).size < MAX_TRACE_SIZE) return;
+    // One generation is enough: the point of this file is "what was the
+    // daemon doing when it was killed", not long-term history.
+    renameSync(TRACE_PATH, `${TRACE_PATH}.1`);
+  } catch {
+    // Rotation failure is non-fatal — worst case the file keeps growing.
+  }
+}
+
 function trace(msg: string): void {
   try {
+    rotateTraceIfNeeded();
     const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
-    appendFileSync(TRACE_PATH, `${ts} ${msg}\n`);
+    appendFileSync(TRACE_PATH, `${ts} ${msg}\n`, { mode: 0o600 });
   } catch {
     // Non-fatal — trace is best-effort
   }

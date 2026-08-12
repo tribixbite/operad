@@ -95,6 +95,50 @@ function chunkText(text: string, maxChars = 2000): string[] {
  * AgentEngine and ToolEngine are injected via constructor so REST routes
  * can delegate to them without reaching back into Daemon.
  */
+/** Largest page any `?limit=` may request. */
+const MAX_QUERY_LIMIT = 1000;
+
+/**
+ * Read a `?limit=` query parameter, rejecting anything that isn't a sane
+ * positive count.
+ *
+ * `Number(queryParams.get("limit"))` returned NaN for `?limit=notanumber`,
+ * and the downstream `slice(-NaN)` degrades to `slice(0)` — the endpoint
+ * returned its ENTIRE buffer rather than the requested page. `?limit=-5`
+ * skipped the first five records instead of limiting. Both are silent.
+ */
+function parseLimit(queryParams: URLSearchParams, fallback: number): number {
+  return parseCount(queryParams, "limit", fallback, MAX_QUERY_LIMIT);
+}
+
+/**
+ * Read a positive integer query parameter, falling back on anything unusable.
+ *
+ * The same NaN hazard as `limit`: a `days=abc` reaches date arithmetic, and a
+ * NaN cutoff compares as NULL in SQLite, so the endpoint quietly returns an
+ * empty series instead of an error.
+ */
+function parseCount(
+  queryParams: URLSearchParams,
+  name: string,
+  fallback: number,
+  max: number,
+): number {
+  if (!queryParams.has(name)) return fallback;
+  const raw = Number(queryParams.get(name));
+  if (!Number.isFinite(raw)) return fallback;
+  const n = Math.floor(raw);
+  if (n < 1) return fallback;
+  return Math.min(n, max);
+}
+
+/** Read an optional integer id/epoch parameter; undefined when unusable. */
+function parseOptionalInt(queryParams: URLSearchParams, name: string): number | undefined {
+  if (!queryParams.has(name)) return undefined;
+  const raw = Number(queryParams.get(name));
+  return Number.isFinite(raw) ? Math.floor(raw) : undefined;
+}
+
 export class RestHandler {
   /** Domain-specific route handlers — extracted from RestHandler private helpers */
   private readonly customizationRoutes: CustomizationRoutes;
@@ -183,7 +227,7 @@ export class RestHandler {
             return { status: 200, data: { records: [], stats: { total: 0, per_hour: 0, by_sdk: {}, started_at: "" } } };
           }
           const sdkFilter = queryParams.get("sdk") as import("./types.js").TelemetrySdk | null;
-          const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 100;
+          const limit = parseLimit(queryParams, 100);
           return {
             status: 200,
             data: {
@@ -984,7 +1028,7 @@ export class RestHandler {
             if (!sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
             try {
               const dir = queryParams.get("dir") ?? undefined;
-              const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+              const limit = parseLimit(queryParams, 50);
               const sessions = await sdkBridge.listAllSessions(dir, limit);
               return { status: 200, data: sessions };
             } catch (err) {
@@ -1031,7 +1075,7 @@ export class RestHandler {
               return { status: 200, data: run };
             }
             const agentFilter = queryParams.get("agent") ?? undefined;
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            const limit = parseLimit(queryParams, 50);
             return { status: 200, data: memoryDb.getAgentRuns(limit, agentFilter) };
           }
 
@@ -1138,7 +1182,7 @@ export class RestHandler {
           if (subCmd && arg === "learnings" && method === "GET") {
             if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             const category = queryParams.get("category") ?? undefined;
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const limit = parseLimit(queryParams, 20);
             return { status: 200, data: memoryDb.getAgentLearnings(subCmd, limit, category) };
           }
 
@@ -1157,7 +1201,7 @@ export class RestHandler {
 
           if (subCmd && arg === "strategy-history" && method === "GET") {
             if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const limit = parseLimit(queryParams, 20);
             return { status: 200, data: memoryDb.getStrategyHistory(subCmd, limit) };
           }
 
@@ -1254,7 +1298,7 @@ export class RestHandler {
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (agentName && method === "GET") {
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            const limit = parseLimit(queryParams, 50);
             return { status: 200, data: memoryDb.getConversationHistory(agentName, limit) };
           }
           if (agentName && method === "DELETE") {
@@ -1268,7 +1312,7 @@ export class RestHandler {
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (!name && method === "GET") {
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            const limit = parseLimit(queryParams, 50);
             return { status: 200, data: memoryDb.getRecentAgentMessages(limit) };
           }
 
@@ -1287,7 +1331,7 @@ export class RestHandler {
           if (name && segments[2] && method === "GET") {
             const agent1 = decodeURIComponent(name);
             const agent2 = decodeURIComponent(segments[2]);
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+            const limit = parseLimit(queryParams, 50);
             return { status: 200, data: memoryDb.getConversation(agent1, agent2, limit) };
           }
 
@@ -1367,7 +1411,7 @@ export class RestHandler {
           }
 
           if (subCmd === "decisions" && method === "GET") {
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const limit = parseLimit(queryParams, 20);
             const agentFilter = queryParams.get("agent") ?? undefined;
             return { status: 200, data: memoryDb.getRecentDecisions(limit, agentFilter) };
           }
@@ -1398,7 +1442,7 @@ export class RestHandler {
 
           if (!subCmd && method === "GET") {
             const category = queryParams.get("category") ?? undefined;
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 100;
+            const limit = parseLimit(queryParams, 100);
             return { status: 200, data: memoryDb.getProfile(category, limit) };
           }
 
@@ -1502,11 +1546,11 @@ export class RestHandler {
           if (method === "GET" && projectPath) {
             if (segments[2] === "search") {
               const q = queryParams.get("q") ?? "";
-              const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 10;
+              const limit = parseLimit(queryParams, 10);
               const results = memoryDb.searchMemories(projectPath, q, limit);
               return { status: 200, data: results };
             }
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const limit = parseLimit(queryParams, 20);
             const memories = memoryDb.getTopMemories(projectPath, limit);
             return { status: 200, data: memories };
           }
@@ -1561,7 +1605,7 @@ export class RestHandler {
               if (!tool) return { status: 404, data: { error: `Tool "${name}" not found` } };
               const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
               if (arg === "history" && memoryDb) {
-                const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 50;
+                const limit = parseLimit(queryParams, 50);
                 const executions = memoryDb.getToolExecutions(undefined, limit)
                   .filter((e) => e.tool_name === name);
                 return { status: 200, data: executions };
@@ -1621,7 +1665,7 @@ export class RestHandler {
             return { status: 200, data: leases };
           }
           if (method === "DELETE" && name) {
-            const goalId = queryParams.has("goal_id") ? Number(queryParams.get("goal_id")) : undefined;
+            const goalId = parseOptionalInt(queryParams, "goal_id");
             const revoked = memoryDb.revokeLeases(name, goalId);
             return { status: 200, data: { revoked } };
           }
@@ -1632,7 +1676,7 @@ export class RestHandler {
           if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
 
           if (method === "GET") {
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 10;
+            const limit = parseLimit(queryParams, 10);
             const history = getConsolidationHistory(memoryDb, limit);
             const lastRun = getLastConsolidationTime(memoryDb);
             return { status: 200, data: { last_run_at: lastRun, history } };
@@ -1667,7 +1711,7 @@ export class RestHandler {
           if (!memoryDb) return { status: 503, data: { error: "Database not ready" } };
 
           if (method === "GET") {
-            const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+            const limit = parseLimit(queryParams, 20);
             try {
               const dbHandle = memoryDb.requireDb();
               const messages = dbHandle.prepare(
@@ -1990,7 +2034,7 @@ export class RestHandler {
         case "tokens-daily": {
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
           if (method === "GET") {
-            const days = queryParams.has("days") ? Number(queryParams.get("days")) : 14;
+            const days = parseCount(queryParams, "days", 14, 3650);
             return { status: 200, data: memoryDb.getDailyTokens(days) };
           }
           return { status: 405, data: { error: "Method not allowed" } };
@@ -2010,19 +2054,19 @@ export class RestHandler {
 
           if (method === "GET") {
             if (name === "daily") {
-              const days = queryParams.has("days") ? Number(queryParams.get("days")) : 30;
+              const days = parseCount(queryParams, "days", 30, 3650);
               return { status: 200, data: memoryDb.getDailyCosts(days) };
             }
             if (name === "per-session") {
-              const limit = queryParams.has("limit") ? Number(queryParams.get("limit")) : 20;
+              const limit = parseLimit(queryParams, 20);
               return { status: 200, data: memoryDb.getPerSessionCosts(limit) };
             }
             if (name) {
               const costs = memoryDb.getSessionCosts(name);
               return { status: 200, data: costs };
             }
-            const fromEpoch = queryParams.has("from") ? Number(queryParams.get("from")) : undefined;
-            const toEpoch = queryParams.has("to") ? Number(queryParams.get("to")) : undefined;
+            const fromEpoch = parseOptionalInt(queryParams, "from");
+            const toEpoch = parseOptionalInt(queryParams, "to");
             return { status: 200, data: memoryDb.getAggregateCosts(fromEpoch, toEpoch) };
           }
 

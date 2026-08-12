@@ -6,7 +6,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, resolve, relative, isAbsolute, extname, basename } from "node:path";
 
 /**
@@ -21,6 +21,26 @@ function isContained(base: string, target: string, allowSelf: boolean): boolean 
   const rel = relative(base, target);
   if (rel === "") return allowSelf;
   return !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Resolve symlinks before a containment check.
+ *
+ * `isContained` is purely textual, so a symlink inside the project directory
+ * pointing at ~/.ssh/id_rsa or /etc/shadow passed the check and was then
+ * happily followed by readFileSync. Resolving first makes the check apply to
+ * the file actually opened.
+ *
+ * Falls back to the lexical path when the target does not exist — the caller's
+ * subsequent stat/read produces the right ENOENT rather than a confusing
+ * "traversal blocked".
+ */
+function realPathOrSelf(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    return target;
+  }
 }
 import type { GitInfo, FileEntry, FileContentResponse } from "./types.js";
 
@@ -153,8 +173,14 @@ export function getFileTree(projectPath: string, subdir?: string): FileEntry[] {
     ? resolve(projectPath, subdir)
     : projectPath;
 
-  // Path traversal protection: resolved path must be the project dir or under it.
-  if (!isContained(projectPath, targetDir, /* allowSelf */ true)) {
+  // Path traversal protection: resolved path must be the project dir or under
+  // it. Real paths, so a symlinked subdirectory cannot list outside the
+  // project (see getFileContent).
+  if (!isContained(
+    realPathOrSelf(resolve(projectPath)),
+    realPathOrSelf(targetDir),
+    /* allowSelf */ true,
+  )) {
     throw new Error("Path traversal blocked");
   }
 
@@ -197,11 +223,21 @@ export function getFileContent(projectPath: string, filePath: string): FileConte
   const fullPath = resolve(projectPath, filePath);
 
   // Path traversal protection — must be strictly under the project dir.
-  if (!isContained(projectPath, fullPath, /* allowSelf */ false)) {
+  // Compare REAL paths: the check is textual, so without this a symlink
+  // planted in the project pointing at ~/.ssh/id_rsa passed and was read.
+  // The base is resolved too, or a project reached through a symlinked
+  // parent would fail its own containment check.
+  const realBase = realPathOrSelf(resolve(projectPath));
+  if (!isContained(realBase, realPathOrSelf(fullPath), /* allowSelf */ false)) {
     throw new Error("Path traversal blocked");
   }
 
   const st = statSync(fullPath);
+  // A directory here would otherwise reach readFileSync and surface as an
+  // opaque EISDIR 500.
+  if (!st.isFile()) {
+    throw new Error("Not a file");
+  }
   const truncated = st.size > MAX_FILE_SIZE;
   const readSize = truncated ? MAX_FILE_SIZE : st.size;
 
