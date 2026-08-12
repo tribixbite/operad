@@ -387,7 +387,10 @@ describe("RestHandler — dispatch envelope", () => {
     h = build();
     const res = await h.handleDashboardApi("GET", "/api/status", "");
     expect(res.status).toBe(500);
-    expect((res.data as { error: string }).error).toContain("kaboom");
+    // The detail goes to the log, not the body: String(err) on an unexpected
+    // throw carries absolute paths, SQL text and stack messages.
+    expect((res.data as { error: string }).error).not.toContain("kaboom");
+    expect((res.data as { error: string }).error).toContain("Internal error");
   });
 
   test("ok:false delegate response maps to 400 with the error", async () => {

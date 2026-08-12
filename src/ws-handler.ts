@@ -18,6 +18,22 @@ import type { Switchboard } from "./types.js";
 import { buildMemoryPrompt } from "./memory-injector.js";
 
 /**
+ * The boolean fields a `switchboard_update` message may set.
+ *
+ * Listed explicitly so an unknown key in a client message cannot be
+ * persisted as switchboard state. Kept in sync with the Switchboard
+ * interface in types.ts; `agents` is handled separately as a record.
+ */
+const SWITCHBOARD_BOOLEAN_KEYS = [
+  "all",
+  "sdkBridge",
+  "cognitive",
+  "oodaAutoTrigger",
+  "memoryInjection",
+  "mindMeld",
+] as const satisfies ReadonlyArray<keyof Switchboard>;
+
+/**
  * WsHandler — handles inbound WebSocket messages and builds WS broadcast payloads.
  *
  * Delegates to:
@@ -201,9 +217,26 @@ export class WsHandler {
       }
 
       case "switchboard_update": {
-        // Apply partial switchboard update from WS client
-        const patch = msg as unknown as Partial<Switchboard>;
-        delete (patch as any).type; // strip the WS message type field
+        // Apply a partial switchboard update from a WS client.
+        //
+        // This used to forward the ENTIRE message as the patch with only
+        // `type` stripped, so every other key the client sent — sessionName,
+        // or anything a caller invented — was handed to updateSwitchboard and
+        // persisted alongside the real settings. Build the patch explicitly
+        // from the known fields instead.
+        const patch: Partial<Switchboard> = {};
+        for (const key of SWITCHBOARD_BOOLEAN_KEYS) {
+          if (typeof msg[key] === "boolean") patch[key] = msg[key] as boolean;
+        }
+        // `agents` is a Record<string, boolean>; accept only that shape.
+        const agents = msg.agents;
+        if (agents && typeof agents === "object" && !Array.isArray(agents)) {
+          const cleaned: Record<string, boolean> = {};
+          for (const [name, value] of Object.entries(agents)) {
+            if (typeof value === "boolean") cleaned[name] = value;
+          }
+          patch.agents = cleaned;
+        }
         this.ctx.updateSwitchboard(patch);
         ws.send(JSON.stringify(this.buildSwitchboardPayload()));
         break;

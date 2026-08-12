@@ -2079,7 +2079,12 @@ export class RestHandler {
 
       return { status: resp.ok ? 200 : 400, data: resp.ok ? resp.data : { error: resp.error } };
     } catch (err) {
-      return { status: 500, data: { error: String(err) } };
+      // The full error goes to the log, not the response body. String(err)
+      // on an unexpected throw carries absolute paths, SQL text and stack
+      // messages; the route is token-gated, but there is no reason to hand
+      // that to a client when the log already has it.
+      this.ctx.log.error(`Unhandled error in ${method} ${path}: ${err instanceof Error ? err.stack : String(err)}`);
+      return { status: 500, data: { error: "Internal error — see daemon log" } };
     }
   }
 
