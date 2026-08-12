@@ -242,6 +242,10 @@ export class AgentEngine {
     const pin = this.ctx.getConsumerTracker().acquire("agent_cycle");
     const releasePin = pin.release;
 
+    // Hoisted so the catch can finalise the row; it was declared inside the
+    // try, which is why the error path could never close it out.
+    let runId = 0;
+
     try {
       const masterAgent = agentConfigs.find((a) => a.name === "master-controller");
       if (!masterAgent) return;
@@ -249,7 +253,7 @@ export class AgentEngine {
       const sdkDef = toSdkAgentMap([masterAgent])["master-controller"];
       const cwd = config.sessions.find((s) => s.path)?.path ?? homedir();
 
-      const runId = memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone", oodaPrompt);
+      runId = memoryDb.startAgentRun("master-controller", "ooda-cycle", "standalone", oodaPrompt);
 
       const result = await sdkBridge.runStandaloneAgent(
         "master-controller", sdkDef, cwd, oodaPrompt, masterAgent.max_budget_usd,
@@ -282,6 +286,18 @@ export class AgentEngine {
       });
     } catch (err) {
       log.error(`OODA cycle failed: ${err}`);
+      // Close the run row out. startAgentRun inserted it as 'running', and
+      // nothing here completed it on the error path — so any throw from
+      // runStandaloneAgent (SDK missing, bridge busy, budget abort) left the
+      // row 'running' forever, with no startup reconciliation anywhere. They
+      // accumulated in the dashboard indefinitely.
+      if (runId) {
+        try {
+          memoryDb.completeAgentRun(runId, "failed", { error: String(err) });
+        } catch (dbErr) {
+          log.warn(`Could not finalise OODA run ${runId}: ${dbErr}`);
+        }
+      }
       this.ctx.broadcast("ooda_status", { running: false, error: String(err) });
     } finally {
       releasePin();

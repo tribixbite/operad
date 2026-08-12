@@ -1660,22 +1660,32 @@ export class MemoryDb {
   ): number {
     const db = this.requireDb();
 
-    // Deactivate current strategy
-    db.prepare(
-      `UPDATE agent_strategies SET active = 0 WHERE agent_name = ? AND active = 1`,
-    ).run(agentName);
+    // Deactivate-then-insert must be atomic. Without a transaction, an INSERT
+    // that throws (constraint violation, disk full) left every row for this
+    // agent with active = 0 — getActiveStrategy then returns undefined and the
+    // agent silently loses its strategy entirely.
+    db.exec("BEGIN");
+    try {
+      db.prepare(
+        `UPDATE agent_strategies SET active = 0 WHERE agent_name = ? AND active = 1`,
+      ).run(agentName);
 
-    // Get latest version number
-    const latest = db.prepare(
-      `SELECT MAX(version) as v FROM agent_strategies WHERE agent_name = ?`,
-    ).get(agentName) as { v: number | null } | undefined;
-    const nextVersion = (latest?.v ?? 0) + 1;
+      const latest = db.prepare(
+        `SELECT MAX(version) as v FROM agent_strategies WHERE agent_name = ?`,
+      ).get(agentName) as { v: number | null } | undefined;
+      const nextVersion = (latest?.v ?? 0) + 1;
 
-    const result = db.prepare(
-      `INSERT INTO agent_strategies (agent_name, strategy_text, version, rationale, performance_score)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).run(agentName, strategyText, nextVersion, rationale, performanceScore ?? null);
-    return Number(result.lastInsertRowid);
+      const result = db.prepare(
+        `INSERT INTO agent_strategies (agent_name, strategy_text, version, rationale, performance_score)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(agentName, strategyText, nextVersion, rationale, performanceScore ?? null);
+
+      db.exec("COMMIT");
+      return Number(result.lastInsertRowid);
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   /** Get strategy version history for an agent */

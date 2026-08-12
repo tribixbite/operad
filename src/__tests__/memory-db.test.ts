@@ -1388,3 +1388,33 @@ describe("pruneHistory", () => {
     for (const v of Object.values(removed)) expect(v).toBeGreaterThanOrEqual(0);
   });
 });
+
+// -- evolveStrategy atomicity ------------------------------------------------
+
+describe("evolveStrategy", () => {
+  test("a failed insert leaves the previous strategy active", () => {
+    db.evolveStrategy("atomic-agent", "first", "r1");
+    const before = db.getActiveStrategy("atomic-agent") as any;
+    expect(String(before.strategy_text)).toBe("first");
+
+    // Force the INSERT to fail: strategy_text is NOT NULL.
+    expect(() => db.evolveStrategy("atomic-agent", null as any, "r2")).toThrow();
+
+    // Deactivate-then-insert without a transaction would have left every row
+    // active = 0 here, and the agent would have no strategy at all.
+    const after = db.getActiveStrategy("atomic-agent") as any;
+    expect(after).toBeDefined();
+    expect(String(after.strategy_text)).toBe("first");
+  });
+
+  test("a successful evolve swaps the active strategy", () => {
+    db.evolveStrategy("swap-agent", "v1", "r");
+    db.evolveStrategy("swap-agent", "v2", "r");
+    const active = db.getActiveStrategy("swap-agent") as any;
+    expect(String(active.strategy_text)).toBe("v2");
+    const actives = db.requireDb()
+      .prepare(`SELECT COUNT(*) c FROM agent_strategies WHERE agent_name='swap-agent' AND active=1`)
+      .get() as any;
+    expect(actives.c).toBe(1);
+  });
+});
