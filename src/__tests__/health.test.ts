@@ -844,4 +844,47 @@ describe("deriveCmdlineMarker", () => {
     expect(deriveCmdlineMarker("s", "sh")).toBeNull();
     expect(deriveCmdlineMarker("s", "bash")).toBeNull();
   });
+
+  // The following cover markers that could NEVER match the running process,
+  // so the health check failed on every sweep — the session was reported
+  // degraded (and restart-eligible) while its process was perfectly healthy.
+  // Both were found in a live daemon log, not hypothesised.
+
+  test("a leading guard command is not mistaken for the binary", () => {
+    // Real config: a pgrep guard starts the X server if absent, then execs
+    // the GUI. `pgrep` exits immediately and is never in the cmdline.
+    const cmd =
+      `sh -c 'pgrep -f "Xtermux-x11 :1" >/dev/null || ` +
+      `(termux-x11 :1 -ac >/dev/null 2>&1 & sleep 1) ; ` +
+      `cd ~/git/x2d && DISPLAY=:1 exec ./run_gui.sh'`;
+    expect(deriveCmdlineMarker("x2d", cmd)).toBe("run_gui.sh");
+  });
+
+  test("an exec target outranks everything before it", () => {
+    expect(deriveCmdlineMarker("s", "cd /srv && exec myserver --port 1")).toBe("myserver");
+    expect(deriveCmdlineMarker("s", "cd /srv && exec DISPLAY=:1 myserver")).toBe("myserver");
+  });
+
+  test("an env assignment after a preamble is not the marker", () => {
+    // Env-stripping used to run once, before preamble-stripping, so a command
+    // shaped `sleep 3 && DISPLAY=:1 bun …` derived the marker `DISPLAY=:1`.
+    const m = deriveCmdlineMarker("playwright", "sleep 3 && DISPLAY=:1 bun ./cli.js --port 8989");
+    expect(m).not.toBe("DISPLAY=:1");
+    expect(m?.includes("=")).not.toBe(true);
+  });
+
+  test("a command of only transient steps yields null, not a false marker", () => {
+    expect(deriveCmdlineMarker("s", "cd /tmp && sleep 5")).toBeNull();
+    expect(deriveCmdlineMarker("s", "pgrep -f foo || true")).toBeNull();
+  });
+
+  test("the closing quote of an sh -c wrapper is not glued to the token", () => {
+    expect(deriveCmdlineMarker("s", `sh -c 'syncthing serve'`)).toBe("syncthing");
+    expect(deriveCmdlineMarker("s", `sh -c 'cd /x && exec ./run_gui.sh'`)).toBe("run_gui.sh");
+  });
+
+  test("operators inside quoted arguments do not split the command", () => {
+    // `-f "a && b"` must not be read as two commands.
+    expect(deriveCmdlineMarker("s", `syncthing --filter "a && b"`)).toBe("syncthing");
+  });
 });

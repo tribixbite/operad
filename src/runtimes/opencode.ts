@@ -25,10 +25,12 @@ import type { SessionConfig } from "../types.js";
  * set so first-cut behaviour is at least no-worse.
  */
 const OPENCODE_READY_PATTERNS: readonly RegExp[] = [
-  /opencode\s*[>›]/i,  // OpenCode's branded prompt
-  /›\s*$/,             // angle prompt some TUIs use
-  />\s*$/,             // generic prompt
-  /\$\s*$/,            // shell fallback
+  // Anchors carry `m` and require a prompt-only line: these match a whole
+  // multi-line pane capture, where a bare `$` anchors to the end of the entire
+  // string and so never fires once a TUI draws a footer below its input row.
+  /opencode\s*[>›]/i,     // OpenCode's branded prompt
+  /^\s*[›❯>]\s*$/m,       // angle/generic prompt alone on its line
+  /^\s*\$\s*$/m,          // shell fallback
 ];
 
 export const opencodeRuntime: SessionRuntime = {

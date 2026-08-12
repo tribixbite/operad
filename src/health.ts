@@ -263,23 +263,102 @@ export function deriveCmdlineMarker(
   return deriveFromCommand(command2);
 }
 
-/** Extract the first meaningful executable token from a shell command. */
-function deriveFromCommand(command: string): string | null {
-  // Strip env-var assignments and leading `sh -c` so we look at what the
-  // shell actually executes. Then take the first token.
-  let stripped = command.replace(/^\s*sh\s+-c\s+['"]?/, "");
-  stripped = stripped.replace(/^(?:[A-Z_][A-Z0-9_]*=\S+\s+)+/g, "");
-  // Skip obvious leading no-op preambles like `rm -f … ;` / `sleep 3 &&`.
-  const preambleMatch = stripped.match(/^(?:rm\s+-f[^;&]*[;&]+|sleep\s+\d+\s*&&\s*)+/);
-  if (preambleMatch) stripped = stripped.slice(preambleMatch[0].length);
-  const firstToken = stripped.trim().split(/\s+/)[0] ?? "";
-  if (firstToken.length >= 4 && !/^(bash|sh|exec)$/.test(firstToken)) {
-    // Use the basename: a startup command may be an absolute path
-    // (/data/.../bin/claude) while the running process shows just `claude`,
-    // or vice versa. The basename is the part both forms share.
-    const base = firstToken.split("/").pop() || firstToken;
-    return base.length >= 4 ? base : firstToken;
+/**
+ * Commands that run and exit before the session's real process starts.
+ *
+ * A startup command is frequently a small script rather than a single binary:
+ * a `pgrep` guard that conditionally launches a dependency, a `cd` into the
+ * project, a `sleep` to let a port settle. None of these are ever visible in
+ * the long-running process's cmdline, so picking one as the marker makes the
+ * health check fail on EVERY sweep — the session is marked degraded and
+ * restarted forever while the process it is "checking" is perfectly fine.
+ */
+const TRANSIENT_COMMANDS = new Set([
+  "cd", "sleep", "rm", "mkdir", "touch", "export", "source", "unset", "umask",
+  "pgrep", "pkill", "test", "true", "false", "echo", "printf", "wait", "kill",
+  "killall", "sync", "chmod", "chown", "mv", "cp", "ln", "sh", "bash", "zsh",
+  "env", "exec", "eval", "trap", "set", "shift", "read", "which", "command",
+]);
+
+/** Reduce a path-ish token to the part a cmdline is likely to share with it. */
+function markerFromToken(token: string): string | null {
+  // Trim shell punctuation that can cling to a token when we slice a command
+  // apart: a closing quote from `sh -c '…'`, a subshell paren, a redirect.
+  const cleaned = token.replace(/^[('"`{]+/, "").replace(/[)'"`}]+$/, "");
+  if (!cleaned) return null;
+  // Env assignments (`DISPLAY=:1`) are not executables. They used to slip
+  // through whenever they appeared after a preamble rather than at the start.
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(cleaned)) return null;
+  // Use the basename: a startup command may be an absolute path
+  // (/data/.../bin/claude) while the running process shows just `claude`,
+  // or vice versa. The basename is the part both forms share.
+  const base = cleaned.split("/").pop() || cleaned;
+  const candidate = base.length >= 4 ? base : cleaned;
+  if (candidate.length < 4) return null;
+  if (TRANSIENT_COMMANDS.has(candidate)) return null;
+  return candidate;
+}
+
+/**
+ * Split a shell command on top-level control operators (`&&`, `||`, `;`, `|`,
+ * `&`), ignoring operators inside quotes. Quote tracking matters: the x2d
+ * command's guard is `pgrep -f "Xtermux-x11 :1"`, and a naive split would cut
+ * inside unrelated quoted arguments.
+ */
+function splitTopLevel(command: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    const two = command.slice(i, i + 2);
+    if (two === "&&" || two === "||") { parts.push(current); current = ""; i++; continue; }
+    if (ch === ";" || ch === "|" || ch === "&") { parts.push(current); current = ""; continue; }
+    current += ch;
   }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
+/** Extract the executable token a running process is most likely to show. */
+function deriveFromCommand(command: string): string | null {
+  let body = command.trim();
+
+  // Unwrap `sh -c '…'` / `bash -c "…"`, including the CLOSING quote. The
+  // previous implementation stripped only the opening one, leaving a stray
+  // quote glued to the final token.
+  const wrapped = body.match(/^(?:\S*\/)?(?:ba|z|k|a|)sh\s+-c\s+(['"])([\s\S]*)\1$/);
+  if (wrapped) body = wrapped[2].trim();
+  else body = body.replace(/^(?:\S*\/)?(?:ba|z|k|a|)sh\s+-c\s+['"]?/, "").trim();
+
+  // `exec X` is definitive: the shell REPLACES itself with X, so X is exactly
+  // what the health check will see in /proc. It outranks everything earlier in
+  // the command — guards, `cd`, backgrounded helpers — regardless of position.
+  const execMatch = body.match(/(?:^|[;&|(]\s*|\s)exec\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(\S+)/);
+  if (execMatch) {
+    const marker = markerFromToken(execMatch[1]);
+    if (marker) return marker;
+  }
+
+  // Otherwise walk the command list left-to-right and take the first segment
+  // that names a process likely to still exist at check time.
+  for (const segment of splitTopLevel(body)) {
+    // Drop leading env assignments on this segment (`DISPLAY=:1 bun …`).
+    const withoutEnv = segment.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, "").trim();
+    if (!withoutEnv) continue;
+    const marker = markerFromToken(withoutEnv.split(/\s+/)[0] ?? "");
+    if (marker) return marker;
+  }
+
+  // Nothing identifiable. Returning null means liveness-only, which is a
+  // weaker check but an honest one — far better than a marker that can never
+  // match and therefore reports a healthy session as dead forever.
   return null;
 }
 

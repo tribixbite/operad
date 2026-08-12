@@ -22,10 +22,12 @@ import type { SessionConfig } from "../types.js";
  * as fallbacks so the first-cut behaviour matches Claude's robustness.
  */
 const CODEX_READY_PATTERNS: readonly RegExp[] = [
-  /codex\s*[>›]/i,     // Codex's branded prompt (if any)
-  /›\s*$/,
-  />\s*$/,
-  /\$\s*$/,
+  // See the OpenCode adapter: anchors need `m` to match a line rather than
+  // the end of the whole pane capture, and must be prompt-only to avoid
+  // treating arbitrary output that ends in `>` as an input prompt.
+  /codex\s*[>›]/i,        // Codex's branded prompt (if any)
+  /^\s*[›❯>]\s*$/m,
+  /^\s*\$\s*$/m,
 ];
 
 export const codexRuntime: SessionRuntime = {

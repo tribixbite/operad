@@ -33,12 +33,29 @@ function conversationExists(projectPath: string | undefined, sessionId: string):
   }
 }
 
-/** Patterns that indicate Claude Code's TUI is at an input prompt. */
+/**
+ * Patterns that indicate Claude Code's TUI is at an input prompt.
+ *
+ * These are matched against a whole tmux pane capture — a MULTI-LINE string.
+ * The previous set was written as if it were matching a single line: `/>\s*$/`
+ * and friends have no `m` flag, so `$` anchors to the end of the ENTIRE
+ * capture, and Claude's TUI leaves blank lines below its footer. Three live,
+ * fully-ready sessions were checked against the old set and matched none of
+ * them, so every Claude start burned the full 60 s readiness timeout, and
+ * `auto_go` never fired at all (`sendGoToSession` skips the send unless
+ * readiness is positively detected).
+ *
+ * Anchored patterns now carry `m` and require the line to hold ONLY the
+ * prompt, so an ordinary line of output that happens to end in `>` — closing
+ * an HTML tag, say — is not mistaken for a prompt.
+ */
 const CLAUDE_READY_PATTERNS: readonly RegExp[] = [
-  />\s*$/,           // generic prompt indicator
-  /\$\s*$/,          // shell prompt (fallback when claude itself hasn't drawn)
-  /claude\s*>/i,     // claude's own prompt
-  /\?\s*$/,          // question prompt ("What would you like to do?")
+  /^\s*[❯>›]\s*$/m,          // input prompt alone on its line (current TUI uses U+276F)
+  /[│|]\s*[❯>]/,             // prompt inside a box-drawn input row
+  /shift\+tab to cycle/i,    // permission-mode footer, drawn with the input box
+  /\?\s+for\s+shortcuts/i,   // shortcuts footer on a freshly started session
+  /claude\s*>/i,             // legacy branded prompt
+  /^\s*\$\s*$/m,             // shell fallback when claude itself hasn't drawn
 ];
 
 export const claudeRuntime: SessionRuntime = {

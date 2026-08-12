@@ -116,6 +116,77 @@ describe("claude adapter", () => {
   });
 });
 
+/**
+ * Readiness is matched against a WHOLE tmux pane capture, not a single line.
+ *
+ * The original patterns (`/>\s*$/`, `/\$\s*$/`, `/\?\s*$/`) had no `m` flag,
+ * so `$` anchored to the end of the entire capture — and every real TUI draws
+ * a footer and trailing blank lines below its input row. Captures taken from
+ * three live, idle Claude sessions matched none of them, so each start burned
+ * the full 60 s timeout and `auto_go` never sent its "go" (sendGoToSession
+ * skips the send unless readiness is positively detected).
+ *
+ * The fixtures below are trimmed from real `tmux capture-pane` output.
+ */
+describe("readiness detection against realistic pane captures", () => {
+  const isReady = (rt: { readyPatterns: readonly RegExp[] }, pane: string): boolean =>
+    rt.readyPatterns.some((p) => p.test(pane));
+
+  // Real Claude Code TUI: box rule, U+276F prompt row, mode footer, blank lines.
+  const CLAUDE_IDLE_PANE = [
+    "  ⎿  Shell cwd was reset to",
+    "     /home/u/git/thing",
+    "─────────────────── can you update yt-dlp (Branch 2) ──",
+    "❯",
+    "────────────────────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for …",
+    "",
+    "",
+  ].join("\n");
+
+  const CLAUDE_FRESH_PANE = ["╭────────────╮", "│ >          │", "╰────────────╯", "  ? for shortcuts", ""].join("\n");
+
+  test("an idle Claude pane is detected as ready", () => {
+    expect(isReady(claudeRuntime, CLAUDE_IDLE_PANE)).toBe(true);
+  });
+
+  test("a freshly-drawn Claude input box is detected as ready", () => {
+    expect(isReady(claudeRuntime, CLAUDE_FRESH_PANE)).toBe(true);
+  });
+
+  test("a trailing footer below the prompt does not defeat the anchor", () => {
+    // The specific regression: content after the prompt row used to make
+    // every `$`-anchored pattern miss.
+    expect(isReady(claudeRuntime, "❯\nsome footer line\n")).toBe(true);
+  });
+
+  test("mid-startup output is NOT reported ready", () => {
+    for (const pane of [
+      "Loading…\n",
+      "npm install\nadded 42 packages in 3s\n",
+      "Do you trust the files in this folder?\n",
+    ]) {
+      expect(isReady(claudeRuntime, pane)).toBe(false);
+    }
+  });
+
+  test("a line that merely ends in '>' is not a prompt", () => {
+    // Adding the `m` flag to a bare `/>\s*$/` would have matched any line of
+    // output closing an HTML/XML tag — ready before the TUI even exists.
+    expect(isReady(claudeRuntime, '  <div class="x">\n')).toBe(false);
+  });
+
+  for (const rt of [opencodeRuntime, codexRuntime]) {
+    test(`${rt.id}: a prompt row above a footer is detected as ready`, () => {
+      expect(isReady(rt, "›\n  status footer here\n\n")).toBe(true);
+    });
+
+    test(`${rt.id}: plain startup noise is not ready`, () => {
+      expect(isReady(rt, "scanning workspace…\nindexed 900 files\n")).toBe(false);
+    });
+  }
+});
+
 describe("opencode adapter", () => {
   test("startup command is just `opencode` — resumption is by cwd", () => {
     expect(opencodeRuntime.startupCommand(makeConfig({ type: "opencode" }))).toBe("opencode");
