@@ -188,6 +188,9 @@ export interface WorkflowRunResult {
  *   • timeout (kill -9 after `timeout_s`)
  *   • spawn error (bad cwd, missing binary)
  */
+/** Per-stream cap on retained task output (see appendCapped below). */
+const MAX_TASK_OUTPUT_CHARS = 256 * 1024;
+
 export const shellRunner: TaskRunner = (node, signal) => {
   if (node.type !== "task" || !node.command) {
     return Promise.resolve({
@@ -269,8 +272,20 @@ export const shellRunner: TaskRunner = (node, signal) => {
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    // Cap what we retain. spawn() has no maxBuffer, so a task printing a few
+    // MB accumulated all of it here and then wrote the whole thing into
+    // agent_workflow_run_nodes.output — enough to OOM the daemon on a phone.
+    // The tail is what matters for diagnosis, so keep the head and note the
+    // truncation.
+    const appendCapped = (cur: string, chunk: string): string => {
+      if (cur.length >= MAX_TASK_OUTPUT_CHARS) return cur;
+      const room = MAX_TASK_OUTPUT_CHARS - cur.length;
+      if (chunk.length <= room) return cur + chunk;
+      return cur + chunk.slice(0, room)
+        + `\n… [output truncated at ${MAX_TASK_OUTPUT_CHARS} characters]`;
+    };
+    child.stdout?.on("data", (chunk) => { stdout = appendCapped(stdout, chunk.toString()); });
+    child.stderr?.on("data", (chunk) => { stderr = appendCapped(stderr, chunk.toString()); });
 
     child.on("error", (err) => {
       settle({ success: false, exit_code: -1, output: stdout, error: err.message });
@@ -482,6 +497,39 @@ export class WorkflowEngine {
   }
 
   /** Recent runs, optionally filtered by workflow name. */
+  /**
+   * Mark runs left `running` by a previous process as interrupted.
+   *
+   * The finalising UPDATE is not reachable if the daemon dies mid-DAG, so
+   * those rows stayed `running` forever. They then fed the daemon's
+   * hasActiveConsumers gate, which refuses skill installs while a consumer is
+   * live — a crash during one workflow blocked every future install. Nothing
+   * reconciled them at boot.
+   *
+   * Safe to call only at startup, before any run of this process begins.
+   * Returns the number of rows reconciled.
+   */
+  reconcileInterruptedRuns(): number {
+    const db = this.db.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    const res = db.prepare(
+      `UPDATE agent_workflow_runs
+          SET status = 'failed', finished_at = ?, message = 'interrupted: daemon restarted mid-run'
+        WHERE status = 'running'`,
+    ).run(now);
+    const n = Number(res.changes ?? 0);
+    if (n > 0) this.log.warn(`Reconciled ${n} workflow run(s) left running by a previous process`);
+    return n;
+  }
+
+  /** Runs currently executing. Used by the active-consumer gate. */
+  runningRuns(): Array<{ id: number; workflow_name: string; started_at: number }> {
+    const db = this.db.requireDb();
+    return db.prepare(
+      `SELECT id, workflow_name, started_at FROM agent_workflow_runs WHERE status = 'running'`,
+    ).all() as Array<{ id: number; workflow_name: string; started_at: number }>;
+  }
+
   recentRuns(name?: string, limit = 20): Array<{
     id: number; workflow_id: number; workflow_name: string; status: string;
     started_at: number; finished_at: number | null; message: string | null;
@@ -554,6 +602,13 @@ export class WorkflowEngine {
 
     const nodeMap = new Map(wf.spec.nodes.map((n) => [n.id, n]));
     let cancelled = false;
+    // Set once the finalising UPDATE has run, so the catch below knows whether
+    // it still has to close the row out. Without this a throw anywhere in the
+    // DAG left agent_workflow_runs.status = 'running' permanently, which then
+    // made the daemon's active-consumer gate refuse every skill install.
+    let finalised = false;
+
+    try {
 
     while (queue.length > 0) {
       if (signal.aborted) { cancelled = true; break; }
@@ -633,6 +688,7 @@ export class WorkflowEngine {
     db.prepare(
       `UPDATE agent_workflow_runs SET finished_at = ?, status = ?, message = ? WHERE id = ?`,
     ).run(finishedAt, status, message, runId);
+    finalised = true;
     this.log.info(`Workflow "${name}" run ${runId} ${status} (${message})`);
 
     const nodesObj: Record<string, NodeResult> = {};
@@ -648,5 +704,17 @@ export class WorkflowEngine {
       started_at: startedAt,
       finished_at: finishedAt,
     };
+
+    } finally {
+      if (!finalised) {
+        // Something threw — a DB error, SQLITE_FULL, a bug. Close the row out
+        // so it cannot masquerade as a live consumer forever.
+        try {
+          db.prepare(
+            `UPDATE agent_workflow_runs SET finished_at = ?, status = 'failed', message = ? WHERE id = ?`,
+          ).run(Math.floor(Date.now() / 1000), "aborted: run threw before finalising", runId);
+        } catch { /* nothing more we can do */ }
+      }
+    }
   }
 }

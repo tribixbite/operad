@@ -144,3 +144,63 @@ describe("forceStatus — bypasses the validator", () => {
     expect(state.getSession("svc")?.status).toBe("pending");
   });
 });
+
+// -- restart_count decay ----------------------------------------------------
+//
+// The counter was only reset on a transition to `pending` (a manual start),
+// so it accumulated for the daemon's lifetime: a session that flapped and
+// fully recovered three times over a month was then permanently `failed` on
+// the next blip. It cannot be cleared on merely reaching `running` — the
+// restart path is degraded → starting → running, so that would stop backoff
+// escalating and make max_restarts unreachable.
+
+describe("decayRestartCount", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  /** Put the shared `state` fixture's session into running with a history. */
+  function runningWithRestarts(name: string, count: number, upMsAgo: number) {
+    state.transition(name, "starting");
+    state.transition(name, "running");
+    const s = state.getSession(name)!;
+    s.restart_count = count;
+    s.uptime_start = new Date(Date.now() - upMsAgo).toISOString();
+  }
+
+  test("clears the count after sustained uptime", () => {
+    runningWithRestarts("svc", 3, HOUR);
+    expect(state.decayRestartCount("svc", 30 * 60 * 1000)).toBe(true);
+    expect(state.getSession("svc")!.restart_count).toBe(0);
+  });
+
+  test("does nothing before the threshold — backoff must still escalate", () => {
+    runningWithRestarts("svc", 2, 60 * 1000);
+    expect(state.decayRestartCount("svc", 30 * 60 * 1000)).toBe(false);
+    expect(state.getSession("svc")!.restart_count).toBe(2);
+  });
+
+  test("does nothing for a session that is not running", () => {
+    runningWithRestarts("svc", 2, HOUR);
+    state.transition("svc", "degraded");
+    expect(state.decayRestartCount("svc", 1)).toBe(false);
+  });
+
+  test("is a no-op when the count is already zero", () => {
+    runningWithRestarts("svc", 0, HOUR);
+    expect(state.decayRestartCount("svc", 1)).toBe(false);
+  });
+
+  test("is a no-op for an unknown session", () => {
+    expect(state.decayRestartCount("nope", 1)).toBe(false);
+  });
+
+  test("a restart that immediately re-fails still escalates toward max_restarts", () => {
+    // degraded → starting increments; reaching running must NOT clear it,
+    // otherwise the backoff never grows and max_restarts is unreachable.
+    state.transition("svc", "starting");
+    state.transition("svc", "running");
+    state.transition("svc", "degraded");
+    state.transition("svc", "starting");
+    state.transition("svc", "running");
+    expect(state.getSession("svc")!.restart_count).toBe(1);
+  });
+});

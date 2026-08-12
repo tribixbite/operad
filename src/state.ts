@@ -168,6 +168,34 @@ export class StateManager {
   }
 
   /** Record a health check result */
+  /**
+   * Reset `restart_count` for a session that has been up long enough to count
+   * as recovered. Returns true if it changed.
+   *
+   * The counter was only reset on a transition to `pending` (a manual start),
+   * so it accumulated for the daemon's lifetime: a session that flapped and
+   * fully recovered three times over a month was then permanently `failed` on
+   * the next blip. It cannot simply be cleared on reaching `running` either —
+   * the auto-restart path goes degraded → starting → running, so that would
+   * stop the backoff escalating and make max_restarts unreachable. Sustained
+   * healthy uptime is the signal that the restart actually worked.
+   */
+  decayRestartCount(name: string, minUptimeMs: number): boolean {
+    const session = this.state.sessions[name];
+    if (!session || session.status !== "running") return false;
+    if (session.restart_count === 0) return false;
+    if (!session.uptime_start) return false;
+    const upMs = Date.now() - new Date(session.uptime_start).getTime();
+    if (!Number.isFinite(upMs) || upMs < minUptimeMs) return false;
+    session.restart_count = 0;
+    this.log.info(
+      `${name}: stable for ${Math.round(upMs / 60000)}min — restart count reset`,
+      { session: name },
+    );
+    this.persist();
+    return true;
+  }
+
   recordHealthCheck(name: string, healthy: boolean, message?: string): void {
     const session = this.state.sessions[name];
     if (!session) return;

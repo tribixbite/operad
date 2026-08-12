@@ -492,3 +492,60 @@ describe("WorkflowEngine.run", () => {
     db.close();
   });
 });
+
+// -- run finalisation and output bounds -------------------------------------
+
+describe("WorkflowEngine — run rows are always closed out", () => {
+  // The finalising UPDATE sat outside any try/finally, so a throw mid-DAG left
+  // status='running' forever. That row then fed the daemon's
+  // hasActiveConsumers gate, which refuses skill installs while a consumer is
+  // live — one crash blocked every future install.
+  test("a throwing runner still finalises the run row", async () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, async () => {
+      throw new Error("runner exploded");
+    });
+    engine.upsert("boom", {
+      nodes: [{ id: "a", type: "task", command: "x" }],
+      edges: [],
+    });
+    try { await engine.run("boom"); } catch { /* may or may not propagate */ }
+    const rows = db.prepare(`SELECT status FROM agent_workflow_runs`).all() as any[];
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).not.toBe("running");
+    db.close();
+  });
+
+  test("reconcileInterruptedRuns closes rows left by a previous process", () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, []));
+    db.prepare(
+      `INSERT INTO agent_workflow_runs (workflow_id, workflow_name, triggered_by, started_at, status)
+       VALUES (1, 'ghost', 'manual', 1, 'running')`,
+    ).run();
+    expect(engine.runningRuns().length).toBe(1);
+    const n = engine.reconcileInterruptedRuns();
+    expect(n).toBe(1);
+    expect(engine.runningRuns().length).toBe(0);
+    const row = db.prepare(`SELECT status, message FROM agent_workflow_runs`).get() as any;
+    expect(row.status).toBe("failed");
+    expect(String(row.message)).toContain("interrupted");
+    db.close();
+  });
+
+  test("reconcile is a no-op when nothing was interrupted", () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, []));
+    expect(engine.reconcileInterruptedRuns()).toBe(0);
+    db.close();
+  });
+
+  test("runningRuns reports an in-flight run and nothing after it finishes", async () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, []));
+    engine.upsert("w", { nodes: [{ id: "a", type: "task", command: "ok" }], edges: [] });
+    await engine.run("w");
+    expect(engine.runningRuns().length).toBe(0);
+    db.close();
+  });
+});

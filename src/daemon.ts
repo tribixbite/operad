@@ -1457,6 +1457,14 @@ export class Daemon {
       // immediately runnable via REST/IPC; engine itself never polls.
       const { WorkflowEngine, compileWorkflowConfig } = await import("./workflow.js");
       this.workflowEngine = new WorkflowEngine(this.memoryDb, this.log);
+      // Close out runs a previous process left mid-flight. Their rows stay
+      // `running` forever otherwise, and the active-consumer gate below then
+      // refuses every skill install.
+      try {
+        this.workflowEngine.reconcileInterruptedRuns();
+      } catch (err) {
+        this.log.warn(`Workflow run reconciliation failed: ${err}`);
+      }
       for (const wf of this.config.workflows ?? []) {
         try {
           this.workflowEngine.upsert(wf.name, compileWorkflowConfig(wf), "config");
@@ -1510,10 +1518,12 @@ export class Daemon {
               // currently-executing work, so a workflow that started
               // before daemon restart wouldn't otherwise count).
               const tracked = this.consumerTracker.list();
-              const wfRuns =
-                this.workflowEngine?.recentRuns(undefined, 10).filter(
-                  (r) => r.status === "running",
-                ) ?? [];
+              // Query running runs directly. This used to scan only the 10
+              // most recent rows, which was wrong in both directions: one
+              // stale `running` row blocked installs until ten newer runs
+              // pushed it out, and a genuinely in-flight run became invisible
+              // once ten newer ones existed.
+              const wfRuns = this.workflowEngine?.runningRuns() ?? [];
               return [
                 ...tracked,
                 ...wfRuns

@@ -279,6 +279,13 @@ export async function checkSingleSessionHealth(
  * Updates state and returns results.
  * @param adoptedPids Map of session name → bare PID for non-tmux sessions
  */
+/**
+ * Continuous healthy uptime after which a session's restart_count is cleared.
+ * Long enough that a restart which merely "came up" and then failed again
+ * still escalates the backoff and can reach max_restarts.
+ */
+const RESTART_DECAY_MS = 30 * 60 * 1000;
+
 export function runHealthSweep(
   config: TmxConfig,
   state: StateManager,
@@ -355,6 +362,10 @@ export function runHealthSweep(
         state.transition(session.name, "running");
         log.info(`Session '${session.name}' recovered`, { session: session.name });
       }
+      // A session that has been up and healthy for a sustained period has
+      // recovered; its accumulated restart count should not follow it around
+      // forever and eventually trip max_restarts on an unrelated blip.
+      state.decayRestartCount(session.name, RESTART_DECAY_MS);
     } else {
       log.warn(`Health check failed for '${session.name}': ${result.message}`, {
         session: session.name,
