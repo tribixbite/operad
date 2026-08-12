@@ -7,7 +7,7 @@
  */
 
 import * as net from "node:net";
-import { existsSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import type { IpcCommand, IpcResponse } from "./types.js";
 import type { Logger } from "./log.js";
 
@@ -51,6 +51,19 @@ export class IpcServer {
       });
 
       this.server.listen(this.socketPath, () => {
+        // net.Server.listen() creates the socket with the process umask
+        // applied, which on a desktop Linux default (022) yields mode 0755 —
+        // world-connectable. The IPC surface is unauthenticated by design
+        // (it assumes the socket's own permissions are the boundary) and
+        // includes `stop`, `shutdown`, `create` and `send`, which injects
+        // arbitrary text into a live Claude session. On a multi-user box any
+        // local account could drive it. Android's per-app umask made Termux
+        // safe only by accident.
+        try {
+          chmodSync(this.socketPath, 0o600);
+        } catch (err) {
+          this.log.warn(`Could not restrict IPC socket permissions: ${err}`);
+        }
         this.log.info(`IPC server listening on ${this.socketPath}`);
         resolve();
       });
@@ -191,7 +204,13 @@ export class IpcClient {
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      return resp.ok;
+      // ANY HTTP response proves a daemon is listening — this is a liveness
+      // probe, not a data fetch. Testing `resp.ok` broke the moment /api
+      // became token-gated: this caller sends no token, so a live daemon
+      // answered 401 and was reported DEAD. That is exactly the
+      // socket-missing-but-daemon-alive case the fallback exists for, and a
+      // false "dead" invites the watchdog to start a second daemon.
+      return resp.status > 0;
     } catch {
       return false;
     }

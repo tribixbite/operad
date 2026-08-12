@@ -98,7 +98,29 @@ export function tokensMatch(a: string | undefined | null, b: string): boolean {
   }
 }
 
-/** Parse a Cookie header into a plain object. */
+/**
+ * Percent-decode a cookie value, tolerating garbage.
+ *
+ * A Cookie header is attacker-controlled and need not be valid
+ * percent-encoding: `%`, `%zz` and a truncated `%E0%A4%A` all make
+ * `decodeURIComponent` throw a URIError. That mattered because this runs
+ * inside the WebSocket upgrade listener, which has no try/catch — so
+ * `GET /ws` with `Cookie: operad_token=%` killed the whole daemon before any
+ * auth check ran. An undecodable value is kept raw; it simply won't match a
+ * valid token.
+ *
+ * Note this decodes EVERY cookie set for the host, including ones written by
+ * unrelated apps on the same loopback address, so it must not be picky.
+ */
+function decodeCookieValue(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/** Parse a Cookie header into a plain object. Never throws. */
 export function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!header) return out;
@@ -107,7 +129,7 @@ export function parseCookies(header: string | undefined): Record<string, string>
     if (eq < 0) continue;
     const k = part.slice(0, eq).trim();
     const v = part.slice(eq + 1).trim();
-    if (k) out[k] = decodeURIComponent(v);
+    if (k) out[k] = decodeCookieValue(v);
   }
   return out;
 }

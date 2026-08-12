@@ -516,8 +516,14 @@ export class MonitoringEngine {
     const ldPreload = `${process.env.PREFIX ?? "/data/data/com.termux/files/usr"}/lib/libtermux-exec-ld-preload.so`;
     const amBin = detectPlatform().resolveBinaryPath("am");
 
-    const toggleAction = `${curlBin} -sX POST ${apiBase}/${toggleEndpoint} >/dev/null 2>&1`;
-    const stopAction = `${curlBin} -sX POST ${apiBase}/stop >/dev/null 2>&1`;
+    // Both buttons hit token-gated /api routes. Without the header they got
+    // a silent 401 and the notification's "Pause All" / "Stop All" did
+    // nothing at all. An Authorization header keeps the token off the
+    // command's URL, though the action string itself is still visible to
+    // anything that can read the notification or this process's argv.
+    const authHeader = `-H ${JSON.stringify(`Authorization: Bearer ${this.dashboardToken()}`)}`;
+    const toggleAction = `${curlBin} -sX POST ${authHeader} ${apiBase}/${toggleEndpoint} >/dev/null 2>&1`;
+    const stopAction = `${curlBin} -sX POST ${authHeader} ${apiBase}/stop >/dev/null 2>&1`;
     // Dashboard: use env to inject LD_PRELOAD for am command.
     // Explicit Edge Canary component avoids new-tab-per-intent behavior.
     // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TOP (0x14000000)

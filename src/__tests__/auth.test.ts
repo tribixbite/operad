@@ -194,3 +194,47 @@ describe("loadOrCreateToken", () => {
     expect(loadOrCreateToken(dir)).toBe("padded-token");
   });
 });
+
+/**
+ * A Cookie header is attacker-controlled, and `parseCookies` runs inside the
+ * WebSocket `upgrade` listener — which has no try/catch around it, so a throw
+ * there reaches `uncaughtException`. Before the fix, `GET /ws` with
+ * `Cookie: operad_token=%` killed the whole daemon before any auth check ran.
+ */
+describe("parseCookies never throws on malformed input", () => {
+  const hostile = [
+    "operad_token=%",
+    "operad_token=%zz",
+    "operad_token=%E0%A4%A",
+    "operad_token=%C0%80",
+    "a=%; operad_token=valid",
+    "=%",
+    "%=%",
+    "operad_token=%%%%",
+  ];
+
+  for (const header of hostile) {
+    test(`does not throw on ${JSON.stringify(header)}`, () => {
+      expect(() => parseCookies(header)).not.toThrow();
+    });
+  }
+
+  test("an undecodable value is kept raw rather than dropped", () => {
+    // It simply will not match a valid token — no need to invent a value.
+    expect(parseCookies("operad_token=%")[AUTH_COOKIE]).toBe("%");
+  });
+
+  test("one bad cookie does not discard the others", () => {
+    // Any app on the same loopback host can set cookies that land here.
+    const out = parseCookies("junk=%zz; operad_token=abc123");
+    expect(out[AUTH_COOKIE]).toBe("abc123");
+  });
+
+  test("valid percent-encoding is still decoded", () => {
+    expect(parseCookies("operad_token=a%20b")[AUTH_COOKIE]).toBe("a b");
+  });
+
+  test("presentedToken survives a malformed cookie header", () => {
+    expect(() => presentedToken(undefined, null, "operad_token=%")).not.toThrow();
+  });
+});

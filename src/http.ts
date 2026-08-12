@@ -7,7 +7,7 @@
 
 import * as http from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, extname, resolve } from "node:path";
+import { join, extname, resolve, sep } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Logger } from "./log.js";
 import {
@@ -66,6 +66,42 @@ const MAX_SSE_BUFFER_BYTES = 1024 * 1024; // 1 MB
 
 /** Maximum concurrent SSE client connections */
 const MAX_SSE_CLIENTS = 50;
+
+/** Authority used when the client's Host header is unusable. */
+const FALLBACK_URL_BASE = "http://localhost";
+
+/** HTTP methods whose request body is read and handed to the API handler. */
+const BODY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Build the request URL without ever throwing.
+ *
+ * `new URL(target, \`http://${req.headers.host}\`)` rejects plenty of Host
+ * values that Node's HTTP parser accepts — an empty one, `a b`, a bare `]`.
+ * Both call sites (the request handler and the WebSocket upgrade listener)
+ * evaluated this before entering any try block, and the process installs no
+ * `uncaughtException` handler, so a single
+ *
+ *   GET / HTTP/1.1\r\nHost:\r\n\r\n
+ *
+ * — no token, no body, evaluated before the auth check — killed the daemon
+ * and orphaned every managed session. Bound to loopback by default, but
+ * `bind = "0.0.0.0"` makes it remote and pre-auth.
+ *
+ * Nothing downstream reads the authority; routing uses `pathname` and
+ * `searchParams` only. So an unusable Host falls back to a fixed placeholder
+ * instead of failing the request.
+ */
+export function safeRequestUrl(rawUrl: string | undefined, hostHeader: string | undefined): URL {
+  const target = rawUrl && rawUrl.length > 0 ? rawUrl : "/";
+  if (hostHeader) {
+    try { return new URL(target, `http://${hostHeader}`); } catch { /* unusable Host */ }
+  }
+  try { return new URL(target, FALLBACK_URL_BASE); } catch { /* unusable target */ }
+  // The request target itself is malformed. Route it as "/" and let the
+  // normal static/404 path answer rather than dropping the connection.
+  return new URL("/", FALLBACK_URL_BASE);
+}
 
 export class DashboardServer {
   private server: http.Server | null = null;
@@ -157,28 +193,39 @@ export class DashboardServer {
       this.wss.on("connection", (ws) => this.handleWsConnection(ws));
 
       this.server.on("upgrade", (req, socket, head) => {
-        const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-        // The WebSocket carries the same command surface as the REST API, so
-        // it needs the same gate. Upgrades bypass handleRequest entirely, so
-        // without this check the socket was an unauthenticated side door.
-        if (!this.isAuthorized(req, url)) {
-          // end() flushes before closing; destroy() alone can discard the
-          // buffered response and the client just sees an empty reply.
-          socket.end(
-            "HTTP/1.1 401 Unauthorized\r\n"
-            + "Connection: close\r\n"
-            + "Content-Length: 0\r\n"
-            + 'WWW-Authenticate: Bearer realm="operad"\r\n'
-            + "\r\n",
-          );
-          return;
-        }
-        if (url.pathname === "/ws" && this.wss) {
-          this.wss.handleUpgrade(req, socket, head, (ws) => {
-            this.wss!.emit("connection", ws, req);
-          });
-        } else {
-          socket.destroy();
+        // Unlike handleRequest, an `upgrade` listener has no framework
+        // try/catch around it: anything thrown here reaches
+        // `uncaughtException` and takes the daemon down with it. Everything
+        // inside — URL parsing, cookie decoding, the ws handshake — runs on
+        // wholly untrusted, pre-auth input, so the whole body is guarded.
+        try {
+          const url = safeRequestUrl(req.url, req.headers.host);
+          // The WebSocket carries the same command surface as the REST API,
+          // so it needs the same gate. Upgrades bypass handleRequest
+          // entirely, so without this check the socket was an
+          // unauthenticated side door.
+          if (!this.isAuthorized(req, url)) {
+            // end() flushes before closing; destroy() alone can discard the
+            // buffered response and the client just sees an empty reply.
+            socket.end(
+              "HTTP/1.1 401 Unauthorized\r\n"
+              + "Connection: close\r\n"
+              + "Content-Length: 0\r\n"
+              + 'WWW-Authenticate: Bearer realm="operad"\r\n'
+              + "\r\n",
+            );
+            return;
+          }
+          if (url.pathname === "/ws" && this.wss) {
+            this.wss.handleUpgrade(req, socket, head, (ws) => {
+              this.wss!.emit("connection", ws, req);
+            });
+          } else {
+            socket.destroy();
+          }
+        } catch (err) {
+          this.log.warn(`Rejected malformed WebSocket upgrade: ${err}`);
+          try { socket.destroy(); } catch { /* already gone */ }
         }
       });
 
@@ -379,7 +426,7 @@ export class DashboardServer {
   // -- Request handling -------------------------------------------------------
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const url = safeRequestUrl(req.url, req.headers.host);
     const path = url.pathname;
 
     // CORS. The wildcard that used to be here let any web page the user
@@ -410,9 +457,16 @@ export class DashboardServer {
         if (tokensMatch(queryToken, this.authToken)) {
           const clean = new URL(url.toString());
           clean.searchParams.delete(AUTH_QUERY_PARAM);
+          // A pathname beginning with `//` makes Location protocol-relative,
+          // so `GET //evil.example.com/?token=…` (absolute-form request
+          // target) redirected the browser off-host. Only a single-slash
+          // path is a same-origin redirect; anything else goes to the root.
+          const target = clean.pathname.startsWith("//")
+            ? "/"
+            : clean.pathname + (clean.search || "");
           res.writeHead(302, {
             "Set-Cookie": buildAuthCookie(this.authToken, false),
-            Location: clean.pathname + (clean.search || ""),
+            Location: target,
           });
           res.end();
           return;
@@ -520,9 +574,17 @@ export class DashboardServer {
     res: http.ServerResponse,
     path: string,
   ): Promise<void> {
-    // Read request body for POST/PUT/DELETE (with timeout + size limit)
+    // Read the request body for every method that can carry one (with
+    // timeout + size limit).
+    //
+    // PATCH was missing, so `body` stayed "" for the three routes that use
+    // it and all three were dead from the browser: toggling a schedule
+    // (JSON.parse("") → 500), toggling a workflow (falsy-body guard → 405),
+    // and saving Settings/config-overrides (→ 400 "Invalid JSON body"). The
+    // unit tests missed it because they call the API handler directly and
+    // bypass the transport entirely.
     let body = "";
-    if (req.method === "POST" || req.method === "PUT" || req.method === "DELETE") {
+    if (BODY_METHODS.has(req.method ?? "GET")) {
       try {
         body = await new Promise<string>((resolve, reject) => {
           const chunks: Buffer[] = [];
@@ -571,10 +633,15 @@ export class DashboardServer {
     let filePath = urlPath === "/" ? "/index.html" : urlPath;
 
     // Security: resolve to absolute path and verify it's inside staticDir.
-    // Trailing slash on prefix prevents partial-match bypass (e.g. /dist_secrets matching /dist).
-    const safePrefix = this.staticDir.endsWith("/") ? this.staticDir : this.staticDir + "/";
-    let fullPath = resolve(this.staticDir, filePath.replace(/^\//, ""));
-    if (!fullPath.startsWith(safePrefix) && fullPath !== this.staticDir) {
+    // The separator must be the platform's: `resolve()` emits `\` on Windows,
+    // so a hardcoded `/` prefix matched nothing and EVERY asset failed
+    // containment and was rewritten to index.html — the dashboard served the
+    // HTML shell for its own JS and CSS and rendered blank. The trailing
+    // separator prevents a partial-match bypass (/dist_secrets vs /dist).
+    const base = resolve(this.staticDir);
+    const safePrefix = base.endsWith(sep) ? base : base + sep;
+    let fullPath = resolve(base, filePath.replace(/^\//, ""));
+    if (!fullPath.startsWith(safePrefix) && fullPath !== base) {
       // Directory traversal attempt — serve fallback
       fullPath = join(this.staticDir, "index.html");
     }

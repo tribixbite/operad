@@ -1803,6 +1803,29 @@ export class Daemon {
 
     process.on("SIGTERM", () => handler("SIGTERM"));
     process.on("SIGINT", () => handler("SIGINT"));
+
+    // Last-resort guard. Node's default for an uncaught exception is to kill
+    // the process, and this process is a supervisor: its death orphans every
+    // managed session, drops the restart timers and adopted PIDs held only in
+    // memory, and loses whatever hadn't been flushed to state.json.
+    //
+    // That is a bad trade for a throw in one request handler. Two such throws
+    // were reachable pre-auth from a single malformed packet (an unparseable
+    // Host header, an undecodable cookie on the WS upgrade); both root causes
+    // are fixed, but any listener added later gets the same exposure, so the
+    // exception is logged loudly and the daemon stays up. Loudly matters —
+    // continuing past an unknown fault means the stack must reach the log.
+    process.on("uncaughtException", (err) => {
+      trace(`uncaught:${err?.message ?? err}`);
+      this.log.error(
+        `Uncaught exception (daemon continuing): ${err?.stack ?? err}`,
+      );
+    });
+    process.on("unhandledRejection", (reason) => {
+      const detail = reason instanceof Error ? reason.stack : String(reason);
+      trace(`unhandled-rejection`);
+      this.log.error(`Unhandled promise rejection (daemon continuing): ${detail}`);
+    });
     process.on("SIGHUP", () => {
       // Reload config on SIGHUP
       this.log.info("Received SIGHUP, reloading config...");

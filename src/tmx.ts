@@ -552,6 +552,31 @@ dashboard_port = 18970
  * cookie; after that the browser is authenticated and the token no longer
  * appears in the address bar.
  */
+/**
+ * Authorization header for CLI-initiated calls to the daemon's own /api.
+ *
+ * Every /api route is token-gated, so an internal caller that sends nothing
+ * gets a silent 401 and its request simply never happens. Reads the same
+ * token file the daemon uses; returns no header if it can't be read, which
+ * degrades to the pre-existing 401 rather than throwing.
+ */
+async function dashboardAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const { loadOrCreateToken } = await import("./auth.js");
+    const { dirname: pathDirname } = await import("node:path");
+    let stateFile: string;
+    try {
+      stateFile = loadConfig(getConfigFlag()).orchestrator.state_file;
+    } catch {
+      stateFile = detectPlatform().defaultStatePath();
+    }
+    const token = loadOrCreateToken(pathDirname(stateFile));
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 async function runToken(): Promise<void> {
   const { loadOrCreateToken } = await import("./auth.js");
   const { dirname: pathDirname } = await import("node:path");
@@ -1269,7 +1294,12 @@ async function runIpcCommand(): Promise<void> {
   if (!existsSync(socketPath)) {
     console.log(`${DIM}Socket missing (Termux crash?) — requesting daemon re-create it...${RESET}`);
     try {
-      await fetch("http://127.0.0.1:18970/api/fix-socket", { method: "POST" });
+      // /api is token-gated; without the header this POST is a silent 401
+      // and the socket is never re-created.
+      await fetch("http://127.0.0.1:18970/api/fix-socket", {
+        method: "POST",
+        headers: await dashboardAuthHeaders(),
+      });
     } catch { /* daemon will self-heal on next sweep anyway */ }
     // Brief wait for socket file to appear
     for (let i = 0; i < 5; i++) {
