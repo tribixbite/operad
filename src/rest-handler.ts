@@ -1170,7 +1170,13 @@ export class RestHandler {
                 bundle: AgentStateBundle;
                 options?: Partial<ImportOptions>;
               };
-              const result = importAgentState(memoryDb, parsed.bundle, parsed.options);
+              // Pin the import to the agent named in the URL — the one the
+              // 404 check above validated. Otherwise the bundle's own
+              // meta.agent_name decided, and that check meant nothing.
+              const result = importAgentState(memoryDb, parsed.bundle, {
+                ...parsed.options,
+                targetAgent: subCmd,
+              });
               return { status: 200, data: result };
             } catch (err) {
               return { status: 400, data: { error: String(err) } };

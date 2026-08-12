@@ -762,3 +762,144 @@ describe("pruneSnapshots", () => {
     expect(before - after).toBe(pruned);
   });
 });
+
+// ---------------------------------------------------------------------------
+// importAgentState — round-trip integrity
+// ---------------------------------------------------------------------------
+
+describe("importAgentState — round-trip integrity", () => {
+  /** A bundle whose strategies carry real versions, newest first (as exported). */
+  function bundleVersioned(
+    strategies: Array<{ strategy_text: string; rationale: string; version: number }>,
+    agentName = "dest",
+  ): AgentStateBundle {
+    return {
+      format_version: 1,
+      meta: { exported_at: new Date().toISOString(), exported_from: "h", operad_version: "v", agent_name: agentName, checksum: "" },
+      config: {},
+      personality: [],
+      learnings: [],
+      strategies: strategies.map((s) => ({ ...s, active: false, created_at: Math.floor(Date.now() / 1000) })),
+      decisions: [],
+      goals: [],
+      trust_score: 0,
+      run_stats: { total_runs: 0, total_cost_usd: 0, total_input_tokens: 0, total_output_tokens: 0, avg_turns: 0 },
+    };
+  }
+
+  // getStrategyHistory returns ORDER BY version DESC, so the export is
+  // newest-first. Replaying in that order made the OLDEST the active one.
+  test("the newest exported strategy ends up active, not the oldest", () => {
+    const bundle = bundleVersioned([
+      { strategy_text: "V3-newest", rationale: "r3", version: 3 },
+      { strategy_text: "V2", rationale: "r2", version: 2 },
+      { strategy_text: "V1-oldest", rationale: "r1", version: 1 },
+    ]);
+    importAgentState(db, bundle);
+    const active = db.getActiveStrategy("dest") as Record<string, unknown> | undefined;
+    expect(active).toBeDefined();
+    expect(String(active!.strategy_text)).toBe("V3-newest");
+  });
+
+  test("re-importing the same bundle does not duplicate strategies", () => {
+    const bundle = bundleVersioned([
+      { strategy_text: "alpha", rationale: "r", version: 1 },
+      { strategy_text: "beta", rationale: "r", version: 2 },
+    ]);
+    importAgentState(db, bundle);
+    const after1 = db.getStrategyHistory("dest").length;
+    const second = importAgentState(db, bundle);
+    const after2 = db.getStrategyHistory("dest").length;
+    expect(after1).toBe(2);
+    expect(after2).toBe(2);
+    expect(second.strategies_imported).toBe(0);
+  });
+
+  test("a genuinely new strategy still imports on a second pass", () => {
+    importAgentState(db, bundleVersioned([{ strategy_text: "one", rationale: "r", version: 1 }]));
+    const r = importAgentState(db, bundleVersioned([
+      { strategy_text: "one", rationale: "r", version: 1 },
+      { strategy_text: "two", rationale: "r", version: 2 },
+    ]));
+    expect(r.strategies_imported).toBe(1);
+    expect(String((db.getActiveStrategy("dest") as any).strategy_text)).toBe("two");
+  });
+
+  // mode: "replace" was declared, defaulted and spread but never read, so a
+  // caller asking for replace silently got a merge.
+  test('mode "replace" is refused rather than silently merging', () => {
+    const bundle = bundleVersioned([{ strategy_text: "x", rationale: "r", version: 1 }]);
+    expect(() => importAgentState(db, bundle, { mode: "replace" })).toThrow(/not implemented/i);
+  });
+
+  test('mode "merge" is accepted', () => {
+    const bundle = bundleVersioned([{ strategy_text: "y", rationale: "r", version: 1 }]);
+    expect(() => importAgentState(db, bundle, { mode: "merge" })).not.toThrow();
+  });
+
+  // The bundle's own meta.agent_name used to win, so the REST route's
+  // 404-check on the URL segment guaranteed nothing.
+  test("targetAgent overrides the bundle's agent name", () => {
+    const bundle = bundleVersioned([{ strategy_text: "routed", rationale: "r", version: 1 }], "claims-to-be-A");
+    const r = importAgentState(db, bundle, { targetAgent: "actual-B" });
+    expect(r.agent_name).toBe("actual-B");
+    expect(db.getStrategyHistory("actual-B").length).toBe(1);
+    expect(db.getStrategyHistory("claims-to-be-A").length).toBe(0);
+  });
+
+  test("without targetAgent the bundle's own name is still used", () => {
+    const bundle = bundleVersioned([{ strategy_text: "own", rationale: "r", version: 1 }], "self-named");
+    const r = importAgentState(db, bundle);
+    expect(r.agent_name).toBe("self-named");
+  });
+});
+
+describe("importAgentState — learningMerge prefer_import", () => {
+  /**
+   * Build a bundle for `content`. The content_hash must match however
+   * addLearning derives it, so after the row exists we read the stored hash
+   * back rather than guessing the algorithm.
+   */
+  function storedHash(content: string): string {
+    const rows = db.getAgentLearnings("dest", 10_000) as Array<Record<string, unknown>>;
+    const row = rows.find((r) => String(r.content) === content);
+    return row ? String(row.content_hash) : "unknown-hash";
+  }
+
+  function bundleWithLearning(content: string, confidence: number, hashOverride?: string): AgentStateBundle {
+    const hash = hashOverride
+      ?? require("node:crypto").createHash("sha256").update(content).digest("hex");
+    return {
+      format_version: 1,
+      meta: { exported_at: new Date().toISOString(), exported_from: "h", operad_version: "v", agent_name: "dest", checksum: "" },
+      config: {},
+      personality: [],
+      learnings: [{ category: "insight", content, content_hash: hash, confidence, reinforcement_count: 1, source_agent: "dest" }],
+      strategies: [], decisions: [], goals: [],
+      trust_score: 0,
+      run_stats: { total_runs: 0, total_cost_usd: 0, total_input_tokens: 0, total_output_tokens: 0, avg_turns: 0 },
+    };
+  }
+
+  // Both branches previously did the same thing (skip), behind a TODO — so
+  // prefer_import behaved exactly like prefer_existing.
+  test("prefer_import applies the imported confidence to an existing learning", () => {
+    importAgentState(db, bundleWithLearning("shared fact", 0.3));
+    const h = storedHash("shared fact");
+    const r = importAgentState(db, bundleWithLearning("shared fact", 0.9, h), {
+      learningMerge: "prefer_import",
+    });
+    expect(r.learnings_imported).toBe(1);
+    expect(r.learnings_skipped).toBe(0);
+  });
+
+  test("prefer_existing still skips the duplicate", () => {
+    importAgentState(db, bundleWithLearning("other fact", 0.3));
+    const h = storedHash("other fact");
+    const r = importAgentState(db, bundleWithLearning("other fact", 0.9, h), {
+      learningMerge: "prefer_existing",
+    });
+    expect(r.learnings_skipped).toBe(1);
+    expect(r.learnings_imported).toBe(0);
+  });
+});

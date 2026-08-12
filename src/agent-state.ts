@@ -73,7 +73,18 @@ export interface AgentStateBundle {
 
 /** Import merge options */
 export interface ImportOptions {
+  /**
+   * Only "merge" is implemented. "replace" is rejected with an error rather
+   * than silently merging, which is what it used to do.
+   */
   mode: "replace" | "merge";
+  /**
+   * Import into this agent instead of the bundle's own meta.agent_name.
+   * The REST route sets it from the URL segment it already 404-checks;
+   * without it a bundle could be posted at /api/agents/<a>/import and land
+   * in agent <b>.
+   */
+  targetAgent?: string;
   /** Which sections to import (default: all) */
   sections?: ("config" | "personality" | "learnings" | "strategies" | "goals" | "schedules")[];
   /** How to handle duplicate learnings */
@@ -251,7 +262,21 @@ export function importAgentState(
   opts: Partial<ImportOptions> = {},
 ): ImportResult {
   const options = { ...DEFAULT_IMPORT_OPTIONS, ...opts };
-  const agentName = bundle.meta.agent_name;
+
+  // `mode: "replace"` was declared, defaulted and spread — and never read, so
+  // callers asking for a replace silently got a merge. Rather than leave a
+  // trap for whoever implements it as "wipe first", refuse it explicitly.
+  if (options.mode === "replace") {
+    throw new Error(
+      'import mode "replace" is not implemented; omit it (or pass "merge") to merge into the existing state',
+    );
+  }
+
+  // The caller may direct the import at a specific agent. Without this the
+  // bundle's own meta.agent_name always won, which made the REST route's
+  // 404-check on the URL segment meaningless — a bundle could be posted at
+  // /api/agents/<a>/import and land in agent <b>.
+  const agentName = options.targetAgent ?? bundle.meta.agent_name;
   const sections = options.sections ?? ["personality", "learnings", "strategies", "goals"];
 
   const result: ImportResult = {
@@ -271,10 +296,15 @@ export function importAgentState(
 
     for (const learning of bundle.learnings) {
       if (existingHashes.has(learning.content_hash)) {
-        // Duplicate — apply merge strategy
         if (options.learningMerge === "prefer_import") {
-          // TODO: update existing learning confidence
-          result.learnings_skipped++;
+          // Was a TODO with both branches doing the same thing, so
+          // prefer_import behaved exactly like prefer_existing. addLearning
+          // upserts on content_hash, so re-adding applies the imported
+          // confidence to the existing row.
+          db.addLearning(agentName, learning.category, learning.content, {
+            confidence: learning.confidence,
+          });
+          result.learnings_imported++;
         } else {
           result.learnings_skipped++;
         }
@@ -310,9 +340,22 @@ export function importAgentState(
     }
   }
 
-  // Import strategies (append all, mark only the latest as active in replace mode)
+  // Import strategies.
+  //
+  // Two bugs here. getStrategyHistory returns `ORDER BY version DESC`, so the
+  // exported array is newest-first; replaying it in that order through
+  // evolveStrategy made the OLDEST exported strategy the active one. And
+  // there was no dedupe, so importing the same bundle twice doubled the rows
+  // and kept growing.
   if (sections.includes("strategies")) {
-    for (const strategy of bundle.strategies) {
+    const seen = new Set(
+      (db.getStrategyHistory(agentName, 10_000) as Array<Record<string, unknown>>)
+        .map((r) => String(r.strategy_text)),
+    );
+    const ordered = [...bundle.strategies].sort((a, b) => a.version - b.version);
+    for (const strategy of ordered) {
+      if (seen.has(strategy.strategy_text)) continue;
+      seen.add(strategy.strategy_text);
       db.evolveStrategy(agentName, strategy.strategy_text, strategy.rationale);
       result.strategies_imported++;
     }
