@@ -537,7 +537,11 @@ describe("Agent runs", () => {
     expect(db.getAgentRun(999999)).toBeNull();
   });
 
-  test("getAgentCostSummary counts only 'completed' runs", () => {
+  test("getAgentCostSummary includes cost from FAILED runs", () => {
+    // A run that fails after the model produced output still cost money, and
+    // completeAgentRun's COALESCE deliberately preserves cost_usd on failure.
+    // Filtering to status='completed' silently under-reported spend by the
+    // whole of it — the dashboard showed $0.10 against a real $1.09.
     const id1 = db.startAgentRun("agt", "sess");
     db.completeAgentRun(id1, "completed", { costUsd: 0.10 });
     const id2 = db.startAgentRun("agt", "sess");
@@ -545,7 +549,15 @@ describe("Agent runs", () => {
     const summary = db.getAgentCostSummary();
     const row = summary.find(r => r.agent_name === "agt");
     expect(row).toBeDefined();
-    expect(row!.run_count).toBe(1); // only completed
+    expect(row!.run_count).toBe(2);
+    expect(row!.total_cost).toBeCloseTo(1.09, 4);
+  });
+
+  test("getAgentCostSummary excludes runs still in flight", () => {
+    // An unfinished run's cost isn't final, so it must not be summed.
+    db.startAgentRun("inflight-agt", "sess");
+    const row = db.getAgentCostSummary().find(r => r.agent_name === "inflight-agt");
+    expect(row).toBeUndefined();
   });
 });
 
@@ -880,13 +892,41 @@ describe("Agent specializations", () => {
   test("decaySpecializations reduces confidence for stale entries", () => {
     db.upsertSpecialization("agt", "domain", 0.9);
     db.requireDb().prepare(
-      `UPDATE agent_specializations SET updated_at = ? WHERE agent_name = 'agt'`,
+      `UPDATE agent_specializations SET last_reinforced_at = ? WHERE agent_name = 'agt'`,
     ).run(epoch(-100 * 86400));
     const changed = db.decaySpecializations(1); // 1-day threshold
     expect(changed).toBe(1);
     const specs = db.getSpecializations("agt");
     // 0.9 * 0.9 = 0.81
     expect(specs[0].confidence).toBeCloseTo(0.81, 4);
+  });
+
+  test("decay keeps applying on later passes — it must not reset its own clock", () => {
+    // Regression: the filter was `updated_at < cutoff` and the same statement
+    // wrote `updated_at = unixepoch()`, so a stale row decayed exactly once
+    // and every subsequent consolidation matched zero rows. This box had 167
+    // consolidation runs, nearly all of them no-ops.
+    db.upsertSpecialization("decayer", "domain", 0.9);
+    db.requireDb().prepare(
+      `UPDATE agent_specializations SET last_reinforced_at = ? WHERE agent_name = 'decayer'`,
+    ).run(epoch(-100 * 86400));
+
+    expect(db.decaySpecializations(1)).toBe(1);
+    expect(db.decaySpecializations(1)).toBe(1);
+    expect(db.decaySpecializations(1)).toBe(1);
+
+    // 0.9 * 0.9^3 = 0.6561
+    expect(db.getSpecializations("decayer")[0].confidence).toBeCloseTo(0.6561, 4);
+  });
+
+  test("reinforcing a specialization resets its decay clock", () => {
+    db.upsertSpecialization("fresh", "domain", 0.9);
+    db.requireDb().prepare(
+      `UPDATE agent_specializations SET last_reinforced_at = ? WHERE agent_name = 'fresh'`,
+    ).run(epoch(-100 * 86400));
+
+    db.upsertSpecialization("fresh", "domain", 0.9); // reinforce → clock resets
+    expect(db.decaySpecializations(1)).toBe(0);
   });
 });
 
@@ -1097,6 +1137,50 @@ describe("Tool leases", () => {
 // ---------------------------------------------------------------------------
 // 17. Tool autonomy caps
 // ---------------------------------------------------------------------------
+
+describe("LIKE-pattern safety", () => {
+  const addSchedule = (name: string, prompt: string) => {
+    db.requireDb().prepare(
+      `INSERT INTO agent_schedules (agent_name, schedule_name, prompt, enabled, next_run_at)
+       VALUES (?, ?, ?, 1, unixepoch())`,
+    ).run("agt", name, prompt);
+  };
+
+  test("a tool named '%' does not disable every schedule", () => {
+    // Tool names come from installed skill manifests, not from a person, so
+    // an unescaped LIKE turns uninstalling one skill into "disable all the
+    // user's scheduled agent runs".
+    addSchedule("nightly", "run the nightly sweep with bash_exec");
+    addSchedule("weekly", "summarise the week");
+
+    expect(db.pauseSchedulesMentioningTool("%")).toEqual([]);
+
+    const rows = db.requireDb()
+      .prepare(`SELECT enabled FROM agent_schedules WHERE agent_name = 'agt'`)
+      .all() as Array<{ enabled: number }>;
+    expect(rows.length).toBe(2);
+    expect(rows.every((r) => r.enabled === 1)).toBe(true);
+  });
+
+  test("a real tool name still matches and pauses its schedule", () => {
+    addSchedule("uses-tool", "please call bash_exec when done");
+    const paused = db.pauseSchedulesMentioningTool("bash_exec");
+    expect(paused.map((p) => p.schedule_name)).toContain("uses-tool");
+  });
+
+  test("an underscore in a tool name is literal, not a single-char wildcard", () => {
+    // `bash_exec` must not match a schedule mentioning `bashXexec`.
+    addSchedule("decoy", "mentions bashXexec only");
+    const paused = db.pauseSchedulesMentioningTool("bash_exec");
+    expect(paused.map((p) => p.schedule_name)).not.toContain("decoy");
+  });
+
+  test("searchProfile treats wildcards as literal text", () => {
+    db.addProfileEntry("preference", "likes dark mode");
+    expect(db.searchProfile("%")).toEqual([]);
+    expect(db.searchProfile("dark").length).toBeGreaterThan(0);
+  });
+});
 
 describe("Tool autonomy caps", () => {
   test("setToolAutonomyCap stores a new row retrievable via getToolAutonomyCap", () => {

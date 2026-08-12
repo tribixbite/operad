@@ -686,8 +686,10 @@ describe("runConsolidation — full integration", () => {
 
   test("specialization decay is attempted (no error even when table is present)", () => {
     db.upsertSpecialization("agent-a", "TypeScript", 0.9);
+    // Staleness is measured by last_reinforced_at, not updated_at — decay
+    // writes updated_at itself, so filtering on it made decay a one-shot.
     db.requireDb().prepare(
-      `UPDATE agent_specializations SET updated_at = ? WHERE agent_name = 'agent-a'`,
+      `UPDATE agent_specializations SET last_reinforced_at = ? WHERE agent_name = 'agent-a'`,
     ).run(epoch(-100 * 86400)); // 100 days old → will be decayed
 
     // Should not throw

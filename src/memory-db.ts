@@ -207,6 +207,12 @@ const DB_DIR = join(homedir(), ".local", "share", "operad");
 const DB_FILE = "memory.db";
 
 /**
+ * How long a statement waits for a competing writer before raising
+ * SQLITE_BUSY. Without this SQLite's default is 0 — it fails instantly.
+ */
+const BUSY_TIMEOUT_MS = 5000;
+
+/**
  * Schema statements — each string is one complete SQL statement.
  * Separated into an array because bun:sqlite's exec() only handles
  * one statement at a time (unlike better-sqlite3).
@@ -515,6 +521,10 @@ const SCHEMA_STATEMENTS: string[] = [
     reinforcement_count INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (unixepoch()),
     updated_at INTEGER DEFAULT (unixepoch()),
+    -- Separate from updated_at so decay can filter on "last demonstrated"
+    -- without its own write resetting the clock it filters on. Mirrors
+    -- agent_learnings.last_reinforced_at.
+    last_reinforced_at INTEGER DEFAULT (unixepoch()),
     UNIQUE(agent_name, domain)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_spec_agent ON agent_specializations(agent_name)`,
@@ -657,15 +667,26 @@ const SCHEMA_STATEMENTS: string[] = [
  */
 async function openDatabase(dbPath: string): Promise<DbHandle> {
   // Try bun:sqlite first (zero-dep on Termux)
+  let bunError: unknown = null;
   if (typeof (globalThis as any).Bun !== "undefined") {
     try {
       const { Database } = await import("bun:sqlite");
       const db = new Database(dbPath);
       db.exec("PRAGMA journal_mode=WAL");
       db.exec("PRAGMA foreign_keys=ON");
+      // WAL lets one writer run alongside readers, but a second WRITER still
+      // gets SQLITE_BUSY — and with no busy handler SQLite raises it on the
+      // spot rather than waiting. Two daemons overlap for real during
+      // `operad upgrade`, which restarts in place, and the hot write paths
+      // (recordCost, logToolExecution, appendConversation) have no try/catch,
+      // so the error surfaces in the middle of an agent run.
+      db.exec(`PRAGMA busy_timeout=${BUSY_TIMEOUT_MS}`);
       return wrapBunSqlite(db);
-    } catch {
-      // Fall through to better-sqlite3
+    } catch (err) {
+      // Keep the real reason: the fallback below can only report that
+      // better-sqlite3 is missing, which is misleading when the actual
+      // problem was a corrupt file, bad permissions, or a build without FTS5.
+      bunError = err;
     }
   }
 
@@ -677,10 +698,12 @@ async function openDatabase(dbPath: string): Promise<DbHandle> {
     const db = new Database(dbPath);
     db.pragma("journal_mode=WAL");
     db.pragma("foreign_keys=ON");
+    db.pragma(`busy_timeout=${BUSY_TIMEOUT_MS}`);
     return wrapBetterSqlite3(db);
   } catch (err) {
+    const bunNote = bunError ? ` (bun:sqlite failed first: ${bunError})` : "";
     throw new Error(
-      `No SQLite driver available. On Termux use bun; on node install better-sqlite3: ${err}`,
+      `No SQLite driver available. On Termux use bun; on node install better-sqlite3: ${err}${bunNote}`,
     );
   }
 }
@@ -734,6 +757,18 @@ function clamp01(v: number): number {
   return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
 }
 
+/**
+ * Escape SQL LIKE wildcards so caller-supplied text matches literally.
+ *
+ * `%` and `_` in an interpolated LIKE pattern are wildcards, not characters.
+ * That is a real hazard where the text comes from a skill manifest rather
+ * than a person: `pauseSchedulesMentioningTool("%")` matched — and disabled —
+ * every enabled schedule the user had. Pair with `ESCAPE '\'` at each call.
+ */
+function escapeLike(text: string): string {
+  return text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 export class MemoryDb {
   private db: DbHandle | null = null;
   private dbPath: string;
@@ -750,11 +785,39 @@ export class MemoryDb {
 
   /** Initialize the database and create tables */
   async init(): Promise<void> {
-    this.db = await openDatabase(this.dbPath);
-    // Execute schema — each statement separately for bun:sqlite compatibility
-    for (const stmt of SCHEMA_STATEMENTS) {
-      this.db.exec(stmt);
+    const db = await openDatabase(this.dbPath);
+
+    // Create the schema atomically.
+    //
+    // SQLite DDL is transactional, so a failure partway through the ~60
+    // statements — a build without FTS5, SQLITE_BUSY, a full disk — rolls
+    // back instead of leaving a half-created database on disk. Without the
+    // transaction the damage was permanent and silent: daemon.ts catches an
+    // init failure, logs one warning and sets `memoryDb = null`, disabling
+    // the entire memory/agent/tools/schedule/skills/workflow subsystem for
+    // the daemon's whole lifetime — and because the partial schema survived,
+    // every subsequent boot failed on the same statement.
+    //
+    // `this.db` is assigned only after the schema is committed, so a failed
+    // init leaves the instance unusable rather than half-wired.
+    let index = 0;
+    try {
+      db.exec("BEGIN");
+      for (; index < SCHEMA_STATEMENTS.length; index++) {
+        db.exec(SCHEMA_STATEMENTS[index]!);
+      }
+      db.exec("COMMIT");
+    } catch (err) {
+      try { db.exec("ROLLBACK"); } catch { /* transaction already unwound */ }
+      try { db.close(); } catch { /* best effort */ }
+      const label = (SCHEMA_STATEMENTS[index] ?? "").trim().split("\n")[0]?.slice(0, 90) ?? "";
+      throw new Error(
+        `Schema creation failed at statement ${index + 1}/${SCHEMA_STATEMENTS.length} ` +
+        `[${label}]: ${err}`,
+      );
     }
+
+    this.db = db;
     this.applyMigrations();
     this.log.info(`Memory database initialized at ${this.dbPath}`);
   }
@@ -773,7 +836,16 @@ export class MemoryDb {
         this.db!.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${defSql}`);
         this.log.info(`Migrated: added ${table}.${column}`);
       } catch (err) {
-        this.log.warn(`Migration failed for ${table}.${column}: ${err}`);
+        // The PRAGMA check above already rules out "duplicate column", so
+        // anything landing here is a genuine failure (BUSY, disk full,
+        // locked). Boot continues — a retry next start usually succeeds and
+        // that beats disabling the subsystem — but this is an error, not a
+        // warning, and it names the consequence so the "no such column"
+        // that surfaces much later can be traced back to it.
+        this.log.error(
+          `Migration failed for ${table}.${column}: ${err} — ` +
+          `queries reading ${table}.${column} will fail until the next successful boot`,
+        );
       }
     };
     // 0.4.8 — capture agent run input/output text for dashboard inspection
@@ -792,6 +864,12 @@ export class MemoryDb {
     // Recording it on the skills row keeps it available for the row's whole
     // lifetime, tombstoned or not.
     ensureColumn("skills", "generation", "INTEGER");
+
+    // 0.5.1 — split "last demonstrated" out of "last modified" so
+    // decaySpecializations stops resetting the clock it filters on. SQLite
+    // rejects a non-constant DEFAULT in ALTER TABLE ADD COLUMN, so existing
+    // rows get NULL and decaySpecializations COALESCEs to updated_at.
+    ensureColumn("agent_specializations", "last_reinforced_at", "INTEGER");
   }
 
   /** Close the database */
@@ -961,11 +1039,11 @@ export class MemoryDb {
       // Fallback to LIKE if FTS5 query syntax is invalid
       return db.prepare(
         `SELECT * FROM memories
-         WHERE project_path = ? AND content LIKE ?
+         WHERE project_path = ? AND content LIKE ? ESCAPE '\\'
          AND (expires_at IS NULL OR expires_at > unixepoch())
          ORDER BY relevance_score DESC
          LIMIT ?`,
-      ).all(projectPath, `%${queryText}%`, limit) as unknown as MemoryRecord[];
+      ).all(projectPath, `%${escapeLike(queryText)}%`, limit) as unknown as MemoryRecord[];
     }
   }
 
@@ -1334,9 +1412,15 @@ export class MemoryDb {
   getAgentCostSummary(): Array<{ agent_name: string; total_cost: number; run_count: number; avg_cost: number }> {
     const db = this.requireDb();
     return db.prepare(
+      // Every FINISHED run counts, not just successful ones. A run that
+      // failed after the model had already produced output still cost money —
+      // completeAgentRun's COALESCE deliberately preserves cost_usd on
+      // failure for exactly that reason — so filtering to status='completed'
+      // under-reported the dashboard's per-agent spend by the whole of it.
+      // Still-running rows are excluded: their cost isn't final yet.
       `SELECT agent_name, SUM(cost_usd) as total_cost, COUNT(*) as run_count,
         AVG(cost_usd) as avg_cost
-      FROM agent_runs WHERE status = 'completed'
+      FROM agent_runs WHERE status IN ('completed', 'failed')
       GROUP BY agent_name ORDER BY total_cost DESC`,
     ).all() as unknown as Array<{ agent_name: string; total_cost: number; run_count: number; avg_cost: number }>;
   }
@@ -1637,8 +1721,8 @@ export class MemoryDb {
   searchProfile(query: string, limit = 20): Record<string, unknown>[] {
     const db = this.requireDb();
     return db.prepare(
-      `SELECT * FROM user_profile WHERE content LIKE ? ORDER BY weight DESC LIMIT ?`,
-    ).all(`%${query}%`, limit);
+      `SELECT * FROM user_profile WHERE content LIKE ? ESCAPE '\\' ORDER BY weight DESC LIMIT ?`,
+    ).all(`%${escapeLike(query)}%`, limit);
   }
 
   // -- Strategy evolution ------------------------------------------------------
@@ -1854,7 +1938,8 @@ export class MemoryDb {
       const blended = Math.min(1.0, existing.confidence * 0.7 + clamped * 0.3 + 0.02);
       db.prepare(
         `UPDATE agent_specializations SET confidence = ?, reinforcement_count = reinforcement_count + 1,
-         evidence = COALESCE(?, evidence), updated_at = unixepoch() WHERE id = ?`,
+         evidence = COALESCE(?, evidence), updated_at = unixepoch(),
+         last_reinforced_at = unixepoch() WHERE id = ?`,
       ).run(blended, evidence ?? null, existing.id);
       return existing.id;
     }
@@ -1869,7 +1954,7 @@ export class MemoryDb {
   getSpecializations(agentName?: string): Array<{
     id: number; agent_name: string; domain: string; confidence: number;
     evidence: string | null; reinforcement_count: number;
-    created_at: number; updated_at: number;
+    created_at: number; updated_at: number; last_reinforced_at: number | null;
   }> {
     const db = this.requireDb();
     if (agentName) {
@@ -1878,7 +1963,7 @@ export class MemoryDb {
       ).all(agentName) as Array<{
         id: number; agent_name: string; domain: string; confidence: number;
         evidence: string | null; reinforcement_count: number;
-        created_at: number; updated_at: number;
+        created_at: number; updated_at: number; last_reinforced_at: number | null;
       }>;
     }
     return db.prepare(
@@ -1886,7 +1971,7 @@ export class MemoryDb {
     ).all() as Array<{
       id: number; agent_name: string; domain: string; confidence: number;
       evidence: string | null; reinforcement_count: number;
-      created_at: number; updated_at: number;
+      created_at: number; updated_at: number; last_reinforced_at: number | null;
     }>;
   }
 
@@ -1907,9 +1992,15 @@ export class MemoryDb {
   decaySpecializations(daysStale = 60): number {
     const db = this.requireDb();
     const cutoff = Math.floor(Date.now() / 1000) - daysStale * 86400;
+    // Filter on last_reinforced_at, NOT updated_at. Filtering on a column
+    // this same statement writes made decay a one-shot: a stale row decayed
+    // once, its updated_at jumped to now, and every later pass matched zero
+    // rows. Learnings never had the bug because they carry a separate
+    // last_reinforced_at; specializations now do too. COALESCE covers rows
+    // created before the column existed.
     return db.prepare(
       `UPDATE agent_specializations SET confidence = MAX(0.1, confidence * 0.9), updated_at = unixepoch()
-       WHERE updated_at < ? AND confidence > 0.1`,
+       WHERE COALESCE(last_reinforced_at, updated_at) < ? AND confidence > 0.1`,
     ).run(cutoff).changes;
   }
 
@@ -2207,11 +2298,20 @@ export class MemoryDb {
     const db = this.requireDb();
     const now = Math.floor(Date.now() / 1000);
     // Find active lease for this agent+tool
+    // Charge the lease that `hasActiveLease` would have authorized: one that
+    // still has budget left. Selecting purely by `created_at DESC` picked a
+    // DIFFERENT row — a newer unscoped lease shadowed an older capped one, so
+    // the capped lease's `executions_used` stayed at 0 and its
+    // `max_executions` was never reachable. Ordering by expiry (soonest
+    // first, NULL last) also spends the most perishable grant first, which is
+    // what a caller holding two overlapping leases expects.
     const lease = db.prepare(
       `SELECT id, max_executions, executions_used FROM tool_leases
        WHERE agent_name = ? AND tool_name = ? AND status = 'active'
          AND (expires_at IS NULL OR expires_at > ?)
-       ORDER BY created_at DESC LIMIT 1`,
+         AND (max_executions IS NULL OR executions_used < max_executions)
+       ORDER BY (expires_at IS NULL), expires_at ASC, created_at ASC
+       LIMIT 1`,
     ).get(agentName, toolName, now) as { id: number; max_executions: number | null; executions_used: number } | undefined;
     if (!lease) return;
 
@@ -2282,8 +2382,8 @@ export class MemoryDb {
     // SQLite LIKE is case-insensitive only for ASCII; sufficient here.
     const rows = db.prepare(
       `SELECT id, schedule_name FROM agent_schedules
-       WHERE enabled = 1 AND LOWER(prompt) LIKE ?`,
-    ).all(`%${toolName.toLowerCase()}%`) as any[];
+       WHERE enabled = 1 AND LOWER(prompt) LIKE ? ESCAPE '\\'`,
+    ).all(`%${escapeLike(toolName.toLowerCase())}%`) as any[];
     if (rows.length === 0) return [];
     db.prepare(
       `UPDATE agent_schedules SET enabled = 0
