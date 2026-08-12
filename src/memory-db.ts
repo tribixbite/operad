@@ -870,6 +870,80 @@ export class MemoryDb {
     return rows.map((r) => r.project_path);
   }
 
+/**
+   * Trim unbounded history tables.
+   *
+   * None of these had any retention: agent_runs stores full response and
+   * thinking text per run, tool_executions grows per tool call,
+   * agent_personality inserts a NEW ROW per trait update, and workflow runs
+   * accumulate per execution. On a daemon that actually uses the agent
+   * features the database grows monotonically forever.
+   *
+   * Conservative by design — the defaults keep months of history. Returns a
+   * per-table count of rows removed.
+   */
+  pruneHistory(opts: {
+    runsDays?: number;
+    messagesDays?: number;
+    decisionsDays?: number;
+    toolExecutionsDays?: number;
+    workflowRunsDays?: number;
+    personalityVersionsPerTrait?: number;
+  } = {}): Record<string, number> {
+    const db = this.requireDb();
+    const now = Math.floor(Date.now() / 1000);
+    const cutoff = (days: number) => now - days * 86_400;
+    const removed: Record<string, number> = {};
+
+    const del = (label: string, sql: string, ...args: unknown[]) => {
+      try {
+        removed[label] = Number(db.prepare(sql).run(...args).changes ?? 0);
+      } catch (err) {
+        this.log.warn(`pruneHistory(${label}) failed: ${err}`);
+        removed[label] = 0;
+      }
+    };
+
+    // Only finished runs are eligible — an in-flight row must survive.
+    del("agent_runs",
+      `DELETE FROM agent_runs WHERE finished_at IS NOT NULL AND started_at < ?`,
+      cutoff(opts.runsDays ?? 90));
+
+    del("agent_messages",
+      `DELETE FROM agent_messages WHERE created_at < ?`,
+      cutoff(opts.messagesDays ?? 90));
+
+    del("agent_decisions",
+      `DELETE FROM agent_decisions WHERE created_at < ?`,
+      cutoff(opts.decisionsDays ?? 90));
+
+    del("tool_executions",
+      `DELETE FROM tool_executions WHERE created_at < ?`,
+      cutoff(opts.toolExecutionsDays ?? 30));
+
+    // run_nodes cascade via the FK on run_id.
+    del("agent_workflow_runs",
+      `DELETE FROM agent_workflow_runs WHERE status != 'running' AND started_at < ?`,
+      cutoff(opts.workflowRunsDays ?? 30));
+
+    // Personality is versioned per trait; keep the most recent N of each so
+    // the current value and a little history survive.
+    const keep = opts.personalityVersionsPerTrait ?? 20;
+    del("agent_personality",
+      `DELETE FROM agent_personality
+        WHERE id NOT IN (
+          SELECT id FROM agent_personality p2
+           WHERE p2.agent_name = agent_personality.agent_name
+             AND p2.trait_name = agent_personality.trait_name
+           ORDER BY version DESC LIMIT ?
+        )`,
+      keep);
+
+    const total = Object.values(removed).reduce((a, b) => a + b, 0);
+    if (total > 0) this.log.info(`History pruned: ${JSON.stringify(removed)}`);
+    return removed;
+  }
+
   /** Full-text search memories for a project */
   searchMemories(projectPath: string, queryText: string, limit = 10): MemoryRecord[] {
     const db = this.requireDb();

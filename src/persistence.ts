@@ -72,6 +72,15 @@ export class PersistenceEngine {
     // loop, so a transient failure (disk full, DB locked) burned the whole
     // day's snapshot with no retry until tomorrow.
     if (anySucceeded) this.lastSnapshotDate = today;
+
+    // Same daily cadence: trim the history tables, which otherwise grow
+    // without bound (agent_runs keeps full response text, agent_personality
+    // inserts a row per trait update, tool_executions grows per call).
+    try {
+      memoryDb.pruneHistory();
+    } catch (err) {
+      log.warn(`History prune failed: ${err}`);
+    }
     log.info(`Daily agent snapshots saved (${agentConfigs.filter((a) => a.enabled).length} agents)`);
   }
 

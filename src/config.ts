@@ -125,7 +125,14 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
   // ADB section
   const adbRaw = (raw.adb ?? {}) as Record<string, unknown>;
   const adb: AdbConfig = {
-    enabled: asBool(adbRaw.enabled, "adb.enabled", true),
+    // Default to enabled only where ADB is a real capability. This defaulted
+    // to true everywhere, so on Linux, WSL, macOS and Windows every boot ran
+    // the connect script — empty by default, i.e. `timeout 45 ""`, which exits
+    // 127 — then notified "ADB fix failed — processes may be killed" and
+    // installed a permanent 300s retry interval that repeated forever. None of
+    // it is meaningful off Android. An explicit `enabled = true` still works
+    // anywhere, for a desktop driving a phone over ADB.
+    enabled: asBool(adbRaw.enabled, "adb.enabled", plat.hasAdb),
     connect_script: asString(adbRaw.connect_script, "adb.connect_script",
       ""),
     connect_timeout_s: asNumber(adbRaw.connect_timeout_s, "adb.connect_timeout_s", 45),

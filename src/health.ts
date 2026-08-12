@@ -104,12 +104,42 @@ function httpCheck(sessionName: string, url: string, startMs: number): HealthRes
   }
 }
 
-/** Process pattern check — pgrep for a pattern */
+/**
+ * Process pattern check.
+ *
+ * Two caveats the caller should understand, both pre-existing:
+ *
+ *  • The match is machine-wide. `pgrep -f <pattern>` finds ANY process whose
+ *    command line matches, not just this session's, so a loose pattern can
+ *    report a dead session as healthy because something unrelated matches.
+ *    Patterns are user-supplied via `process_pattern`, so this is documented
+ *    rather than changed — narrowing it silently would break configs that
+ *    currently work.
+ *
+ *  • pgrep does not exist on Windows. It previously returned status !== 0
+ *    there, which reads as "not found" — a permanently unhealthy session and
+ *    therefore an endless restart loop creating tmux sessions. A missing
+ *    pgrep is now distinguished from a genuine miss and reported as an
+ *    unusable check rather than a failure.
+ */
 function processCheck(sessionName: string, pattern: string, startMs: number): HealthResult {
   const result = spawnSync("pgrep", ["-f", pattern], {
     timeout: 5000,
     stdio: ["ignore", "pipe", "ignore"],
   });
+
+  // ENOENT (no pgrep) surfaces as result.error; a real miss is status 1.
+  if (result.error) {
+    return {
+      session: sessionName,
+      healthy: true, // fail open: an unusable probe must not trigger restarts
+      message:
+        `Process check unavailable on this platform (${(result.error as NodeJS.ErrnoException).code ?? "spawn failed"}) — `
+        + `treating '${pattern}' as healthy; use check = "tmux_alive" instead`,
+      duration_ms: Date.now() - startMs,
+    };
+  }
+
   const found = result.status === 0;
   return {
     session: sessionName,

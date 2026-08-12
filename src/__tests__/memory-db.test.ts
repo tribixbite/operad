@@ -1323,3 +1323,68 @@ describe("computeQuotaStatus", () => {
     expect(status.rate_limit_tier === null || typeof status.rate_limit_tier === "string").toBe(true);
   });
 });
+
+// -- history retention ------------------------------------------------------
+//
+// None of these tables had any retention. agent_runs stores full response and
+// thinking text per run, agent_personality inserts a NEW ROW per trait
+// update, and tool_executions grows per call — monotonic growth forever.
+
+describe("pruneHistory", () => {
+  const DAY = 86_400;
+  const now = () => Math.floor(Date.now() / 1000);
+
+  test("removes finished runs older than the window and keeps recent ones", () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO agent_runs (agent_name, session_name, status, started_at, finished_at, trigger)
+      VALUES ('a','s','completed',?,?, 'manual')`).run(now() - 200 * DAY, now() - 200 * DAY);
+    raw.prepare(`INSERT INTO agent_runs (agent_name, session_name, status, started_at, finished_at, trigger)
+      VALUES ('a','s','completed',?,?, 'manual')`).run(now() - 1 * DAY, now() - 1 * DAY);
+    const removed = db.pruneHistory({ runsDays: 90 });
+    expect(removed.agent_runs).toBe(1);
+    const left = raw.prepare(`SELECT COUNT(*) c FROM agent_runs`).get() as any;
+    expect(left.c).toBe(1);
+  });
+
+  test("never removes a run that is still in flight", () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO agent_runs (agent_name, session_name, status, started_at, finished_at, trigger)
+      VALUES ('a','s','running',?, NULL, 'manual')`).run(now() - 500 * DAY);
+    const removed = db.pruneHistory({ runsDays: 1 });
+    expect(removed.agent_runs).toBe(0);
+  });
+
+  test("removes old tool executions", () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO tool_executions
+        (agent_name, tool_name, tool_category, params_json, result_success, created_at)
+      VALUES ('a','t','analyze','{}',1,?)`).run(now() - 90 * DAY);
+    const removed = db.pruneHistory({ toolExecutionsDays: 30 });
+    expect(removed.tool_executions).toBe(1);
+  });
+
+  test("keeps a bounded number of personality versions per trait", () => {
+    for (let i = 0; i < 30; i++) {
+      db.setPersonalityTrait("agt", "curiosity", 0.5, `v${i}`);
+    }
+    db.pruneHistory({ personalityVersionsPerTrait: 5 });
+    const rows = db.requireDb()
+      .prepare(`SELECT COUNT(*) c FROM agent_personality WHERE agent_name='agt' AND trait_name='curiosity'`)
+      .get() as any;
+    expect(rows.c).toBeLessThanOrEqual(5);
+  });
+
+  test("the newest personality version survives the prune", () => {
+    for (let i = 0; i < 10; i++) {
+      db.setPersonalityTrait("agt2", "focus", i / 10, `v${i}`);
+    }
+    db.pruneHistory({ personalityVersionsPerTrait: 3 });
+    const snap = db.getPersonalitySnapshot("agt2");
+    expect(snap.find((t) => t.trait_name === "focus")).toBeDefined();
+  });
+
+  test("a clean database prunes nothing and does not throw", () => {
+    const removed = db.pruneHistory();
+    for (const v of Object.values(removed)) expect(v).toBeGreaterThanOrEqual(0);
+  });
+});

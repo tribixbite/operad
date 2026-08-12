@@ -654,6 +654,21 @@ export class Daemon {
         const stopPromises = batch.sessions.map(async (name) => {
           const s = this.state.getSession(name);
           if (!s || s.status === "stopped" || s.status === "pending") return;
+          // A SIGSTOPped process cannot act on tmux kill-session's SIGHUP —
+          // non-KILL terminating signals stay pending until it is continued.
+          // This path called stopSession directly, bypassing the SIGCONT that
+          // stopSessionByName does, so a suspended session's process tree
+          // survived daemon exit still frozen, with nothing left able to
+          // resume it.
+          if (s.suspended) {
+            this.log.info(`Resuming suspended '${name}' before shutdown so it can terminate`, { session: name });
+            try {
+              resumeSession(name, this.log);
+              this.state.setSuspended(name, false);
+            } catch (err) {
+              this.log.warn(`Could not resume '${name}' before shutdown: ${err}`, { session: name });
+            }
+          }
           this.state.transition(name, "stopping");
           await stopSession(name, this.log);
           this.state.transition(name, "stopped");

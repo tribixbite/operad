@@ -1332,7 +1332,7 @@ describe("ToolExecutor — event loop and cancellation", () => {
     te.register({
       name: "waits", description: "d", category: "analyze", params: [],
       timeout_ms: 10_000, parallelizable: true,
-      execute: async (_input, ctx) => {
+      execute: async (_input: unknown, ctx: any) => {
         await new Promise<void>((resolve) => {
           if (ctx.signal?.aborted) return resolve();
           ctx.signal?.addEventListener("abort", () => resolve(), { once: true });
