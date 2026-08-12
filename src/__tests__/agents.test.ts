@@ -15,10 +15,10 @@
  *   - parseTomlAgents: name required, optional fields, defaults applied
  */
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 import {
   validateAgentConfig,
@@ -28,6 +28,7 @@ import {
   discoverProjectAgents,
   parseTomlAgents,
   type AgentConfig,
+  _setUserAgentsHome,
 } from "../agents.js";
 
 // ---------------------------------------------------------------------------
@@ -543,7 +544,11 @@ describe("discoverProjectAgents", () => {
     expect(agents[0].enabled).toBe(false);
   });
 
-  test("agent JSON without enabled field defaults enabled to true", () => {
+  // A project file that is silent about `enabled` must NOT be treated as
+  // opting in. Defaulting to true here is how cloning a repo could enable a
+  // hijacked builtin — loadAgents now inherits the existing flag instead, and
+  // a brand-new project agent starts disabled.
+  test("agent JSON without enabled field does not opt itself in", () => {
     const agentsDir = join(tmpDir, ".claude", "agents");
     mkdirSync(agentsDir, { recursive: true });
     writeFileSync(join(agentsDir, "no-enabled.json"), JSON.stringify({
@@ -552,7 +557,17 @@ describe("discoverProjectAgents", () => {
       prompt: "Prompt",
     }));
     const agents = discoverProjectAgents(tmpDir);
-    expect(agents[0].enabled).toBe(true);
+    expect(agents[0].enabled).toBeUndefined();
+  });
+
+  test("agent JSON with an explicit enabled:true is respected", () => {
+    const agentsDir = join(tmpDir, ".claude", "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, "opted-in.json"), JSON.stringify({
+      name: "opted-in", description: "Desc", prompt: "Prompt", enabled: true,
+    }));
+    const a = discoverProjectAgents(tmpDir).find((x) => x.name === "opted-in")!;
+    expect(a.enabled).toBe(true);
   });
 
   test("valid and invalid JSON files in same dir: only valid ones returned", () => {
@@ -678,5 +693,122 @@ describe("parseTomlAgents", () => {
     expect(result[0].name).toBe("agent-one");
     expect(result[1].name).toBe("agent-two");
     expect(result[1].enabled).toBe(false);
+  });
+});
+
+// -- project-agent override safety ------------------------------------------
+//
+// Layer 4 used a wholesale `agents.set(name, a)`, so a repo containing
+// .claude/agents/master-controller.json replaced the builtin outright —
+// prompt and guardrails included. parseAgentJson also defaulted `enabled` to
+// true while builtins ship disabled, so merely cloning such a repo ENABLED a
+// hijacked controller.
+
+describe("project agents merge rather than replace", () => {
+  let projDir: string;
+  let fakeHome: string;
+
+  beforeEach(() => {
+    projDir = mkdtempSync(join(tmpdir(), "operad-projagent-"));
+    mkdirSync(join(projDir, ".claude", "agents"), { recursive: true });
+    // Without this the user layer reads the developer's REAL ~/.claude/agents,
+    // where a dashboard toggle may already have enabled master-controller.
+    fakeHome = mkdtempSync(join(tmpdir(), "operad-projagent-home-"));
+    _setUserAgentsHome(fakeHome);
+  });
+  afterEach(() => {
+    _setUserAgentsHome(null);
+    rmSync(projDir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  /** Write a project agent file with exactly the given fields. */
+  function writeProjectAgent(name: string, body: Record<string, unknown>): void {
+    writeFileSync(
+      join(projDir, ".claude", "agents", `${name}.json`),
+      JSON.stringify({ name, ...body }),
+    );
+  }
+
+  test("a project file cannot enable a builtin that ships disabled", () => {
+    writeProjectAgent("master-controller", { description: "d", prompt: "HIJACKED" });
+    const all = loadAgents([], [projDir]);
+    const mc = all.find((a) => a.name === "master-controller");
+    expect(mc).toBeDefined();
+    expect(mc!.enabled).toBe(false);
+  });
+
+  test("a project file may still override the prompt when merged", () => {
+    writeProjectAgent("master-controller", { description: "d", prompt: "CUSTOM" });
+    const mc = loadAgents([], [projDir]).find((a) => a.name === "master-controller")!;
+    expect(mc.prompt).toBe("CUSTOM");
+  });
+
+  test("optional fields the project file omits keep the builtin's values", () => {
+    const builtin = loadAgents([], []).find((a) => a.name === "master-controller")!;
+    // description and prompt are required by validateAgentConfig, so the
+    // interesting case is the optional guardrails the project file is silent
+    // about — a wholesale replace wiped them.
+    writeProjectAgent("master-controller", { description: "d", prompt: "CUSTOM" });
+    const merged = loadAgents([], [projDir]).find((a) => a.name === "master-controller")!;
+    expect(merged.prompt).toBe("CUSTOM");
+    expect(merged.max_turns).toBe(builtin.max_turns);
+    expect(merged.effort).toBe(builtin.effort);
+    expect(merged.allowed_tool_categories).toEqual(builtin.allowed_tool_categories);
+    expect(merged.max_tool_calls_per_run).toBe(builtin.max_tool_calls_per_run);
+    expect(merged.autonomy_level).toBe(builtin.autonomy_level);
+  });
+
+  test("an explicit enabled:true in the project file is honoured", () => {
+    writeProjectAgent("master-controller", { description: "d", prompt: "p", enabled: true });
+    const mc = loadAgents([], [projDir]).find((a) => a.name === "master-controller")!;
+    expect(mc.enabled).toBe(true);
+  });
+
+  test("a brand-new project agent starts disabled unless it opts in", () => {
+    writeProjectAgent("repo-helper", { description: "d", prompt: "p" });
+    const a = loadAgents([], [projDir]).find((x) => x.name === "repo-helper")!;
+    expect(a.enabled).toBe(false);
+  });
+});
+
+// -- guardrail round-trip ---------------------------------------------------
+//
+// parseAgentJson never read these three back, so toggling a builtin from the
+// dashboard (which writes ~/.claude/agents/<name>.json and reloads) returned
+// a "READ-ONLY" agent with every category advertised and the default budget.
+
+describe("parseAgentJson preserves guardrail fields", () => {
+  let projDir: string;
+  beforeEach(() => {
+    projDir = mkdtempSync(join(tmpdir(), "operad-guardrail-"));
+    mkdirSync(join(projDir, ".claude", "agents"), { recursive: true });
+  });
+  afterEach(() => rmSync(projDir, { recursive: true, force: true }));
+
+  test("allowed_tool_categories, max_tool_calls_per_run and autonomy_level survive a load", () => {
+    writeFileSync(
+      join(projDir, ".claude", "agents", "ro.json"),
+      JSON.stringify({
+        name: "ro", description: "d", prompt: "p", enabled: true,
+        allowed_tool_categories: ["observe", "analyze"],
+        max_tool_calls_per_run: 3,
+        autonomy_level: "observe",
+      }),
+    );
+    const a = discoverProjectAgents(projDir).find((x) => x.name === "ro")!;
+    expect(a.allowed_tool_categories).toEqual(["observe", "analyze"]);
+    expect(a.max_tool_calls_per_run).toBe(3);
+    expect(a.autonomy_level).toBe("observe");
+  });
+
+  test("absent guardrails stay undefined rather than becoming defaults", () => {
+    writeFileSync(
+      join(projDir, ".claude", "agents", "plain.json"),
+      JSON.stringify({ name: "plain", description: "d", prompt: "p", enabled: true }),
+    );
+    const a = discoverProjectAgents(projDir).find((x) => x.name === "plain")!;
+    expect(a.allowed_tool_categories).toBeUndefined();
+    expect(a.max_tool_calls_per_run).toBeUndefined();
   });
 });

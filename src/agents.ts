@@ -430,10 +430,35 @@ export function loadAgents(
   }
 
   // Layer 4: Project-level agents from .claude/agents/*.json
+  //
+  // MERGE, never replace. This used to be a wholesale `agents.set(name, a)`,
+  // so a file at <project>/.claude/agents/master-controller.json replaced the
+  // builtin outright — prompt, guardrails and all. And because
+  // parseAgentJson defaults `enabled` to true while the builtins ship
+  // disabled, merely cloning a repo that contained such a file ENABLED a
+  // hijacked controller. Combined with tool execution that is a host
+  // compromise from a checked-in JSON file.
+  //
+  // Merging keeps the builtin's fields for anything the project file does not
+  // set, matching how the TOML layer above already behaves.
   if (projectPaths) {
     for (const projPath of projectPaths) {
       for (const a of discoverProjectAgents(projPath)) {
-        agents.set(a.name, a);
+        const existing = agents.get(a.name);
+        if (!existing) {
+          // A brand-new agent contributed by a repo starts DISABLED unless its
+          // JSON opts in explicitly. Cloning a repo must not hand it a running
+          // agent.
+          agents.set(a.name, { ...a, enabled: a.enabled === true });
+          continue;
+        }
+        // A project file may not silently enable an agent the user has not
+        // enabled themselves; it must say so explicitly in its own JSON.
+        const merged: AgentConfig = { ...existing, ...stripUndefined(a) };
+        // Silence means "inherit"; only an explicit `enabled` in the project
+        // file changes the flag.
+        merged.enabled = a.enabled === undefined ? existing.enabled : a.enabled;
+        agents.set(a.name, merged);
       }
     }
   }
@@ -539,11 +564,16 @@ export function discoverProjectAgents(projectPath: string): AgentConfig[] {
 
 /** Discover user-level agent definitions from ~/.claude/agents/*.json */
 function discoverUserAgents(): AgentConfig[] {
-  return loadAgentsFromDir(userAgentsDir(), "user");
+  // A file the user placed in their own ~/.claude/agents is deliberate.
+  return loadAgentsFromDir(userAgentsDir(), "user", true);
 }
 
 /** Load agent JSON files from a directory */
-function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
+function loadAgentsFromDir(
+  dir: string,
+  source: AgentSource,
+  defaultEnabled?: boolean,
+): AgentConfig[] {
   if (!existsSync(dir)) return [];
 
   const agents: AgentConfig[] = [];
@@ -569,6 +599,9 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
         continue;
       }
 
+      if (agent.enabled === undefined && defaultEnabled !== undefined) {
+        agent.enabled = defaultEnabled;
+      }
       agents.push(agent as AgentConfig);
     } catch {
       // Skip unparseable files
@@ -594,9 +627,37 @@ function parseAgentJson(raw: Record<string, unknown>, source: AgentSource): Part
     effort: typeof raw.effort === "string" ? (raw.effort as EffortLevel) : undefined,
     permission_mode: typeof raw.permission_mode === "string" ? (raw.permission_mode as PermissionMode) : undefined,
     max_budget_usd: typeof raw.max_budget_usd === "number" ? raw.max_budget_usd : undefined,
-    enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
+    // These three were absent from the parse, so every write/read round trip
+    // silently dropped them. Toggling a builtin from the dashboard writes
+    // ~/.claude/agents/<name>.json and reloads: the "READ-ONLY" optimizer came
+    // back with allowed_tool_categories, max_tool_calls_per_run and
+    // autonomy_level all undefined — every category advertised and the budget
+    // fallen back to the default. The same mechanism discarded any
+    // hand-written field from a user's own agent JSON on every toggle.
+    allowed_tool_categories: Array.isArray(raw.allowed_tool_categories)
+      ? (raw.allowed_tool_categories.map(String) as import("./tools.js").ToolCategory[])
+      : undefined,
+    max_tool_calls_per_run:
+      typeof raw.max_tool_calls_per_run === "number" ? raw.max_tool_calls_per_run : undefined,
+    autonomy_level:
+      typeof raw.autonomy_level === "string"
+        ? (raw.autonomy_level as import("./types.js").AutonomyLevel)
+        : undefined,
+    // Deliberately NOT defaulted here. A layer that defaults it cannot tell
+    // "the file said enabled: true" from "the file was silent", and the
+    // project layer must not enable an agent the user left disabled.
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
     source,
   };
+}
+
+/** Drop keys whose value is undefined so a spread cannot erase existing ones. */
+function stripUndefined<T extends object>(o: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const [k, v] of Object.entries(o) as [keyof T, T[keyof T]][]) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
 }
 
 // -- Persistence (user-level agents) ------------------------------------------
