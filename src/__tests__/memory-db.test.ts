@@ -1418,6 +1418,116 @@ describe("pruneHistory", () => {
   const DAY = 86_400;
   const now = () => Math.floor(Date.now() / 1000);
 
+  // The audit found retention covered 6 of 27 tables, leaving the three
+  // highest-rate append-only ones unbounded.
+
+  test("consolidation_runs is pruned by age", () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO consolidation_runs (started_at, completed_at) VALUES (?,?)`)
+      .run(now() - 200 * DAY, now() - 200 * DAY);
+    raw.prepare(`INSERT INTO consolidation_runs (started_at, completed_at) VALUES (?,?)`)
+      .run(now() - 1 * DAY, now() - 1 * DAY);
+    const removed = db.pruneHistory({ consolidationRunsDays: 90 });
+    expect(removed.consolidation_runs).toBe(1);
+    expect((raw.prepare(`SELECT COUNT(*) c FROM consolidation_runs`).get() as any).c).toBe(1);
+  });
+
+  test("costs is pruned by age", () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO costs (session_name, cost_usd, created_at) VALUES ('s', 1.0, ?)`)
+      .run(now() - 500 * DAY);
+    raw.prepare(`INSERT INTO costs (session_name, cost_usd, created_at) VALUES ('s', 1.0, ?)`)
+      .run(now() - 1 * DAY);
+    const removed = db.pruneHistory({ costsDays: 365 });
+    expect(removed.costs).toBe(1);
+  });
+
+  test("conversations keep the most recent N turns PER AGENT, not by age", () => {
+    // An agent used once a year still needs its last exchange, so age is the
+    // wrong axis for this table.
+    const raw = db.requireDb();
+    for (let i = 0; i < 10; i++) {
+      raw.prepare(`INSERT INTO agent_conversations (agent_name, role, content, created_at) VALUES ('chatty','user',?,?)`)
+        .run(`msg ${i}`, now() - (10 - i) * DAY);
+    }
+    raw.prepare(`INSERT INTO agent_conversations (agent_name, role, content, created_at) VALUES ('quiet','user','only one',?)`)
+      .run(now() - 900 * DAY);
+
+    db.pruneHistory({ conversationTurnsPerAgent: 3 });
+
+    const chatty = raw.prepare(`SELECT COUNT(*) c FROM agent_conversations WHERE agent_name='chatty'`).get() as any;
+    const quiet = raw.prepare(`SELECT COUNT(*) c FROM agent_conversations WHERE agent_name='quiet'`).get() as any;
+    expect(chatty.c).toBe(3);
+    // The single ancient turn survives — it is that agent's whole history.
+    expect(quiet.c).toBe(1);
+  });
+
+  test("compacting the trust ledger does NOT change any agent's trust score", () => {
+    // getTrustScore is SUM(score_delta) over the WHOLE ledger, so a plain
+    // age-based DELETE would silently erode accumulated trust and demote the
+    // agent with no event to explain it.
+    const raw = db.requireDb();
+    const deltas = [5, -3, 12, -1, 7];
+    for (const d of deltas) {
+      raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('trusty',?,'old',?)`)
+        .run(d, now() - 400 * DAY);
+    }
+    raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('trusty',?,'recent',?)`)
+      .run(4, now() - 1 * DAY);
+
+    const before = db.getTrustScore("trusty");
+    expect(before).toBe(deltas.reduce((a, b) => a + b, 0) + 4);
+
+    const removed = db.pruneHistory({ trustLedgerDays: 180 });
+
+    expect(db.getTrustScore("trusty")).toBe(before);
+    expect(removed.agent_trust_ledger).toBe(deltas.length - 1);
+    const rows = raw.prepare(`SELECT COUNT(*) c FROM agent_trust_ledger WHERE agent_name='trusty'`).get() as any;
+    expect(rows.c).toBe(2); // one compaction row + the recent one
+  });
+
+  test("compaction is idempotent — a second pass does not double-count", () => {
+    // The compaction row is stamped at the cutoff so it stays eligible; it
+    // must be excluded from being folded into another compaction row.
+    const raw = db.requireDb();
+    for (const d of [10, -4, 6]) {
+      raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('idem',?,'old',?)`)
+        .run(d, now() - 400 * DAY);
+    }
+    const before = db.getTrustScore("idem");
+
+    db.pruneHistory({ trustLedgerDays: 180 });
+    const afterFirst = db.getTrustScore("idem");
+    db.pruneHistory({ trustLedgerDays: 180 });
+    const afterSecond = db.getTrustScore("idem");
+
+    expect(afterFirst).toBe(before);
+    expect(afterSecond).toBe(before);
+    const rows = raw.prepare(`SELECT COUNT(*) c FROM agent_trust_ledger WHERE agent_name='idem'`).get() as any;
+    expect(rows.c).toBe(1);
+  });
+
+  test("compaction is per-agent — one agent's history cannot leak into another's score", () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('alpha',9,'old',?)`).run(now() - 400 * DAY);
+    raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('alpha',1,'old',?)`).run(now() - 400 * DAY);
+    raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('beta',-2,'old',?)`).run(now() - 400 * DAY);
+    raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('beta',-3,'old',?)`).run(now() - 400 * DAY);
+
+    // getTrustScore clamps to [0, 1000], so assert the RAW sum too — that is
+    // the quantity compaction has to preserve exactly.
+    const rawSum = (agent: string) =>
+      (raw.prepare(`SELECT COALESCE(SUM(score_delta),0) t FROM agent_trust_ledger WHERE agent_name=?`)
+        .get(agent) as any).t;
+
+    db.pruneHistory({ trustLedgerDays: 180 });
+
+    expect(rawSum("alpha")).toBe(10);
+    expect(rawSum("beta")).toBe(-5);
+    expect(db.getTrustScore("alpha")).toBe(10);
+    expect(db.getTrustScore("beta")).toBe(0); // clamped floor, unchanged by compaction
+  });
+
   test("removes finished runs older than the window and keeps recent ones", () => {
     const raw = db.requireDb();
     raw.prepare(`INSERT INTO agent_runs (agent_name, session_name, status, started_at, finished_at, trigger)

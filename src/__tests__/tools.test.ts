@@ -1361,3 +1361,99 @@ describe("ToolExecutor — event loop and cancellation", () => {
     sql.close();
   }, 15_000);
 });
+
+// ---------------------------------------------------------------------------
+// Tool leases as a grant path
+//
+// `createToolLease` and `hasActiveLease` existed with zero production callers
+// until 0.5.2, so the "goal-scoped tool permissions with usage limits" model
+// was declared but never enforced — the table stayed permanently empty. A
+// lease WIDENS access above the agent's standing autonomy level; it never
+// narrows it, so nothing that worked before can start failing.
+// ---------------------------------------------------------------------------
+
+describe("execute() — tool leases", () => {
+  const mutateTool = () => makeTool("needs-mutate", "mutate");
+
+  test("without a lease, an observe-level agent cannot call a mutate tool", () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(mutateTool());
+    return ex.execute("needs-mutate", {}, makeCtx(db), undefined, {
+      autonomyLevel: "observe",
+    }).then((r) => {
+      expect(r.success).toBe(false);
+      expect(r.requiresApproval).toBe(true);
+    });
+  });
+
+  test("a lease lets the same call through", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(mutateTool());
+    const r = await ex.execute("needs-mutate", {}, makeCtx(db), undefined, {
+      autonomyLevel: "observe",
+      hasLease: (name) => name === "needs-mutate",
+    });
+    expect(r.success).toBe(true);
+    expect(r.authorisedByLease).toBe(true);
+  });
+
+  test("a lease for a DIFFERENT tool does not help", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(mutateTool());
+    const r = await ex.execute("needs-mutate", {}, makeCtx(db), undefined, {
+      autonomyLevel: "observe",
+      hasLease: (name) => name === "some-other-tool",
+    });
+    expect(r.success).toBe(false);
+    expect(r.requiresApproval).toBe(true);
+  });
+
+  test("a lease cannot bypass protected_tools", async () => {
+    // That list is an explicit "never without a human", and a lease is not a
+    // human. Leases raise the autonomy ceiling, not the protection floor.
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(mutateTool());
+    const r = await ex.execute("needs-mutate", {}, makeCtx(db), undefined, {
+      autonomyLevel: "autonomous",
+      protectedCheckpoints: { protected_tools: ["needs-mutate"], protected_files: [], protected_git: [] },
+      hasLease: () => true,
+    });
+    expect(r.success).toBe(false);
+    expect(r.requiresApproval).toBe(true);
+  });
+
+  test("a call the autonomy level already allows is NOT marked lease-authorised", async () => {
+    // The caller charges the lease's execution budget off this flag. Charging
+    // for a call the agent could already make would exhaust a capped grant
+    // for no reason.
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(makeTool("plain-observe", "observe"));
+    const r = await ex.execute("plain-observe", {}, makeCtx(db), undefined, {
+      autonomyLevel: "observe",
+      hasLease: () => true,
+    });
+    expect(r.success).toBe(true);
+    expect(r.authorisedByLease).toBeUndefined();
+  });
+
+  test("the audit trail records WHICH authority allowed the call", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(mutateTool());
+    await ex.execute("needs-mutate", {}, makeCtx(db), undefined, {
+      autonomyLevel: "observe",
+      hasLease: () => true,
+    });
+    const entry = db.getToolExecutions("test-agent")
+      .find((l: any) => l.tool_name === "needs-mutate");
+    expect(entry).toBeDefined();
+    expect((entry as any).approval).toBe("lease");
+  });
+
+  test("no approval context at all still means unchecked (internal callers)", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register(makeTool("internal-call", "mutate"));
+    const r = await ex.execute("internal-call", {}, makeCtx(db));
+    expect(r.success).toBe(true);
+    expect(r.authorisedByLease).toBeUndefined();
+  });
+});

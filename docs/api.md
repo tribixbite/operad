@@ -786,6 +786,27 @@ Trust score + history + autonomy recommendation for a single agent.
 #### `GET /api/leases/:agentName`
 Active tool leases for an agent.
 
+#### `POST /api/leases/:agentName`
+Grant a tool lease — a temporary, optionally goal-scoped, execution-capped
+permission to call one tool.
+
+A lease **widens** what an agent may do: it lets a call through that the
+agent's standing `autonomy_level` would otherwise send for approval. It never
+narrows anything, and it cannot override `protected_tools` — that list is an
+explicit "never without a human", and a lease is not a human. A lease's
+execution budget is charged only when the lease is what allowed the call; if
+the agent's own autonomy level already permitted it, nothing is spent.
+
+```json
+{ "tool": "git-commit", "max_executions": 5, "ttl_seconds": 3600, "goal_id": 12 }
+```
+
+`tool` is required. At least one of `max_executions` or `ttl_seconds` must be
+given — an unbounded grant is what `autonomy_level` is for, so a lease with
+neither bound is rejected with `400`.
+
+Returns `{ "id": <leaseId>, "agent": …, "tool": … }`.
+
 #### `DELETE /api/leases/:agentName`
 Revoke all leases for an agent.
 

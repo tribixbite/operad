@@ -224,6 +224,13 @@ const DB_FILE = "memory.db";
 const BUSY_TIMEOUT_MS = 5000;
 
 /**
+ * Reason string marking a trust-ledger row that stands in for many pruned
+ * ones. Excluded from further compaction so a compaction row is never folded
+ * into another compaction row and double-counted.
+ */
+const TRUST_COMPACTION_REASON = "compacted history";
+
+/**
  * Schema statements — each string is one complete SQL statement.
  * Separated into an array because bun:sqlite's exec() only handles
  * one statement at a time (unlike better-sqlite3).
@@ -978,6 +985,10 @@ export class MemoryDb {
     toolExecutionsDays?: number;
     workflowRunsDays?: number;
     personalityVersionsPerTrait?: number;
+    consolidationRunsDays?: number;
+    costsDays?: number;
+    trustLedgerDays?: number;
+    conversationTurnsPerAgent?: number;
   } = {}): Record<string, number> {
     const db = this.requireDb();
     const now = Math.floor(Date.now() / 1000);
@@ -1028,9 +1039,96 @@ export class MemoryDb {
         )`,
       keep);
 
+    // Pure history — nothing reads an individual row back, only the recent
+    // list. This is the fastest-growing table in practice: consolidation runs
+    // on a timer whether or not there is anything to consolidate.
+    del("consolidation_runs",
+      `DELETE FROM consolidation_runs WHERE started_at < ?`,
+      cutoff(opts.consolidationRunsDays ?? 90));
+
+    // One row per SDK result. Quota management works off windows (weekly and
+    // quota_window_hours), so a year of retention is far more than the
+    // feature needs — but note that the UNFILTERED aggregate in
+    // getAggregateTokens is a lifetime total, and after this it means "since
+    // the retention horizon". That is the deliberate trade for a table that
+    // otherwise grows forever.
+    del("costs",
+      `DELETE FROM costs WHERE created_at < ?`,
+      cutoff(opts.costsDays ?? 365));
+
+    // One row per tool call. This one CANNOT be pruned naively: getTrustScore
+    // sums the entire ledger, so deleting old rows would silently erode an
+    // agent's accumulated trust and quietly demote it. Fold the removed rows
+    // into a single compaction entry per agent so the sum is preserved
+    // exactly while the row count stays bounded.
+    this.compactTrustLedger(cutoff(opts.trustLedgerDays ?? 180), removed);
+
+    // Full chat bodies, replayed to rebuild context. Age is the wrong axis —
+    // an agent used once a year still needs its last exchange — so keep the
+    // most recent N turns per agent instead.
+    const keepTurns = opts.conversationTurnsPerAgent ?? 200;
+    del("agent_conversations",
+      `DELETE FROM agent_conversations
+        WHERE id NOT IN (
+          SELECT id FROM agent_conversations c2
+           WHERE c2.agent_name = agent_conversations.agent_name
+           ORDER BY created_at DESC, id DESC LIMIT ?
+        )`,
+      keepTurns);
+
     const total = Object.values(removed).reduce((a, b) => a + b, 0);
     if (total > 0) this.log.info(`History pruned: ${JSON.stringify(removed)}`);
     return removed;
+  }
+
+  /**
+   * Bound the trust ledger without changing any agent's trust score.
+   *
+   * `getTrustScore` is `SUM(score_delta)` over the whole ledger, so a plain
+   * age-based DELETE would move every agent's score toward zero as history
+   * aged out — a silent demotion with no event to explain it. Instead, each
+   * agent's pre-cutoff rows are replaced by one row carrying their combined
+   * delta, so the sum is identical and only the itemisation is lost.
+   *
+   * The compaction row is stamped at the cutoff, not at "now", so it is
+   * itself eligible for compaction on a later pass and cannot accumulate.
+   */
+  private compactTrustLedger(cutoffEpoch: number, removed: Record<string, number>): void {
+    const db = this.requireDb();
+    try {
+      const stale = db.prepare(
+        `SELECT agent_name, SUM(score_delta) AS delta, COUNT(*) AS n
+           FROM agent_trust_ledger
+          WHERE created_at < ? AND reason != ?
+          GROUP BY agent_name`,
+      ).all(cutoffEpoch, TRUST_COMPACTION_REASON) as Array<{ agent_name: string; delta: number; n: number }>;
+
+      let compacted = 0;
+      for (const row of stale) {
+        // One row is already as compact as it gets; rewriting it would just
+        // relabel a real reason as "compacted".
+        if (row.n <= 1) continue;
+        db.exec("BEGIN");
+        try {
+          db.prepare(
+            `DELETE FROM agent_trust_ledger WHERE agent_name = ? AND created_at < ? AND reason != ?`,
+          ).run(row.agent_name, cutoffEpoch, TRUST_COMPACTION_REASON);
+          db.prepare(
+            `INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at)
+             VALUES (?, ?, ?, ?)`,
+          ).run(row.agent_name, row.delta, TRUST_COMPACTION_REASON, cutoffEpoch);
+          db.exec("COMMIT");
+          compacted += row.n - 1;
+        } catch (err) {
+          try { db.exec("ROLLBACK"); } catch { /* already unwound */ }
+          throw err;
+        }
+      }
+      removed["agent_trust_ledger"] = compacted;
+    } catch (err) {
+      this.log.warn(`pruneHistory(agent_trust_ledger) failed: ${err}`);
+      removed["agent_trust_ledger"] = 0;
+    }
   }
 
   /** Full-text search memories for a project */

@@ -1672,6 +1672,51 @@ export class RestHandler {
             const leases = memoryDb.getActiveLeases(name);
             return { status: 200, data: leases };
           }
+          if (method === "POST" && name) {
+            // Leases could be listed and revoked but never granted, so the
+            // table stayed permanently empty and the mechanism was inert.
+            let parsed: Record<string, unknown>;
+            try {
+              parsed = JSON.parse(body) as Record<string, unknown>;
+            } catch {
+              return { status: 400, data: { error: "Invalid JSON body" } };
+            }
+            const toolName = typeof parsed.tool === "string" ? parsed.tool.trim() : "";
+            if (!toolName) return { status: 400, data: { error: "'tool' is required" } };
+            if (!this.ctx.agentConfigs.some((a) => a.name === name)) {
+              return { status: 404, data: { error: `Unknown agent: ${name}` } };
+            }
+
+            // A lease with neither a cap nor an expiry is a permanent
+            // elevation, which is what autonomy_level is for. Require at
+            // least one bound so a grant cannot silently become forever.
+            const maxExecutions = typeof parsed.max_executions === "number" && parsed.max_executions > 0
+              ? Math.floor(parsed.max_executions)
+              : undefined;
+            const ttlSeconds = typeof parsed.ttl_seconds === "number" && parsed.ttl_seconds > 0
+              ? Math.floor(parsed.ttl_seconds)
+              : undefined;
+            if (maxExecutions === undefined && ttlSeconds === undefined) {
+              return {
+                status: 400,
+                data: { error: "A lease needs 'max_executions' or 'ttl_seconds' — an unbounded grant is what autonomy_level is for" },
+              };
+            }
+
+            const id = memoryDb.createToolLease(name, toolName, {
+              goalId: typeof parsed.goal_id === "number" ? Math.floor(parsed.goal_id) : undefined,
+              maxExecutions,
+              expiresAt: ttlSeconds !== undefined
+                ? Math.floor(Date.now() / 1000) + ttlSeconds
+                : undefined,
+            });
+            this.ctx.log.info(
+              `Granted tool lease #${id}: ${name} → ${toolName}`
+              + `${maxExecutions !== undefined ? ` (max ${maxExecutions})` : ""}`
+              + `${ttlSeconds !== undefined ? ` (ttl ${ttlSeconds}s)` : ""}`,
+            );
+            return { status: 200, data: { id, agent: name, tool: toolName } };
+          }
           if (method === "DELETE" && name) {
             const goalId = parseOptionalInt(queryParams, "goal_id");
             const revoked = memoryDb.revokeLeases(name, goalId);

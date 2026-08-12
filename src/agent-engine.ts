@@ -434,6 +434,7 @@ export class AgentEngine {
             const result = await toolExecutor.execute(action.name, action.params, toolCtx, undefined, {
               autonomyLevel: actorAutonomy,
               protectedCheckpoints: config.orchestrator.protected_checkpoints,
+              hasLease: (name) => memoryDb.hasActiveLease(actingAgent, name),
             });
             toolCallCount++;
             log.info(`OODA: tool ${action.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}: ${result.summary.slice(0, 80)}`);
@@ -443,8 +444,13 @@ export class AgentEngine {
               result.success ? 2 : -5,
               `tool ${action.name}: ${result.success ? "success" : "failed"}`,
             );
-            // Track lease usage if applicable
-            memoryDb.incrementLeaseUsage(actingAgent, action.name);
+            // Charge the lease only when a lease is what allowed the call.
+            // Charging unconditionally spent a capped grant on calls the
+            // agent's own autonomy level already permitted, exhausting it for
+            // no reason.
+            if (result.authorisedByLease) {
+              memoryDb.incrementLeaseUsage(actingAgent, action.name);
+            }
             // Broadcast tool result to dashboard
             this.ctx.broadcast("tool_result", {
               agent: actingAgent, tool: action.name,
@@ -480,6 +486,7 @@ export class AgentEngine {
               const result = await toolExecutor.execute(step.name, step.params, toolCtx, undefined, {
                 autonomyLevel: actorAutonomy,
                 protectedCheckpoints: config.orchestrator.protected_checkpoints,
+                hasLease: (name) => memoryDb.hasActiveLease(actingAgent, name),
               });
               toolCallCount++;
               log.info(`OODA: seq step ${step.name} [${toolCallCount}/${maxToolCalls}] → ${result.success ? "ok" : "fail"}`);
@@ -489,7 +496,9 @@ export class AgentEngine {
                 result.success ? 2 : -5,
                 `seq ${step.name}: ${result.success ? "success" : "failed"}`,
               );
-              memoryDb.incrementLeaseUsage(actingAgent, step.name);
+              if (result.authorisedByLease) {
+                memoryDb.incrementLeaseUsage(actingAgent, step.name);
+              }
               if (!result.success) {
                 log.warn(`OODA: tool sequence aborted at ${step.name}: ${result.summary}`);
                 break;

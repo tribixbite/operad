@@ -91,6 +91,13 @@ export interface ToolResult {
    * can surface this as "needs approval" rather than a generic failure.
    */
   requiresApproval?: boolean;
+  /**
+   * Set when a tool lease — not the agent's standing autonomy level — is what
+   * allowed this call. Callers charge the lease's execution budget only in
+   * that case: spending a capped grant on a call the agent could already make
+   * would exhaust it for no reason.
+   */
+  authorisedByLease?: boolean;
 }
 
 /** Full tool definition — registered in the executor */
@@ -509,6 +516,17 @@ export class ToolExecutor {
     approval?: {
       autonomyLevel: AutonomyLevel;
       protectedCheckpoints?: ProtectedCheckpoints;
+      /**
+       * Does the caller hold an active lease for this tool?
+       *
+       * A lease is a temporary, goal-scoped, execution-capped grant. It can
+       * raise a call above what the agent's standing autonomy level allows —
+       * it never lowers it, so wiring this in cannot break a call that
+       * already worked. Passed as a callback so tools.ts stays free of a
+       * database dependency, and so the lookup only happens when the
+       * autonomy gate has actually refused.
+       */
+      hasLease?: (toolName: string) => boolean;
     },
   ): Promise<ToolResult> {
     const tool = this.getTool(toolName, gen);
@@ -541,6 +559,7 @@ export class ToolExecutor {
     // of the agent's declared autonomy level, and `protected_tools` in the
     // config was inert. Worse, the audit row below hardcoded approval: approval ? "auto" : "unchecked",
     // so the forensic trail asserted an approval decision that never happened.
+    let authorisedByLease = false;
     if (approval) {
       const allowed = this.isAutoApproved(
         tool.name,
@@ -549,16 +568,29 @@ export class ToolExecutor {
         approval.protectedCheckpoints,
       );
       if (!allowed) {
-        return {
-          success: false,
-          data: null,
-          summary:
-            `Tool '${tool.name}' (category '${tool.category}') requires approval at `
-            + `autonomy level '${approval.autonomyLevel}'`,
-          sideEffects: [],
-          duration_ms: 0,
-          requiresApproval: true,
-        };
+        // A lease is the documented way to grant an agent temporary access
+        // above its standing level. Until now nothing consulted one, so the
+        // whole lease table was inert: `createToolLease` and `hasActiveLease`
+        // had no production callers at all, and the "goal-scoped tool
+        // permissions with usage limits" model was declared but unenforced.
+        //
+        // `protected_tools` is deliberately NOT overridable — that list is an
+        // explicit "never without a human", and a lease is not a human.
+        const isProtected = approval.protectedCheckpoints?.protected_tools?.includes(tool.name) ?? false;
+        authorisedByLease = !isProtected && (approval.hasLease?.(tool.name) ?? false);
+
+        if (!authorisedByLease) {
+          return {
+            success: false,
+            data: null,
+            summary:
+              `Tool '${tool.name}' (category '${tool.category}') requires approval at `
+              + `autonomy level '${approval.autonomyLevel}'`,
+            sideEffects: [],
+            duration_ms: 0,
+            requiresApproval: true,
+          };
+        }
       }
     }
 
@@ -623,14 +655,17 @@ export class ToolExecutor {
         result_summary: result.summary,
         side_effects: result.sideEffects,
         duration_ms: result.duration_ms || (Date.now() - start),
-        approval: approval ? "auto" : "unchecked",
+        // Distinguish the three real cases in the forensic trail: the
+        // autonomy level allowed it, a lease allowed it, or no check ran
+        // because the caller was internal.
+        approval: !approval ? "unchecked" : authorisedByLease ? "lease" : "auto",
         error,
       });
     } catch (logErr) {
       this.log.warn(`Failed to log tool execution: ${logErr}`);
     }
 
-    return result;
+    return authorisedByLease ? { ...result, authorisedByLease: true } : result;
   }
 
   /** Validate tool parameters against definition */
