@@ -418,12 +418,35 @@ export function saveSnapshot(
   const bundle = exportAgentState(db, agentConfig, { template: true, ...opts });
   const data = serializeBundle(bundle);
 
-  const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const filename = `${dateStr}.operad-agent.gz`;
+  // Filename keeps a YYYY-MM-DD prefix (pruneSnapshots classifies on it) but
+  // now carries a time too. It used to be the date alone, so two snapshots on
+  // the same day silently overwrote each other — and the obvious moment to
+  // take a manual snapshot is right after something went wrong, which is
+  // exactly when it destroyed that day's earlier copy.
+  const iso = new Date().toISOString();          // 2026-08-12T04:05:06.789Z
+  const dateStr = iso.slice(0, 10);
+  const timeStr = iso.slice(11, 19).replace(/:/g, "");
+  const filename = `${dateStr}T${timeStr}.operad-agent.gz`;
   const filePath = join(agentDir, filename);
 
   writeFileSync(filePath, data);
   return filePath;
+}
+
+/** Filenames this module owns. Anything else in the directory is not ours. */
+const SNAPSHOT_NAME_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{6})?\.operad-agent\.gz$/;
+
+/**
+ * Read a snapshot from disk and return its bundle.
+ *
+ * Snapshots were previously write-only: deserializeBundle existed but nothing
+ * outside the tests called it, and no route loaded a file — so you could
+ * create and list snapshots but never restore one. Given that consolidation
+ * and import mutate agent memory irreversibly, a backup you cannot read back
+ * is decorative.
+ */
+export function loadSnapshot(filePath: string): AgentStateBundle {
+  return deserializeBundle(readFileSync(filePath));
 }
 
 /**
@@ -438,8 +461,13 @@ export function pruneSnapshots(
   const agentDir = join(snapshotDir, agentName);
   if (!existsSync(agentDir)) return 0;
 
+  // Only files this module produced are candidates. The old filter accepted
+  // any *.operad-agent.gz, and files that failed the date match below then
+  // `continue`d past classification without ever entering `keep` — so the
+  // delete loop unlinked them. A hand-placed my-backup.operad-agent.gz in the
+  // snapshot directory was silently destroyed.
   const files = readdirSync(agentDir)
-    .filter((f) => f.endsWith(".operad-agent.gz"))
+    .filter((f) => SNAPSHOT_NAME_RE.test(f))
     .sort()
     .reverse(); // newest first
 
@@ -451,9 +479,20 @@ export function pruneSnapshots(
   let weeklyCount = 0;
   let monthlyCount = 0;
 
+  // Retention counts DATES, not files: several snapshots can now share a day,
+  // and they must not each consume a daily slot.
+  const seenDates = new Set<string>();
   for (const file of files) {
     const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
     if (!dateMatch) continue;
+    const dayKey = dateMatch[1];
+    const firstOfDay = !seenDates.has(dayKey);
+    seenDates.add(dayKey);
+    if (!firstOfDay) {
+      // Files are sorted newest-first, so the first one seen for a date is
+      // the newest; older same-day snapshots are superseded.
+      continue;
+    }
 
     const date = new Date(dateMatch[1] + "T00:00:00Z");
     const isMonday = date.getUTCDay() === 1;

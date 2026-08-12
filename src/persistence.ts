@@ -55,18 +55,23 @@ export class PersistenceEngine {
 
     const today = new Date().toISOString().slice(0, 10);
     if (this.lastSnapshotDate === today) return;
-    this.lastSnapshotDate = today;
 
     const snapshotDir = this.snapshotDir;
+    let anySucceeded = false;
     for (const agent of agentConfigs) {
       if (!agent.enabled) continue;
       try {
         saveSnapshot(memoryDb, agent, snapshotDir);
         pruneSnapshots(snapshotDir, agent.name);
+        anySucceeded = true;
       } catch (err) {
         log.warn(`Snapshot failed for ${agent.name}: ${err}`);
       }
     }
+    // Marked only after something actually landed. This was set before the
+    // loop, so a transient failure (disk full, DB locked) burned the whole
+    // day's snapshot with no retry until tomorrow.
+    if (anySucceeded) this.lastSnapshotDate = today;
     log.info(`Daily agent snapshots saved (${agentConfigs.filter((a) => a.enabled).length} agents)`);
   }
 

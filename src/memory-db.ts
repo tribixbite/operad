@@ -854,6 +854,22 @@ export class MemoryDb {
     ).all(projectPath, limit) as unknown as MemoryRecord[];
   }
 
+  /**
+   * Every project_path that has at least one memory row.
+   *
+   * Needed because the decay endpoint enumerated projects via
+   * getTopMemories(""), whose query is `WHERE project_path = ?` — with an
+   * empty string it matched nothing, the loop never ran, and the endpoint
+   * always reported {decayed: 0} while doing no work at all.
+   */
+  getMemoryProjectPaths(): string[] {
+    const db = this.requireDb();
+    const rows = db.prepare(
+      `SELECT DISTINCT project_path FROM memories WHERE project_path IS NOT NULL AND project_path != ''`,
+    ).all() as Array<{ project_path: string }>;
+    return rows.map((r) => r.project_path);
+  }
+
   /** Full-text search memories for a project */
   searchMemories(projectPath: string, queryText: string, limit = 10): MemoryRecord[] {
     const db = this.requireDb();

@@ -407,6 +407,16 @@ export function buildOodaPrompt(ctx: OodaContext): string {
  * Parse structured action blocks from the master controller's response.
  * Extracts fenced code blocks with known action types.
  */
+/**
+ * Bounds for a model-requested OODA re-run.
+ *
+ * Upper bound is setTimeout's 32-bit millisecond ceiling expressed in minutes
+ * (2^31-1 ms ≈ 35791 min ≈ 24.8 days); beyond it Node warns and fires
+ * immediately.
+ */
+const MIN_SCHEDULE_DELAY_MIN = 1;
+const MAX_SCHEDULE_DELAY_MIN = 35_791;
+
 export function parseOodaResponse(text: string): OodaAction[] {
   const actions: OodaAction[] = [];
 
@@ -465,16 +475,24 @@ export function parseOodaResponse(text: string): OodaAction[] {
         }
         break;
 
-      case "schedule":
-        if (fields.delay_minutes) {
+      case "schedule": {
+        // The value comes from a model-emitted block, so it can be anything.
+        // parseInt("check-tomorrow") is NaN and setTimeout(NaN) fires in ~1ms;
+        // anything above 2^31 ms overflows and also fires in ~1ms. Either way
+        // the "reminder in two months" became another paid OODA cycle
+        // immediately. Clamp to [1 minute, ~24 days].
+        const parsed = parseInt(fields.delay_minutes ?? "", 10);
+        if (Number.isFinite(parsed)) {
+          const delayMinutes = Math.min(Math.max(parsed, MIN_SCHEDULE_DELAY_MIN), MAX_SCHEDULE_DELAY_MIN);
           actions.push({
             type: "schedule",
-            delayMinutes: parseInt(fields.delay_minutes, 10),
+            delayMinutes,
             trigger: fields.trigger ?? "timer",
             reason: fields.reason ?? "scheduled",
           });
         }
         break;
+      }
 
       case "persistent_schedule":
         if (fields.name && fields.prompt) {

@@ -23,10 +23,10 @@
  *      weekly Mondays kept; monthly 1st-of-month kept
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 
 import { MemoryDb } from "../memory-db.js";
 import {
@@ -37,6 +37,7 @@ import {
   saveSnapshot,
   listSnapshots,
   pruneSnapshots,
+  loadSnapshot,
 } from "../agent-state.js";
 import type { AgentStateBundle, ImportOptions } from "../agent-state.js";
 import type { AgentConfig } from "../agents.js";
@@ -611,14 +612,16 @@ describe("saveSnapshot", () => {
     expect(filePath.endsWith(".operad-agent.gz")).toBe(true);
   });
 
-  test("saved file is named YYYY-MM-DD.operad-agent.gz", () => {
+  // The name now carries a time as well: a date-only name meant two
+  // snapshots on the same day silently overwrote each other.
+  test("saved file is named YYYY-MM-DDTHHMMSS.operad-agent.gz", () => {
     const snapshotDir = join(tmpDir, "snapshots");
     const config = makeAgentConfig("my-agent");
     const filePath = saveSnapshot(db, config, snapshotDir);
     // Split on BOTH separators — saveSnapshot uses path.join, so the basename
     // is delimited by "\" on Windows and "/" elsewhere.
     const filename = filePath.split(/[\\/]/).pop()!;
-    expect(filename).toMatch(/^\d{4}-\d{2}-\d{2}\.operad-agent\.gz$/);
+    expect(filename).toMatch(/^\d{4}-\d{2}-\d{2}T\d{6}\.operad-agent\.gz$/);
   });
 
   test("saved file can be deserialized back as a valid bundle", () => {
@@ -901,5 +904,87 @@ describe("importAgentState — learningMerge prefer_import", () => {
     });
     expect(r.learnings_skipped).toBe(1);
     expect(r.learnings_imported).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Snapshots — naming, prune safety, restore
+// ---------------------------------------------------------------------------
+
+describe("snapshots", () => {
+  let dir: string;
+  const agent = {
+    name: "snap-agent", description: "d", prompt: "p",
+    enabled: true, source: "builtin" as const,
+  };
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "operad-snap-")); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const listFiles = () => readdirSync(join(dir, agent.name));
+
+  // The filename used to be the date alone, so a manual snapshot taken right
+  // after something went wrong destroyed that day's earlier copy.
+  test("two snapshots on the same day do not overwrite each other", async () => {
+    const a = saveSnapshot(db, agent as any, dir);
+    await new Promise((r) => setTimeout(r, 1100)); // filename resolves to seconds
+    const b = saveSnapshot(db, agent as any, dir);
+    expect(a).not.toBe(b);
+    expect(listFiles().length).toBe(2);
+  });
+
+  test("the filename keeps a sortable YYYY-MM-DD prefix", () => {
+    saveSnapshot(db, agent as any, dir);
+    expect(listFiles()[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{6}\.operad-agent\.gz$/);
+  });
+
+  // pruneSnapshots classified on a date match and `continue`d past
+  // classification for anything else — then deleted everything not in `keep`.
+  test("prune never deletes a file it did not create", () => {
+    saveSnapshot(db, agent as any, dir);
+    const foreign = join(dir, agent.name, "my-precious-backup.operad-agent.gz");
+    writeFileSync(foreign, "not ours");
+    pruneSnapshots(dir, agent.name, { daily: 0, weekly: 0, monthly: 0 });
+    expect(existsSync(foreign)).toBe(true);
+  });
+
+  test("prune still removes its own out-of-retention snapshots", () => {
+    const agentDir = join(dir, agent.name);
+    mkdirSync(agentDir, { recursive: true });
+    // Three distinct, non-Monday, non-first dates.
+    for (const d of ["2026-08-05", "2026-08-06", "2026-08-07"]) {
+      writeFileSync(join(agentDir, `${d}T010101.operad-agent.gz`), "x");
+    }
+    const pruned = pruneSnapshots(dir, agent.name, { daily: 1, weekly: 0, monthly: 0 });
+    expect(pruned).toBe(2);
+    expect(readdirSync(agentDir)).toEqual(["2026-08-07T010101.operad-agent.gz"]);
+  });
+
+  test("several snapshots in one day consume a single daily slot", () => {
+    const agentDir = join(dir, agent.name);
+    mkdirSync(agentDir, { recursive: true });
+    for (const t of ["010101", "020202", "030303"]) {
+      writeFileSync(join(agentDir, `2026-08-07T${t}.operad-agent.gz`), "x");
+    }
+    writeFileSync(join(agentDir, "2026-08-06T010101.operad-agent.gz"), "x");
+    pruneSnapshots(dir, agent.name, { daily: 2, weekly: 0, monthly: 0 });
+    const left = readdirSync(agentDir).sort();
+    // Newest of the 07 group plus the 06 — both dates retained.
+    expect(left).toContain("2026-08-07T030303.operad-agent.gz");
+    expect(left).toContain("2026-08-06T010101.operad-agent.gz");
+  });
+
+  // Snapshots were write-only: creatable and listable, never restorable.
+  test("a saved snapshot can be loaded back", () => {
+    const p = saveSnapshot(db, agent as any, dir);
+    const bundle = loadSnapshot(p);
+    expect(bundle.meta.agent_name).toBe(agent.name);
+    expect(bundle.format_version).toBe(1);
+  });
+
+  test("loadSnapshot verifies the checksum", () => {
+    const p = saveSnapshot(db, agent as any, dir);
+    writeFileSync(p, Buffer.from("corrupted"));
+    expect(() => loadSnapshot(p)).toThrow();
   });
 });

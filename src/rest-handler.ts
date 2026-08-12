@@ -52,7 +52,7 @@ import {
   loadAgents, validateAgentConfig, saveUserAgent, deleteUserAgent, type AgentConfig,
 } from "./agents.js";
 import {
-  exportAgentState, importAgentState, saveSnapshot, pruneSnapshots, listSnapshots,
+  exportAgentState, importAgentState, saveSnapshot, pruneSnapshots, listSnapshots, loadSnapshot,
   type AgentStateBundle, type ImportOptions,
 } from "./agent-state.js";
 import {
@@ -1183,6 +1183,45 @@ export class RestHandler {
             }
           }
 
+          if (subCmd && arg === "restore" && method === "POST") {
+            // POST /api/agents/<name>/restore  { file?: "<basename>" }
+            // Loads a snapshot from disk and imports it. Snapshots were
+            // write-only before this: listable, creatable, never restorable.
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            const agent = this.ctx.agentConfigs.find((a) => a.name === subCmd);
+            if (!agent) return { status: 404, data: { error: `Agent not found: ${subCmd}` } };
+            const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
+            let parsed: { file?: string; options?: Partial<ImportOptions> } = {};
+            if (body) {
+              try {
+                parsed = (typeof body === "string" ? JSON.parse(body) : body) as typeof parsed;
+              } catch {
+                return { status: 400, data: { error: "Invalid JSON body" } };
+              }
+            }
+            const available = listSnapshots(snapshotDir, subCmd);
+            if (available.length === 0) {
+              return { status: 404, data: { error: `No snapshots for agent '${subCmd}'` } };
+            }
+            // Default to the newest. listSnapshots returns names only, so a
+            // caller-supplied file must be one of them — that rejects any
+            // traversal without needing to reason about the string.
+            const chosen = parsed.file ?? available[0];
+            if (!available.includes(chosen)) {
+              return { status: 400, data: { error: `Unknown snapshot '${chosen}' for agent '${subCmd}'` } };
+            }
+            try {
+              const bundle = loadSnapshot(join(snapshotDir, subCmd, chosen));
+              const result = importAgentState(memoryDb, bundle, {
+                ...parsed.options,
+                targetAgent: subCmd,
+              });
+              return { status: 200, data: { restored_from: chosen, ...result } };
+            } catch (err) {
+              return { status: 400, data: { error: `Restore failed: ${String(err)}` } };
+            }
+          }
+
           if (subCmd && arg === "snapshots" && method === "GET") {
             const snapshotDir = join(homedir(), ".local", "share", "operad", "snapshots");
             return { status: 200, data: listSnapshots(snapshotDir, subCmd) };
@@ -1488,15 +1527,15 @@ export class RestHandler {
 
           if (method === "POST" && !projectPath) {
             if (segments[1] === "decay") {
+              // Was enumerated via getTopMemories(""), whose query is
+              // `WHERE project_path = ?` — an empty string matched nothing, so
+              // the loop never ran and this always returned {decayed: 0}.
               let decayed = 0;
-              const projects = new Set<string>();
-              for (const mem of memoryDb.getTopMemories("", 1000)) {
-                projects.add(mem.project_path);
-              }
+              const projects = memoryDb.getMemoryProjectPaths();
               for (const p of projects) {
                 decayed += memoryDb.decayMemories(p);
               }
-              return { status: 200, data: { decayed } };
+              return { status: 200, data: { decayed, projects: projects.length } };
             }
           }
 
