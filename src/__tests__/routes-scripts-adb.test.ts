@@ -407,12 +407,17 @@ describe("RestHandler — processes / kill / launch routes", () => {
 
   beforeEach(() => { h = buildHandler(); });
 
-  test("GET /api/processes calls getAndroidApps and returns its result", async () => {
+  // The response now carries the ADB target alongside the apps. A bare array
+  // gave the UI no way to say "these are a different phone's processes",
+  // which is what it silently showed when another handset was attached.
+  test("GET /api/processes returns apps plus the ADB target", async () => {
     const res = await h.handleDashboardApi("GET", "/api/processes", "");
     expect(res.status).toBe(200);
     expect(fc.calls.getAndroidApps).toHaveLength(1);
-    // The fake returns [] — an array is valid
-    expect(Array.isArray(res.data)).toBe(true);
+    const data = res.data as { apps: unknown[]; adb: { is_local: boolean } };
+    expect(Array.isArray(data.apps)).toBe(true);
+    expect(data.adb).toBeDefined();
+    expect(typeof data.adb.is_local).toBe("boolean");
   });
 
   test("GET /api/kill/<pkg> → 405 (must be POST)", async () => {

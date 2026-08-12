@@ -477,7 +477,16 @@ export class RestHandler {
           }
         }
         case "processes":
-          return { status: 200, data: this.ctx.getAndroidApps() };
+          // Include which ADB device this came from. The list used to be a
+          // bare array, so when the target was a different handset the UI had
+          // no way to say so — it just showed someone else's processes.
+          return {
+            status: 200,
+            data: {
+              apps: this.ctx.getAndroidApps(),
+              adb: this.ctx.adbTargetInfo(),
+            },
+          };
         case "kill":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Package name required" } };

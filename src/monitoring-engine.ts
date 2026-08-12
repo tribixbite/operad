@@ -32,6 +32,8 @@ import type { MemoryMonitor } from "./memory.js";
 import type { ActivityDetector } from "./activity.js";
 import type { BatteryMonitor } from "./battery.js";
 import type { AndroidEngine } from "./android-engine.js";
+import { loadOrCreateToken } from "./auth.js";
+import { dirname } from "node:path";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input) */
 const CLAUDE_WORKING_PATTERN = /esc to interrupt/;
@@ -391,6 +393,22 @@ export class MonitoringEngine {
   }
 
   /**
+   * The dashboard access token, resolved the same way the daemon resolves it.
+   * Memoised: loadOrCreateToken reads (and on first use writes) a file, and
+   * the notification is rebuilt on every 5s poll.
+   */
+  private cachedToken: string | null = null;
+  private dashboardToken(): string {
+    if (this.cachedToken) return this.cachedToken;
+    try {
+      this.cachedToken = loadOrCreateToken(dirname(this.ctx.config.orchestrator.state_file));
+    } catch {
+      this.cachedToken = "";
+    }
+    return this.cachedToken;
+  }
+
+  /**
    * Update the persistent Android notification with session status.
    *
    * Single notification only — per-session notifications were removed because:
@@ -482,7 +500,13 @@ export class MonitoringEngine {
     // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TOP (0x14000000)
     // reuses the existing Edge activity instead of stacking a new one.
     const edgeComponent = "com.microsoft.emmx.canary/com.google.android.apps.chrome.IntentDispatcher";
-    const dashboardAction = `LD_PRELOAD=${ldPreload} ${amBin} start -a android.intent.action.VIEW -n ${edgeComponent} -f 0x14000000 -d http://127.0.0.1:${port}`;
+    // The URL must carry the token. Tapping this opened a bare
+    // http://127.0.0.1:<port>, which since 0.5.0 loads the SPA and then 401s
+    // on every request — the notification's own Dashboard button could not
+    // reach the dashboard. Visiting ?token=… performs the handshake and
+    // redirects to a clean URL, so the token is not left in the address bar.
+    const dashUrl = `http://127.0.0.1:${port}/?token=${this.dashboardToken()}`;
+    const dashboardAction = `LD_PRELOAD=${ldPreload} ${amBin} start -a android.intent.action.VIEW -n ${edgeComponent} -f 0x14000000 -d ${JSON.stringify(dashUrl)}`;
 
     detectPlatform().notifyWithArgs([
       "--ongoing",

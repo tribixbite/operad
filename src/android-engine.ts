@@ -340,40 +340,106 @@ export class AndroidEngine {
   }
 
   /**
-   * Verify the resolved ADB device is this device (not an external phone).
-   * When only one device is connected, it must be this device — skip IP matching.
-   * IP matching is only needed when multiple devices are online to disambiguate.
+   * The kernel's per-boot UUID for THIS device, or null if unreadable.
+   *
+   * /proc/sys/kernel/random/boot_id is world-readable on Android (unlike
+   * ro.serialno, which returns empty to unprivileged callers since Android 10,
+   * and /proc/uptime, which is permission-denied to apps). It is regenerated
+   * every boot and differs between machines, which makes it an exact identity
+   * check rather than a heuristic.
+   */
+  private localBootId(): string | null {
+    try {
+      const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+      return id || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The same UUID read over ADB from `serial`, or null if unreadable. */
+  private remoteBootId(serial: string): string | null {
+    try {
+      const r = spawnSync(
+        ADB_BIN,
+        ["-s", serial, "shell", "cat", "/proc/sys/kernel/random/boot_id"],
+        { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      if (r.status !== 0) return null;
+      // adb shell returns CRLF line endings.
+      const id = (r.stdout ?? "").replace(/\r/g, "").trim();
+      return /^[0-9a-f-]{36}$/i.test(id) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Is the resolved ADB device the machine operad is running on?
+   *
+   * This used to answer "yes" whenever exactly one device was online — "single
+   * device: must be this device". That is simply untrue: a phone running
+   * operad in Termux with one other phone attached over wireless debugging has
+   * exactly one device in `adb devices`, and it is the OTHER one. Verified on
+   * the author's setup, where operad runs on an SM-S938U1 while the sole ADB
+   * device is a different handset — so the phantom-process fix was being
+   * applied to, and app lists were being read from, somebody else's phone.
+   *
+   * Identity is now established by comparing the kernel boot UUID, and the
+   * function fails CLOSED: if identity cannot be established, the answer is
+   * no. Applying settings or force-stopping apps on an unknown device is far
+   * worse than skipping the optimisation.
    */
   isLocalAdbDevice(): boolean {
     const serial = this.resolveAdbSerial();
     if (!serial) return false;
 
-    // Localhost connections are always local
-    if (serial.startsWith("127.0.0.1:") || serial.startsWith("localhost:")) return true;
+    // A loopback connection can only be this device.
+    if (
+      serial.startsWith("127.0.0.1:") ||
+      serial.startsWith("localhost:") ||
+      serial.startsWith("emulator-")
+    ) return true;
 
-    // Count online devices to decide if IP matching is needed
-    try {
-      const result = spawnSync(ADB_BIN, ["devices"], {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const onlineCount = (result.stdout ?? "")
-        .split("\n")
-        .filter((l) => l.includes("\tdevice")).length;
+    // Exact check: same kernel boot UUID means same running kernel.
+    const local = this.localBootId();
+    if (local) {
+      const remote = this.remoteBootId(serial);
+      if (remote) return remote.toLowerCase() === local.toLowerCase();
+      // Remote unreadable — fall through to the weaker IP check.
+    }
 
-      // Single device: must be this device — no need for IP matching
-      if (onlineCount === 1) return true;
-
-      // Multiple devices: fall through to IP check
-    } catch { /* fall through to IP check */ }
-
-    // Check if serial IP matches local IP (multi-device disambiguation)
+    // Fallback: the serial's host part matches one of our own addresses.
     const localIp = this.getLocalIp();
     if (localIp && serial.startsWith(`${localIp}:`)) return true;
 
-    // Serial doesn't match any local address — might be an external device
+    // Nothing established identity. Fail closed.
+    this.ctx.log.debug(
+      `ADB device '${serial}' could not be confirmed as this device — treating as external`,
+    );
     return false;
+  }
+
+  /**
+   * Describe the resolved ADB target for the UI: which device, and whether it
+   * is this one. Lets surfaces that list apps or processes say whose they are
+   * instead of silently showing another handset's.
+   */
+  adbTargetInfo(): {
+    serial: string | null;
+    is_local: boolean;
+    model: string | null;
+  } {
+    const serial = this.resolveAdbSerial();
+    if (!serial) return { serial: null, is_local: false, model: null };
+    let model: string | null = null;
+    try {
+      const r = spawnSync(ADB_BIN, ["-s", serial, "shell", "getprop", "ro.product.model"], {
+        encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (r.status === 0) model = (r.stdout ?? "").replace(/\r/g, "").trim() || null;
+    } catch { /* best effort */ }
+    return { serial, is_local: this.isLocalAdbDevice(), model };
   }
 
   /**
@@ -643,6 +709,15 @@ export class AndroidEngine {
    * Merges sandboxed/privileged child processes into the parent total.
    */
   getAndroidApps(): { pkg: string; label: string; rss_mb: number; system: boolean; autostop: boolean }[] {
+    // Never present another handset's processes as this device's. With one
+    // other phone attached over wireless debugging, `adb devices` has exactly
+    // one entry and it is not this machine — so this list silently showed the
+    // wrong device's memory usage, and the kill button next to each row acted
+    // on it.
+    if (!this.isLocalAdbDevice()) {
+      this.ctx.log.debug("Skipping app list — ADB target is not this device");
+      return [];
+    }
     try {
       const result = spawnSync(ADB_BIN, this.adbShellArgs("ps", "-A", "-o", "PID,RSS,NAME"), {
         encoding: "utf-8",
@@ -823,10 +898,14 @@ export class AndroidEngine {
    */
   private assertLocalTarget(action: string): { status: number; data: unknown } | null {
     if (this.isLocalAdbDevice()) return null;
-    this.ctx.log.warn(`Refusing ${action}: adb target is not this device`);
+    // Name the device — "not this device" alone leaves the user guessing which
+    // handset was about to be acted on.
+    const info = this.adbTargetInfo();
+    const who = info.model ?? info.serial ?? "unknown device";
+    this.ctx.log.warn(`Refusing ${action}: adb target '${who}' is not this device`);
     return {
       status: 409,
-      data: { error: `Refusing ${action} — the adb target is not this device` },
+      data: { error: `Refusing ${action} — adb is connected to '${who}', not the device running operad` },
     };
   }
 

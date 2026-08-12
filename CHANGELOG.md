@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **The dashboard showed no explanation when it was locked.** The API became
+  token-gated in 0.5.0 but the client had no notion of it: static assets are
+  unauthenticated by design, so a browser that had not completed the handshake
+  loaded the page and then 401'd on every request, rendering a wall of generic
+  "HTTP 401" errors. It looked broken rather than locked. There is now an
+  authentication screen naming `operad token`, with a field to paste one.
+- **The Android status notification opened the dashboard without a token**, so
+  its own Dashboard button led to that same wall of errors. The URL now carries
+  the token and goes through the normal handshake.
+- **ADB operations targeted the wrong phone.** `isLocalAdbDevice()` answered
+  "yes" whenever exactly one device was online — "single device: must be this
+  device". That is untrue: a phone running operad in Termux with one other
+  handset attached over wireless debugging has exactly one ADB device, and it
+  is the other one. Confirmed on the author's setup, where operad runs on an
+  SM-S938U1 while the sole ADB device is a Saga — so the phantom-process fix
+  was being applied to, and the process list read from, a different phone.
+
+  Identity is now established by comparing `/proc/sys/kernel/random/boot_id`,
+  which is world-readable (unlike `ro.serialno`, empty to unprivileged callers
+  since Android 10, and `/proc/uptime`, denied to apps) and unique per boot per
+  machine. The check fails **closed**: if identity cannot be established the
+  answer is no, because acting on an unknown device is worse than skipping the
+  optimisation.
+
+  `GET /api/processes` now returns `{ apps, adb }` rather than a bare array, so
+  the UI can say which device it is talking to. When the target is not this
+  machine the app list is empty and the panel explains why instead of showing
+  another phone's processes with a working kill button beside each row.
+
 ## [0.5.0] - 2026-08-12
 
 A security and correctness release. Four independent audits covered the skill

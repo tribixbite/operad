@@ -12,6 +12,7 @@ import type {
   NotificationRecord, GitInfo, FileEntry, FileContentResponse,
   TelemetryResponse, TelemetryRecord,
 } from "./types";
+import { noteResponse } from "./auth.svelte";
 
 /** Callback type for state updates */
 export type StateCallback = (data: DaemonStatus) => void;
@@ -106,6 +107,7 @@ export class SseClient {
 
 /** Parse JSON response with HTTP status validation */
 async function checkedJson<T>(res: Response): Promise<T> {
+  noteResponse(res);
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -169,6 +171,7 @@ async function checkedPost(url: string, body?: string): Promise<void> {
     opts.body = body;
   }
   const res = await fetch(url, opts);
+  noteResponse(res);
   if (!res.ok) {
     const data = await res.json().catch(() => ({} as Record<string, unknown>));
     throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
@@ -492,8 +495,20 @@ export interface AppInfo {
   autostop: boolean;
 }
 
-/** Fetch list of running Android apps sorted by RSS */
-export async function fetchApps(): Promise<AppInfo[]> {
+/** Which ADB device the process list came from. */
+export interface AdbTarget {
+  serial: string | null;
+  is_local: boolean;
+  model: string | null;
+}
+
+/**
+ * Fetch running Android apps sorted by RSS, plus the ADB device they came
+ * from. The daemon returns an empty list when the target is not this machine
+ * — with another phone attached over wireless debugging the list would
+ * otherwise show that phone's processes as if they were local.
+ */
+export async function fetchApps(): Promise<{ apps: AppInfo[]; adb: AdbTarget }> {
   const res = await fetch("/api/processes");
   return checkedJson(res);
 }

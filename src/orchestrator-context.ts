@@ -219,6 +219,8 @@ export interface CmdDelegates {
 export interface AndroidCallbacks {
   /** List Android apps with their RSS (via ADB) */
   getAndroidApps: () => { pkg: string; label: string; rss_mb: number; system: boolean; autostop: boolean }[];
+  /** Which ADB device is being targeted, and whether it is this machine. */
+  adbTargetInfo: () => { serial: string | null; is_local: boolean; model: string | null };
   /** Force-stop an Android app by package name via ADB */
   forceStopApp: (pkg: string) => { status: number; data: unknown };
   /** Launch an Android app's launcher activity (package or pkg/activity) */

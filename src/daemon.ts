@@ -366,6 +366,7 @@ export class Daemon {
       reloadAgents: () => this.reloadAgents(),
       resolveName: (input) => this.resolveName(input),
       getAndroidApps: () => this.androidEngine.getAndroidApps(),
+      adbTargetInfo: () => this.androidEngine.adbTargetInfo(),
       forceStopApp: (pkg) => this.androidEngine.forceStopApp(pkg),
       launchApp: (target) => this.androidEngine.launchApp(target),
       getAutoStopList: () => this.androidEngine.getAutoStopList(),

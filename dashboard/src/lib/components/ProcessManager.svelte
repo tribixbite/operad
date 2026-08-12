@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { fetchApps, forceStopApp, toggleAutoStop, fetchAutoStopList, type AppInfo } from "$lib/api";
+  import { fetchApps, forceStopApp, toggleAutoStop, fetchAutoStopList, type AppInfo, type AdbTarget } from "$lib/api";
 
   let apps: AppInfo[] = $state([]);
+  let adb: AdbTarget | null = $state(null);
   let loading = $state(true);
   let error: string | null = $state(null);
   let stopping = $state(new Set<string>());
@@ -14,7 +15,9 @@
 
   async function refresh() {
     try {
-      apps = await fetchApps();
+      const res = await fetchApps();
+      apps = res.apps;
+      adb = res.adb;
       error = null;
     } catch (e) {
       error = (e as Error).message;
@@ -127,6 +130,17 @@
     <p class="text-xs text-[var(--text-muted)]">Loading...</p>
   {:else if error}
     <p class="text-xs text-[var(--accent-red)]">{error}</p>
+  {:else if apps.length === 0 && adb && adb.serial && !adb.is_local}
+    <!--
+      A connected ADB device that is NOT this machine. The list used to show
+      that phone's processes as if they were local, with a working kill button
+      next to each row. Now it explains instead.
+    -->
+    <p class="text-xs text-[var(--text-muted)]">
+      ADB is connected to <strong>{adb.model ?? adb.serial}</strong>, which is not
+      the device running operad — so its processes are not shown. Connect ADB to
+      this device (wireless debugging to its own address) to manage local apps.
+    </p>
   {:else if apps.length === 0}
     <p class="text-xs text-[var(--text-muted)]">No apps found (ADB offline?)</p>
   {:else}

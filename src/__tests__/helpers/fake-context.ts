@@ -363,6 +363,7 @@ export async function makeFakeContext(opts: FakeContextOpts = {}): Promise<FakeC
 
     // -- AndroidCallbacks --
     getAndroidApps: () => { record("getAndroidApps", []); return []; },
+    adbTargetInfo: () => ({ serial: null, is_local: false, model: null }),
     forceStopApp: (pkg) => { record("forceStopApp", [pkg]); return { status: 200, data: { ok: true } }; },
     launchApp: (target) => { record("launchApp", [target]); return { status: 200, data: { ok: true } }; },
     getAutoStopList: () => { record("getAutoStopList", []); return { packages: [] }; },
