@@ -17,6 +17,7 @@ import {
   resumeSession,
   capturePane,
   getAttachedClients,
+  getSessionPanePids,
   findProcessTree,
 } from "./session.js";
 import {
@@ -279,6 +280,28 @@ export class MonitoringEngine {
       const sessions = this.ctx.state.getState().sessions;
       for (const [name, s] of Object.entries(sessions)) {
         if (!s.auto_suspended) continue;
+
+        // Clearing the flag ONLY on a successful SIGCONT leaves it stuck
+        // forever once the session's processes are gone: `resumeSession`
+        // returns false, `auto_suspended` stays true, and this loop retries
+        // a doomed signal on every poll. One dead session produced 5453
+        // "Cannot signal … — no pane PIDs found" warnings at a 5 s cadence
+        // over 70 days.
+        //
+        // No pane PIDs means there is nothing suspended to resume, so the
+        // flag is meaningless and must be dropped. A failure WITH live PIDs
+        // is a different story — that could be a transient EPERM, so leave
+        // the flag set and try again next poll.
+        const panePids = getSessionPanePids(name);
+        if (panePids.length === 0) {
+          this.ctx.log.info(
+            `Clearing stale auto-suspend on '${name}' — no processes left to resume`,
+            { session: name },
+          );
+          this.ctx.state.setSuspended(name, false);
+          continue;
+        }
+
         this.ctx.log.info(`Memory normal: auto-resuming '${name}'`, { session: name });
         if (resumeSession(name, this.ctx.log)) {
           this.ctx.state.setSuspended(name, false);

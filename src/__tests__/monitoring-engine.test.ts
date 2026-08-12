@@ -130,6 +130,28 @@ path = "/work/idle-svc"
     eng.autoSuspendOnPressure("emergency");
     expect(androidCalls).toEqual(["autoStopFlaggedApps"]);
   });
+
+  test("an auto-suspend flag on a vanished session is cleared, not retried forever", () => {
+    // Regression: the flag used to be cleared ONLY when SIGCONT succeeded.
+    // Once the session's processes were gone, resumeSession returned false,
+    // the flag stayed set, and every subsequent poll retried the doomed
+    // signal — 5453 warnings at a 5 s cadence over 70 days in a live log.
+    //
+    // "idle-svc" has no tmux session here, so getSessionPanePids returns []
+    // and there is nothing to resume.
+    fc.state.setSuspended("idle-svc", true, true);
+    expect(fc.state.getSession("idle-svc")?.auto_suspended).toBe(true);
+
+    eng.autoSuspendOnPressure("normal");
+
+    const after = fc.state.getSession("idle-svc");
+    expect(after?.auto_suspended).toBe(false);
+    expect(after?.suspended).toBe(false);
+
+    // Idempotent: a second poll must not re-flag or throw.
+    eng.autoSuspendOnPressure("normal");
+    expect(fc.state.getSession("idle-svc")?.auto_suspended).toBe(false);
+  });
 });
 
 describe("MonitoringEngine — stopTimers", () => {
