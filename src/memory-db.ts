@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { detectPlatform } from "./platform/platform.js";
 import { createHash } from "node:crypto";
 import type { Logger } from "./log.js";
 
@@ -202,8 +203,18 @@ interface StmtHandle {
   all(...params: unknown[]): Record<string, unknown>[];
 }
 
-/** Default database directory */
-const DB_DIR = join(homedir(), ".local", "share", "operad");
+/**
+ * Default database directory.
+ *
+ * Resolved through the platform layer rather than hardcoded. The POSIX
+ * literal it replaced was wrong on Windows, where operad's data lives under
+ * %LOCALAPPDATA%\operad\ — the database was created at
+ * C:\Users\<u>\.local\share\operad\, which nothing else on that platform
+ * looks at, so `tmx doctor` reported "No database yet" permanently. It also
+ * violated the project rule that platform-specific paths live in
+ * src/platform/. Every non-Windows path is unchanged, so no install moves.
+ */
+const DB_DIR = detectPlatform().defaultDataDir();
 const DB_FILE = "memory.db";
 
 /**

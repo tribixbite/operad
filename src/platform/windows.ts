@@ -423,6 +423,16 @@ export class WindowsPlatform implements Platform {
     return join(operadBase(), "state.json");
   }
 
+  /**
+   * %LOCALAPPDATA%\operad\ — the same base `tmx doctor` probes. memory-db
+   * used to hardcode a POSIX `~/.local/share/operad`, so on Windows the
+   * database was created in a directory nothing else looked at and doctor
+   * reported "No database yet" forever.
+   */
+  defaultDataDir(): string {
+    return operadBase();
+  }
+
   /** Default log directory under %LOCALAPPDATA%\operad\logs\ */
   defaultLogDir(): string {
     return join(operadBase(), "logs");

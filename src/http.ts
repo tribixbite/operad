@@ -810,11 +810,21 @@ export class DashboardServer {
     <pre id="data">Loading...</pre>
   </div>
   <script>
+    // The API is token-gated. This page is served when the built dashboard is
+    // missing, and it used to call /api with no credential at all — every
+    // panel showed "Failed to fetch". The token reaches it the same way the
+    // real dashboard gets it: the ?token= handshake sets a cookie, or it is
+    // still on the URL. EventSource cannot send headers, so the query form is
+    // used there.
+    const TOKEN = new URLSearchParams(location.search).get('token') || '';
+    const AUTH = TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {};
+    const TOKEN_QS = TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '';
+
     async function refresh() {
       try {
         const [status, memory] = await Promise.all([
-          fetch('/api/status').then(r => r.json()),
-          fetch('/api/memory').then(r => r.json()).catch(() => null),
+          fetch('/api/status', { headers: AUTH }).then(r => r.json()),
+          fetch('/api/memory', { headers: AUTH }).then(r => r.json()).catch(() => null),
         ]);
         let out = JSON.stringify(status, null, 2);
         if (memory) out += '\\n\\n--- Memory ---\\n' + JSON.stringify(memory, null, 2);
@@ -827,7 +837,7 @@ export class DashboardServer {
     setInterval(refresh, 5000);
 
     // SSE for real-time updates
-    const es = new EventSource('/api/events');
+    const es = new EventSource('/api/events' + TOKEN_QS);
     es.addEventListener('state', () => refresh());
     es.addEventListener('memory', () => refresh());
   </script>

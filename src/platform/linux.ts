@@ -342,6 +342,10 @@ export class LinuxPlatform implements Platform {
     return join(homedir(), ".local", "share", "operad", "state.json");
   }
 
+  defaultDataDir(): string {
+    return join(homedir(), ".local", "share", "operad");
+  }
+
   /** Default log directory under ~/.local/share/operad/logs/ */
   defaultLogDir(): string {
     return join(homedir(), ".local", "share", "operad", "logs");

@@ -177,6 +177,14 @@ export interface Platform {
   /** Default state file path */
   defaultStatePath(): string;
 
+  /**
+   * Directory holding operad's own data files — currently the agent memory
+   * database. Distinct from `defaultStatePath()`'s directory: on Android that
+   * is the legacy `.local/share/tmx/`, while the database has always lived in
+   * `.local/share/operad/`.
+   */
+  defaultDataDir(): string;
+
   /** Default log directory path */
   defaultLogDir(): string;
 

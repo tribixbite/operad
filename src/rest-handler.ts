@@ -194,7 +194,15 @@ export class RestHandler {
     // Extract path segments: /api/command/name
     const segments = pathPart.replace(/^\/api\//, "").split("/");
     const command = segments[0];
-    const name = segments[1] ? decodeURIComponent(segments[1]) : undefined;
+    // A raw `%` in a path segment makes decodeURIComponent throw a URIError.
+    // This sits above the try below, so it used to fall out to the transport
+    // and surface as a 500 — a malformed request from the client is a 400.
+    let name: string | undefined;
+    try {
+      name = segments[1] ? decodeURIComponent(segments[1]) : undefined;
+    } catch {
+      return { status: 400, data: { error: "Malformed percent-encoding in path" } };
+    }
 
     try {
       let resp;

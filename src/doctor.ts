@@ -113,7 +113,7 @@ export async function runChecks(opts: RunChecksOptions = {}): Promise<CheckResul
   }
 
   results.push(...checkPlatformSpecific(platformId));
-  results.push(await checkDatabase(platformId));
+  results.push(await checkDatabase());
   results.push(...checkSkillMarketplace());
 
   return results;
@@ -775,17 +775,12 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
   return results;
 }
 
-async function checkDatabase(platformId: PlatformId): Promise<CheckResult> {
-  // Database path depends on platform: Windows uses %LOCALAPPDATA%\operad\; others use $HOME/.local/share/operad/
-  const dbPath =
-    platformId === "windows"
-      ? join(
-          process.env.LOCALAPPDATA ??
-            join(process.env.USERPROFILE ?? homedir(), "AppData", "Local"),
-          "operad",
-          "memory.db",
-        )
-      : join(process.env.HOME ?? "/", ".local/share/operad/memory.db");
+async function checkDatabase(): Promise<CheckResult> {
+  // One source of truth with memory-db.ts. This used to re-derive the path
+  // by hand, and the two implementations disagreed on Windows — memory-db
+  // wrote to a POSIX-style ~/.local/share/operad while doctor probed
+  // %LOCALAPPDATA%\operad, so doctor always reported "No database yet".
+  const dbPath = join(detectPlatform().defaultDataDir(), "memory.db");
   if (!existsSync(dbPath)) {
     return { name: "database", status: "ok", message: "No database yet (created on first agent run)" };
   }

@@ -566,6 +566,10 @@ end tell`,
     return `${homedir()}/.local/share/operad/state.json`;
   }
 
+  defaultDataDir(): string {
+    return `${homedir()}/.local/share/operad`;
+  }
+
   /** Default log directory under XDG-style data dir */
   defaultLogDir(): string {
     return `${homedir()}/.local/share/operad/logs`;

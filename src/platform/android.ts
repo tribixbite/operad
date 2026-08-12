@@ -1108,6 +1108,15 @@ export class AndroidPlatform implements Platform {
     return join(HOME, ".local", "share", "tmx", "state.json");
   }
 
+  /**
+   * `operad`, not the legacy `tmx` that holds state.json — this is where the
+   * memory database already lives, and moving it would orphan every existing
+   * install's agent history.
+   */
+  defaultDataDir(): string {
+    return join(HOME, ".local", "share", "operad");
+  }
+
   /** Default log directory path */
   defaultLogDir(): string {
     return join(HOME, ".local", "share", "tmx", "logs");
