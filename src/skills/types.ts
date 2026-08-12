@@ -339,6 +339,24 @@ export function versionDirName(version: string): string {
 }
 
 /**
+ * Map a sanitized locator to a filesystem-safe directory name.
+ *
+ * sanitizeLocator deliberately keeps ':' because it is part of the stable
+ * skill id (`git+url:https:__host_o_r@v1`), and changing that would rename
+ * every already-installed skill. But a colon cannot appear in a Windows
+ * directory name — it opens an NTFS alternate data stream — so a locator like
+ * `C:\repos\r` produced `c:_repos_r` and mkdir failed with ENOTDIR, which is
+ * why every install died on Windows.
+ *
+ * Same split as versionDirName: the identity keeps the colon, the path does
+ * not. Both cacheDir() and the provider must use this, or they disagree about
+ * where a bundle lives.
+ */
+export function locatorDirName(sanitizedLocator: string): string {
+  return sanitizedLocator.replace(/:/g, "-");
+}
+
+/**
  * Build the canonical `OperadSkill.id` from its components. Stable
  * across re-installs of the same (provider, locator, version).
  */

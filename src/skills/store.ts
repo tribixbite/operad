@@ -17,6 +17,7 @@ import {
   type TrustTier,
   sanitizeLocator,
   versionDirName,
+  locatorDirName,
 } from "./types.js";
 
 /**
@@ -70,7 +71,7 @@ export class SkillStore {
    * land on disk. Includes sanitization to prevent path traversal.
    */
   cacheDir(provider: Provider, locator: string, version: string): string {
-    return join(this.cacheRoot, provider, sanitizeLocator(locator), versionDirName(version));
+    return join(this.cacheRoot, provider, locatorDirName(sanitizeLocator(locator)), versionDirName(version));
   }
 
   /**
@@ -79,7 +80,7 @@ export class SkillStore {
    * (typically `<cacheParent>/<version>/`).
    */
   cacheParent(provider: Provider, locator: string): string {
-    return join(this.cacheRoot, provider, sanitizeLocator(locator));
+    return join(this.cacheRoot, provider, locatorDirName(sanitizeLocator(locator)));
   }
 
   /**

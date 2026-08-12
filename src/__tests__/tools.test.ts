@@ -1189,7 +1189,10 @@ describe("execute() with generation pinning", () => {
 // readable/writable.
 
 describe("isAllowedPath — credential and config denial", () => {
-  const HOME = process.env.HOME || "";
+  // Must resolve home the same way isAllowedPath does. `process.env.HOME || ""`
+  // yielded "" on Windows (which uses USERPROFILE), so every join produced a
+  // relative path and the "allowed" cases failed there.
+  const HOME = process.env.HOME || homedir();
 
   test("ordinary project files are still allowed", () => {
     expect(isAllowedPath(join(HOME, "git", "proj", "src", "a.ts"))).toBe(true);

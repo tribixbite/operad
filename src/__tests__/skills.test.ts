@@ -29,6 +29,7 @@ import {
   buildSkillId,
   sanitizeLocator,
   tierRank,
+  locatorDirName,
 } from "../skills/types.js";
 import { readSkillManifests } from "../skills/adapter.js";
 
@@ -1181,5 +1182,45 @@ describe("adapter warnings are produced and typed", () => {
       name: "x", description: "", warnings: ["w"],
     };
     expect(asRead.warnings).toEqual(["w"]);
+  });
+});
+
+// -- sanitizeLocator produces a legal directory name ------------------------
+
+describe("locatorDirName — directory-name legality", () => {
+  // sanitizeLocator keeps ':' on purpose: it is part of the stable skill id,
+  // and stripping it would rename every already-installed skill. The path
+  // layer strips it instead, exactly as versionDirName does for commit pins.
+  test("the skill id keeps its colon (ids must stay stable)", () => {
+    expect(sanitizeLocator("https://github.com/o/r")).toContain(":");
+  });
+
+  test("a Windows drive locator yields a legal directory name", () => {
+    // `c:_repos_r` is an NTFS alternate data stream, so mkdir failed with
+    // ENOTDIR and every install on Windows died creating its cache dir.
+    expect(locatorDirName(sanitizeLocator("C:\\repos\\r"))).not.toContain(":");
+  });
+
+  test("an https locator yields a legal directory name", () => {
+    expect(locatorDirName(sanitizeLocator("https://github.com/o/r"))).not.toContain(":");
+  });
+
+  test("directory names contain only legal characters", () => {
+    for (const loc of [
+      "C:\\repos\\r", "https://github.com/o/r", "git@github.com:o/r.git",
+      "/tmp/x", "owner/skill",
+    ]) {
+      expect(locatorDirName(sanitizeLocator(loc))).toMatch(/^[a-z0-9_.\-@]+$/);
+    }
+  });
+
+  test("distinct locators still map to distinct directories", () => {
+    const a = locatorDirName(sanitizeLocator("https://github.com/o/r"));
+    const b = locatorDirName(sanitizeLocator("https://gitlab.com/o/r"));
+    expect(a).not.toBe(b);
+  });
+
+  test("traversal is still rejected", () => {
+    expect(() => sanitizeLocator("../etc")).toThrow();
   });
 });
