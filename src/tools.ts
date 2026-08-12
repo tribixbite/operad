@@ -9,7 +9,20 @@
  * remain model-agnostic — they output text, the daemon parses.
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync, exec, execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+/**
+ * Async command runners.
+ *
+ * Every shelling tool used execSync, which blocks the daemon's event loop for
+ * the whole call — up to 30s for a TOML tool. HTTP, SSE, WebSocket pings,
+ * health checks, IPC and the memory poll all stalled behind a single tool
+ * invocation. Every execute() here is already async, so awaiting costs
+ * nothing and frees the loop.
+ */
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { join, resolve, dirname, basename, extname, sep } from "node:path";
 import { homedir } from "node:os";
@@ -374,11 +387,12 @@ export class ToolExecutor {
               );
             }
 
-            const output = execSync(cmd, {
+            const { stdout } = await execAsync(cmd, {
               encoding: "utf-8",
               timeout: t.timeout_ms ?? 30_000,
               maxBuffer: 1024 * 1024,
-            }).trim();
+            });
+            const output = stdout.trim();
 
             return {
               success: true,
@@ -558,11 +572,28 @@ export class ToolExecutor {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Merge signals: caller's + timeout
-      const mergedCtx: ToolContext = {
-        ...ctx,
-        signal: ctx.signal.aborted ? ctx.signal : controller.signal,
-      };
+      // Merge the caller's signal with the timeout.
+      //
+      // This used to be `ctx.signal.aborted ? ctx.signal : controller.signal`,
+      // which threw outright when a caller omitted `signal`, and otherwise
+      // discarded the caller's signal unless it had ALREADY aborted — so a
+      // caller could never cancel a running tool. AbortSignal.any propagates
+      // whichever fires first; where it is unavailable, fall back to
+      // forwarding the caller's abort into our controller.
+      const callerSignal = ctx.signal;
+      let mergedSignal: AbortSignal;
+      if (!callerSignal) {
+        mergedSignal = controller.signal;
+      } else if (typeof (AbortSignal as { any?: unknown }).any === "function") {
+        mergedSignal = (AbortSignal as unknown as {
+          any: (s: AbortSignal[]) => AbortSignal;
+        }).any([callerSignal, controller.signal]);
+      } else {
+        if (callerSignal.aborted) controller.abort();
+        else callerSignal.addEventListener("abort", () => controller.abort(), { once: true });
+        mergedSignal = controller.signal;
+      }
+      const mergedCtx: ToolContext = { ...ctx, signal: mergedSignal };
 
       try {
         result = await tool.execute(params, mergedCtx);
@@ -837,8 +868,14 @@ export class ToolExecutor {
         }
 
         try {
-          const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: repoPath, encoding: "utf-8", timeout: 5000 }).trim();
-          const status = execSync("git status --porcelain", { cwd: repoPath, encoding: "utf-8", timeout: 5000 }).trim();
+          // argv arrays: these are fixed commands, so there is no reason to
+          // involve a shell at all.
+          const [branchRes, statusRes] = await Promise.all([
+            execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath, encoding: "utf-8", timeout: 5000 }),
+            execFileAsync("git", ["status", "--porcelain"], { cwd: repoPath, encoding: "utf-8", timeout: 5000 }),
+          ]);
+          const branch = branchRes.stdout.trim();
+          const status = statusRes.stdout.trim();
           const dirty = status ? status.split("\n") : [];
 
           return {
@@ -867,17 +904,23 @@ export class ToolExecutor {
       execute: async (input, _ctx) => {
         const start = Date.now();
         const repoPath = resolve(String(input.path));
-        const count = typeof input.count === "number" ? Math.min(input.count, 50) : 10;
+        // Clamped at both ends: Math.min alone let -5 and NaN through, which
+        // produced a malformed `-NaN` / `--5` git flag.
+        const rawCount = typeof input.count === "number" && Number.isFinite(input.count)
+          ? Math.trunc(input.count) : 10;
+        const count = Math.min(Math.max(rawCount, 1), 50);
 
         if (!isAllowedPath(repoPath)) {
           return { success: false, data: null, summary: `Path not allowed: ${repoPath}`, sideEffects: [], duration_ms: Date.now() - start };
         }
 
         try {
-          const log = execSync(
-            `git log --oneline -${count} --format="%h %s"`,
+          const { stdout: logOut } = await execFileAsync(
+            "git",
+            ["log", "--oneline", `-${count}`, "--format=%h %s"],
             { cwd: repoPath, encoding: "utf-8", timeout: 5000 },
-          ).trim();
+          );
+          const log = logOut.trim();
 
           return {
             success: true,

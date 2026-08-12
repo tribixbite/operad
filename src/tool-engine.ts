@@ -12,7 +12,7 @@
  * - Future tool-lifecycle hooks (e.g. lease expiry, audit flushing) belong here.
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { ToolContext } from "./tools.js";

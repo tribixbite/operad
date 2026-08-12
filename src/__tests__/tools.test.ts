@@ -1275,3 +1275,83 @@ describe("isProtectedFile — write denial", () => {
     expect(isProtectedFile("/p/README.md")).toBe(false);
   });
 });
+
+// -- execution no longer blocks the event loop ------------------------------
+//
+// Every shelling tool used execSync, which blocks the daemon's loop for the
+// whole call — up to 30s for a TOML tool. HTTP, SSE, WebSocket pings, health
+// checks, IPC and the memory poll all stalled behind one tool invocation.
+
+describe("ToolExecutor — event loop and cancellation", () => {
+  function makeExecutor() {
+    const sql = new Database(":memory:");
+    sql.exec(`CREATE TABLE tool_executions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_name TEXT, tool_name TEXT, params_json TEXT, success INTEGER,
+      result_summary TEXT, duration_ms INTEGER, error_message TEXT,
+      autonomy_level TEXT, created_at INTEGER NOT NULL);`);
+    const db = {
+      requireDb: () => sql,
+      getToolAutonomyCap: () => null,
+      logToolExecution: () => {},
+    } as any;
+    const log = { info() {}, warn() {}, error() {}, debug() {} } as any;
+    return { te: new ToolExecutor(db, log), sql };
+  }
+
+  test("a slow shell tool does not stall the event loop", async () => {
+    const { te, sql } = makeExecutor();
+    te.registerTomlTools([{
+      name: "slowtool", description: "d", category: "analyze",
+      command: "sleep 1", timeout_ms: 8000,
+    }]);
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 50);
+    const r = await te.execute("slowtool", {}, { agentName: "a", autonomyLevel: "autonomous" } as any);
+    clearInterval(timer);
+    expect(r.success).toBe(true);
+    // ~20 ticks expected in 1s; anything above a handful proves the loop ran.
+    expect(ticks).toBeGreaterThan(5);
+    sql.close();
+  });
+
+  // ctx.signal.aborted threw outright when a caller omitted the signal.
+  test("a context without a signal does not crash", async () => {
+    const { te, sql } = makeExecutor();
+    te.registerTomlTools([{
+      name: "quick", description: "d", category: "analyze", command: "echo hi",
+    }]);
+    const r = await te.execute("quick", {}, { agentName: "a", autonomyLevel: "autonomous" } as any);
+    expect(r.success).toBe(true);
+    sql.close();
+  });
+
+  // The merge previously discarded the caller's signal unless it had ALREADY
+  // aborted, so a caller could never cancel a running tool.
+  test("a caller's abort reaches a running tool", async () => {
+    const { te, sql } = makeExecutor();
+    te.register({
+      name: "waits", description: "d", category: "analyze", params: [],
+      timeout_ms: 10_000, parallelizable: true,
+      execute: async (_input, ctx) => {
+        await new Promise<void>((resolve) => {
+          if (ctx.signal?.aborted) return resolve();
+          ctx.signal?.addEventListener("abort", () => resolve(), { once: true });
+          setTimeout(resolve, 5000);
+        });
+        return {
+          success: true, data: null,
+          summary: ctx.signal?.aborted ? "aborted" : "completed",
+          sideEffects: [], duration_ms: 0,
+        };
+      },
+    } as any);
+    const ac = new AbortController();
+    const p = te.execute("waits", {}, {
+      agentName: "a", autonomyLevel: "autonomous", signal: ac.signal,
+    } as any);
+    setTimeout(() => ac.abort(), 100);
+    const r = await p;
+    expect(String(r.summary)).toBe("aborted");
+    sql.close();
+  }, 15_000);
+});
