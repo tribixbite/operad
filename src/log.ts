@@ -5,7 +5,7 @@
  * human-readable colored output to stderr for interactive use.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import type { LogEntry } from "./types.js";
 
 /** Maximum log file size before rotation (5 MB) */
@@ -28,6 +28,8 @@ export class Logger {
   private logFile: string;
   private logDir: string;
   private verbose: boolean;
+  /** Whether this process has already tightened the log file's mode. */
+  private logModeChecked = false;
 
   constructor(logDir: string, verbose = false) {
     this.logDir = logDir;
@@ -83,11 +85,34 @@ export class Logger {
     }
   }
 
+  /**
+   * Tighten the log file's permissions once per process.
+   *
+   * appendFileSync's `mode` only takes effect when it creates the file, so a
+   * log written by an earlier version — or created under a looser umask —
+   * stays world-readable forever without this.
+   */
+  private ensureLogMode(): void {
+    if (this.logModeChecked) return;
+    this.logModeChecked = true;
+    try {
+      chmodSync(this.logFile, 0o600);
+    } catch {
+      // Read-only FS or foreign owner — the log content still got written.
+    }
+  }
+
   /** Append a JSONL line to the log file, rotating if needed */
   private writeToFile(entry: LogEntry): void {
     try {
       this.rotateIfNeeded();
-      appendFileSync(this.logFile, JSON.stringify(entry) + "\n");
+      // 0600: the log carries session paths, prompts and command lines, and
+      // appendFileSync with no mode creates it world-readable under a desktop
+      // umask of 022. The mode argument only applies on CREATE, so an
+      // already-existing log keeps whatever mode it has — tightened once, in
+      // ensureLogMode(), rather than on every write.
+      appendFileSync(this.logFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
+      this.ensureLogMode();
     } catch {
       // If we can't write logs, print to stderr as fallback
       process.stderr.write(`[log-write-error] ${JSON.stringify(entry)}\n`);
@@ -132,6 +157,9 @@ export class Logger {
 
       // Rotate current file to .1
       renameSync(this.logFile, `${this.logFile}.1`);
+      // The next append creates a brand-new file, so its mode must be
+      // re-asserted rather than assumed from the pre-rotation check.
+      this.logModeChecked = false;
     } catch {
       // Rotation failure is non-fatal
     }

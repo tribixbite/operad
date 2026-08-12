@@ -13,7 +13,7 @@ import type { Logger } from "./log.js";
 import {
   AUTH_QUERY_PARAM,
   buildAuthCookie,
-  presentedToken,
+  presentedCredentials,
   tokensMatch,
 } from "./auth.js";
 
@@ -249,7 +249,12 @@ export class DashboardServer {
 
       this.server.listen(this.port, this.bindAddress, () => {
         this.log.info(`Dashboard server listening on http://${this.bindAddress}:${this.port}`);
-        this.log.info(`Open: ${this.dashboardUrl()}`);
+        // Deliberately NOT the tokenised URL. tmx.jsonl is created by
+        // appendFileSync with no mode, so under a desktop umask of 022 it is
+        // world-readable — and the same line also went to daemon-stderr.log
+        // and was served back by GET /api/logs. `operad token` prints the URL
+        // on demand, which is the right place for a secret.
+        this.log.info("Run 'operad token' for the authenticated dashboard URL");
         if (this.bindAddress !== "127.0.0.1" && this.bindAddress !== "localhost") {
           this.log.warn(
             `Dashboard is bound to ${this.bindAddress} — reachable from the network. `
@@ -524,12 +529,64 @@ export class DashboardServer {
    * and browser WebSocket cannot set headers), or the session cookie.
    */
   private isAuthorized(req: http.IncomingMessage, url: URL): boolean {
-    const presented = presentedToken(
+    // EVERY credential the request carries is considered, not just the
+    // highest-precedence one. Stopping at the first meant a wrong
+    // `Authorization: Bearer` shadowed a valid session cookie, so a proxy or
+    // extension injecting an Authorization header 401'd the whole dashboard.
+    const presented = presentedCredentials(
       req.headers.authorization,
       url.searchParams.get(AUTH_QUERY_PARAM),
       req.headers.cookie,
     );
-    return tokensMatch(presented, this.authToken);
+
+    let sawForeignOriginCookie = false;
+    for (const cred of presented) {
+      if (!tokensMatch(cred.token, this.authToken)) continue;
+      // A cookie is ambient: the browser attaches it without the page knowing
+      // the token, so a cookie-authenticated request needs an origin check. A
+      // header or query token does not — a cross-origin page cannot read the
+      // token, so possessing it is itself the proof.
+      if (cred.source === "cookie" && !this.originAllowed(req)) {
+        sawForeignOriginCookie = true;
+        continue;
+      }
+      return true;
+    }
+
+    if (sawForeignOriginCookie) {
+      this.log.warn(
+        `Rejected cookie-authenticated request from foreign origin ${req.headers.origin}`,
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Is this request's Origin the dashboard's own, or explicitly allow-listed?
+   *
+   * SameSite=Strict does NOT isolate this deployment. Cookies are not
+   * port-scoped, and per RFC 6265bis the "site" for localhost or a bare IP
+   * excludes the port — so a page on http://localhost:3000, i.e. any other
+   * dev server the user runs, is same-site with the dashboard on 18970 and
+   * the browser attaches the session cookie. Nothing else stopped it: Origin
+   * was consulted only to decide whether to emit CORS headers, and almost
+   * every route parses the body regardless of Content-Type, so a
+   * CORS-*simple* request needs no preflight. `POST /api/send/<session>`
+   * injects arbitrary keystrokes into a live Claude session.
+   *
+   * An absent Origin is allowed: that is a non-browser client (curl, the
+   * CLI), which has no ambient cookie to abuse in the first place.
+   */
+  private originAllowed(req: http.IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (!origin) return true;
+    if (this.allowedOrigins.has(origin)) return true;
+    try {
+      // Compare host AND port against the authority the request arrived on.
+      return new URL(origin).host === (req.headers.host ?? "");
+    } catch {
+      return false;
+    }
   }
 
   /** Handle SSE connection */

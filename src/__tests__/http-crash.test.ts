@@ -163,3 +163,74 @@ describe("auth is still enforced after the crash hardening", () => {
     expect(reply).toContain("401");
   });
 });
+
+/**
+ * CSRF: SameSite=Strict does not isolate localhost PORTS.
+ *
+ * Cookies are not port-scoped, and per RFC 6265bis the "site" for localhost
+ * or a bare IP excludes the port, so a page served from any other dev server
+ * the user runs is same-site with the dashboard and the browser attaches the
+ * session cookie. Nothing else stopped it — Origin was only consulted to
+ * decide whether to emit CORS headers, and almost every route parses the body
+ * regardless of Content-Type, so a CORS-simple request needs no preflight.
+ */
+describe("cookie-authenticated requests are origin-checked", () => {
+  const cookieHeader = `Cookie: operad_token=${TOKEN}`;
+
+  test("a foreign localhost port cannot drive the API with the ambient cookie", async () => {
+    const reply = await rawRequest(
+      "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+      + "Origin: http://localhost:3000\r\n"
+      + `${cookieHeader}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+    );
+    expect(reply).toContain("401");
+  });
+
+  test("a genuinely cross-site origin is rejected too", async () => {
+    const reply = await rawRequest(
+      "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+      + "Origin: https://evil.example.com\r\n"
+      + `${cookieHeader}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+    );
+    expect(reply).toContain("401");
+  });
+
+  test("the dashboard's own origin still works", async () => {
+    const reply = await rawRequest(
+      `GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n`
+      + `Origin: http://127.0.0.1:${port}\r\n`
+      + `${cookieHeader}\r\nConnection: close\r\n\r\n`,
+    );
+    expect(reply).toContain("200");
+  });
+
+  test("a non-browser client with no Origin still works", async () => {
+    // curl and the CLI send no Origin, and have no ambient cookie to abuse.
+    const reply = await rawRequest(
+      `GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n${cookieHeader}\r\nConnection: close\r\n\r\n`,
+    );
+    expect(reply).toContain("200");
+  });
+
+  test("a bearer token from a foreign origin is NOT blocked", async () => {
+    // Possessing the token is itself the proof: a cross-origin page cannot
+    // read it. Blocking this would break legitimate scripted callers.
+    const reply = await rawRequest(
+      "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+      + "Origin: http://localhost:3000\r\n"
+      + `Authorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n`,
+    );
+    expect(reply).toContain("200");
+  });
+
+  test("a bogus Authorization header no longer defeats a valid cookie", async () => {
+    // The header used to take precedence unconditionally, so any proxy or
+    // extension injecting an Authorization header 401'd the whole dashboard.
+    const reply = await rawRequest(
+      "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+      + "Authorization: Bearer wrong-token-entirely\r\n"
+      + `${cookieHeader}\r\nConnection: close\r\n\r\n`,
+    );
+    expect(reply).toContain("200");
+  });
+});

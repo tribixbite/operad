@@ -134,6 +134,60 @@ export function parseCookies(header: string | undefined): Record<string, string>
   return out;
 }
 
+/** Where a presented token came from. Cookies are the only ambient one. */
+export type TokenSource = "header" | "query" | "cookie";
+
+/** A token and how the client supplied it. */
+export interface PresentedCredential {
+  token: string;
+  source: TokenSource;
+}
+
+/**
+ * Extract a presented token and its source, in precedence order:
+ * `Authorization: Bearer`, then the `token` query param, then the cookie.
+ *
+ * The source matters for CSRF: a header or query token has to be *known* to
+ * the caller, whereas a cookie is attached by the browser automatically, so
+ * only cookie-authenticated requests need an origin check.
+ *
+ * A malformed `Authorization` header falls through to the next source rather
+ * than shadowing it — a stray `Basic …` from a proxy or extension used to
+ * defeat a perfectly good session cookie and 401 the whole dashboard.
+ */
+export function presentedCredentials(
+  authorization: string | undefined,
+  queryToken: string | null,
+  cookieHeader: string | undefined,
+): PresentedCredential[] {
+  const out: PresentedCredential[] = [];
+  if (authorization) {
+    const m = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+    const token = m?.[1]?.trim();
+    if (token) out.push({ token, source: "header" });
+  }
+  if (queryToken) out.push({ token: queryToken, source: "query" });
+  const fromCookie = parseCookies(cookieHeader)[AUTH_COOKIE];
+  if (fromCookie) out.push({ token: fromCookie, source: "cookie" });
+  return out;
+}
+
+/**
+ * The highest-precedence credential a request carries, or null.
+ *
+ * Prefer `presentedCredentials` where possible: taking only the first source
+ * means a WRONG `Authorization: Bearer` shadows a perfectly valid session
+ * cookie, so any proxy or browser extension that injects an Authorization
+ * header 401s the entire dashboard.
+ */
+export function presentedCredential(
+  authorization: string | undefined,
+  queryToken: string | null,
+  cookieHeader: string | undefined,
+): PresentedCredential | null {
+  return presentedCredentials(authorization, queryToken, cookieHeader)[0] ?? null;
+}
+
 /**
  * Extract a presented token from a request, in precedence order:
  * `Authorization: Bearer`, then the `token` query param, then the cookie.
@@ -143,13 +197,7 @@ export function presentedToken(
   queryToken: string | null,
   cookieHeader: string | undefined,
 ): string | null {
-  if (authorization) {
-    const m = /^Bearer\s+(.+)$/i.exec(authorization.trim());
-    if (m) return m[1].trim();
-  }
-  if (queryToken) return queryToken;
-  const cookies = parseCookies(cookieHeader);
-  return cookies[AUTH_COOKIE] ?? null;
+  return presentedCredential(authorization, queryToken, cookieHeader)?.token ?? null;
 }
 
 /** `Set-Cookie` value binding the browser session to the token. */
@@ -158,8 +206,13 @@ export function buildAuthCookie(token: string, secure: boolean): string {
     `${AUTH_COOKIE}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
-    // Strict is what makes this CSRF-resistant: a cross-site page cannot cause
-    // the browser to attach this cookie to a request at all.
+    // Strict blocks genuinely cross-SITE requests, but it is not sufficient
+    // on its own here: cookies are not port-scoped, and per RFC 6265bis the
+    // "site" for localhost or a bare IP excludes the port. A page served from
+    // http://localhost:3000 — any other dev server the user happens to run —
+    // is same-site with the dashboard and the browser attaches this cookie.
+    // The origin check in DashboardServer.isAuthorized is what actually
+    // closes CSRF; this attribute is defence in depth.
     "SameSite=Strict",
     "Max-Age=31536000",
   ];
