@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Tool leases do something.** `createToolLease` and `hasActiveLease` had no
+  production callers, so the table stayed permanently empty and the
+  "goal-scoped tool permissions with usage limits" model existed only on
+  paper — while `incrementLeaseUsage` was called on every tool execution,
+  charging a budget nothing had granted. A lease now lets through a call the
+  agent's standing `autonomy_level` would otherwise send for approval. It
+  never narrows anything, so no call that worked before can start failing,
+  and it cannot override `protected_tools`. The budget is charged only when
+  the lease was the deciding authority, and the audit row records which
+  authority allowed the call. `POST /api/leases/:agent` grants one; it
+  requires `max_executions` or `ttl_seconds`, because an unbounded grant is
+  what `autonomy_level` is for.
+
+### Fixed
+
+- **OODA cycles could run concurrently.** Three paths call `runOodaCycle` and
+  none shared a guard, so two could enter at once: both built context, both
+  inserted a run row, and the second was recorded as a failed run. The real
+  loss was upstream — the trigger path marks its messages read *before*
+  starting, so a cycle that lost the race consumed the trigger and the
+  messages were never acted on, and a scheduled cycle simply vanished. Cycles
+  now refuse re-entry before touching any state, the trigger checks first,
+  and a scheduled cycle re-arms instead of disappearing.
+- **Roundtables bypassed the quota circuit breaker.** They are the most
+  expensive operation in the system — one paid run per participant, each
+  reading every prior contribution, so cost is quadratic in the list — and
+  were the only agent path with no quota check, so an agent whose own cycles
+  were being blocked could still spend freely. Now blocked at `exceeded`.
+  Participants are deduplicated and capped, the carried transcript is
+  bounded, and `agents` is validated as an array of strings (a bare string
+  made the engine iterate its characters).
+- **Scheduled runs applied every learning twice.** They called both action
+  appliers on the same response. `addLearning` dedupes by content hash, so
+  the repeat did not duplicate the row — it reinforced it, so every
+  scheduled-run learning was born pre-reinforced with inflated confidence and
+  outranked identical learnings from other paths in
+  `reinforcement_count * confidence` ordering. Merging the two appliers also
+  means an OODA-cycle learning finally reinforces a matching specialization,
+  which had existed in only one of the copies.
+- **Chat history replay depended on undefined ordering.**
+  `getConversationHistory` ordered by a whole-second timestamp alone, so every
+  message of one turn tied and only happened to come out right; the caller
+  then dropped "the last row" assuming it was the turn just appended. Ordering
+  now has an id tiebreak and the caller excludes by id.
+- **Retention now covers the last unbounded tables.** `consolidation_runs`
+  (the fastest grower in practice — it ticks on a timer whether or not there
+  is anything to consolidate), `costs`, and `agent_conversations`, the last by
+  most-recent-N-per-agent rather than by age. `agent_trust_ledger` could not
+  be pruned naively — `getTrustScore` sums the whole ledger, so an age-based
+  delete would have silently demoted every agent as history aged out — so its
+  pre-cutoff rows are folded into one compaction row per agent that preserves
+  the sum exactly.
+
 ## [0.5.1] - 2026-08-12
 
 A reliability release. Two independent audits — one of the transport and
