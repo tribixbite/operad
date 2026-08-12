@@ -183,9 +183,32 @@ export class DashboardServer {
     }
   }
 
+  /**
+   * Tear down the WebSocket server and keepalive interval, if any.
+   * Safe to call when nothing is set up.
+   */
+  private disposeListeners(): void {
+    if (this.wsPingInterval) {
+      clearInterval(this.wsPingInterval);
+      this.wsPingInterval = null;
+    }
+    if (this.wss) {
+      try { this.wss.close(); } catch { /* already closed */ }
+      this.wss = null;
+    }
+  }
+
   /** Attempt to bind the HTTP server once */
   private tryListen(): Promise<void> {
     return new Promise((resolve, reject) => {
+      // Discard anything left by a previous attempt before overwriting the
+      // fields. tryListen() builds the WebSocketServer and the keepalive
+      // interval BEFORE listen() can fail, so an EADDRINUSE retry used to
+      // orphan both — up to three live 30 s intervals per boot, and because
+      // an active interval keeps the event loop referenced, a daemon whose
+      // dashboard never bound would not exit on its own.
+      this.disposeListeners();
+
       this.server = http.createServer((req, res) => this.handleRequest(req, res));
 
       // Attach WebSocket server on /ws path
@@ -244,6 +267,10 @@ export class DashboardServer {
       this.server.on("error", (err) => {
         try { this.server?.close(); } catch { /* already closed */ }
         this.server = null;
+        // Same cleanup on the failure path: without it the retry's
+        // disposeListeners() is the only thing standing between a failed
+        // bind and a leaked interval, and the final attempt has no retry.
+        this.disposeListeners();
         reject(err);
       });
 

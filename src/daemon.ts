@@ -264,7 +264,7 @@ export class Daemon {
 
     // Load dynamic session registry
     const registryPath = join(dirname(this.config.orchestrator.state_file), "registry.json");
-    this.registry = new Registry(registryPath);
+    this.registry = new Registry(registryPath, this.log);
 
     // Auto-stop package list is loaded after AndroidEngine is constructed below.
 

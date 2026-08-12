@@ -7,6 +7,7 @@
  */
 
 import * as net from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import type { IpcCommand, IpcResponse } from "./types.js";
 import type { Logger } from "./log.js";
@@ -72,22 +73,42 @@ export class IpcServer {
 
   private static readonly MAX_IPC_BUFFER_SIZE = 1 * 1024 * 1024; // 1MB
 
+  /** Drop a connection that has sat idle this long without sending anything. */
+  private static readonly IDLE_TIMEOUT_MS = 60_000;
+
+  /** Live client connections, so stop() can actually finish. */
+  private connections = new Set<net.Socket>();
+
   /** Handle a single client connection */
   private handleConnection(conn: net.Socket): void {
+    // A client that connects and never speaks used to be held forever: no
+    // timeout, no connection cap, so file descriptors and memory accumulated
+    // indefinitely. Combined with the socket's old world-writable mode, any
+    // local user could exhaust them.
+    conn.setTimeout(IpcServer.IDLE_TIMEOUT_MS, () => {
+      this.log.debug("Closing idle IPC connection");
+      conn.destroy();
+    });
+
+    // Track it so stop() can destroy it — server.close() only stops
+    // *accepting*, and never completes while a connection is still open.
+    this.connections.add(conn);
+    conn.on("close", () => this.connections.delete(conn));
+
+    // A StringDecoder, not data.toString(): a multi-byte UTF-8 sequence split
+    // across two TCP chunks decodes independently on each side and silently
+    // becomes U+FFFD. `operad send "…"` with any non-ASCII payload was at
+    // risk of arriving corrupted. The decoder holds the partial sequence
+    // until the continuation bytes arrive.
+    const decoder = new StringDecoder("utf8");
     let buffer = "";
 
     conn.on("data", (data) => {
-      buffer += data.toString();
+      buffer += decoder.write(data);
 
-      // Guard against unbounded buffer growth (e.g., malicious client sending without newlines)
-      if (buffer.length > IpcServer.MAX_IPC_BUFFER_SIZE) {
-        this.log.warn(`IPC buffer exceeded ${IpcServer.MAX_IPC_BUFFER_SIZE} bytes, dropping connection`);
-        buffer = "";
-        conn.destroy();
-        return;
-      }
-
-      // Process all complete messages (delimited by newline)
+      // Framing first, THEN the size guard. Checking the accumulated buffer
+      // before extracting messages meant one large chunk carrying many valid
+      // newline-delimited messages was discarded wholesale.
       let newlineIdx: number;
       while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, newlineIdx).trim();
@@ -98,6 +119,14 @@ export class IpcServer {
         this.processMessage(line, conn).catch((err) => {
           this.log.error(`Unhandled IPC message error: ${err}`);
         });
+      }
+
+      // What's left is an incomplete message. Guard against a client that
+      // never sends a newline.
+      if (buffer.length > IpcServer.MAX_IPC_BUFFER_SIZE) {
+        this.log.warn(`IPC buffer exceeded ${IpcServer.MAX_IPC_BUFFER_SIZE} bytes, dropping connection`);
+        buffer = "";
+        conn.destroy();
       }
     });
 
@@ -142,6 +171,13 @@ export class IpcServer {
       this.server.close();
       this.server = null;
     }
+    // close() only stops accepting; it never completes while a connection is
+    // open. Nothing awaited it, so this went unnoticed — but a lingering
+    // client kept the listener half-alive across shutdown.
+    for (const conn of this.connections) {
+      try { conn.destroy(); } catch { /* already gone */ }
+    }
+    this.connections.clear();
     try {
       if (existsSync(this.socketPath)) {
         unlinkSync(this.socketPath);
@@ -220,6 +256,9 @@ export class IpcClient {
   send(cmd: IpcCommand, timeoutMs = 30_000): Promise<IpcResponse> {
     return new Promise((resolve, reject) => {
       const conn = net.createConnection(this.socketPath);
+      // See the server side: decoding each chunk independently corrupts a
+      // multi-byte UTF-8 sequence that straddles a chunk boundary.
+      const decoder = new StringDecoder("utf8");
       let buffer = "";
       let resolved = false;
 
@@ -236,7 +275,7 @@ export class IpcClient {
       });
 
       conn.on("data", (data) => {
-        buffer += data.toString();
+        buffer += decoder.write(data);
         const newlineIdx = buffer.indexOf("\n");
         if (newlineIdx !== -1) {
           const line = buffer.slice(0, newlineIdx).trim();

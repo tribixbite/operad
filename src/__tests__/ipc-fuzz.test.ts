@@ -322,3 +322,98 @@ describe("IpcServer fuzz: newline-delimited JSON parser", () => {
     expect(dispatchCount).toBe(count);
   });
 });
+
+/**
+ * A multi-byte UTF-8 sequence split across two TCP chunks used to be decoded
+ * independently on each side — `data.toString()` per chunk — turning the
+ * straddling character into U+FFFD. `operad send "…"` with any non-ASCII
+ * payload could arrive corrupted, silently, with no error anywhere.
+ */
+describe("UTF-8 sequences split across chunk boundaries", () => {
+  /** Write a payload as separate chunks, with a tick between each. */
+  function sendChunked(chunks: Buffer[], timeoutMs = 10000): Promise<string> {
+    return new Promise((resolve) => {
+      const conn = net.createConnection(SOCK_PATH);
+      let received = "";
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        conn.destroy();
+        resolve(received);
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      conn.on("connect", async () => {
+        for (const chunk of chunks) {
+          conn.write(chunk);
+          // Force separate 'data' events rather than one coalesced buffer.
+          await new Promise((r) => setTimeout(r, 15));
+        }
+      });
+      conn.on("data", (chunk) => {
+        received += chunk.toString();
+        if (received.includes("\n")) finish();
+      });
+      conn.on("close", finish);
+      conn.on("error", finish);
+    });
+  }
+
+  /** Split a payload at a byte offset that lands mid-character. */
+  function splitAt(payload: string, byteOffset: number): Buffer[] {
+    const full = Buffer.from(payload, "utf8");
+    return [full.subarray(0, byteOffset), full.subarray(byteOffset)];
+  }
+
+  const cases: Array<{ label: string; text: string }> = [
+    { label: "2-byte (é)", text: "café" },
+    { label: "3-byte (日本語)", text: "日本語テキスト" },
+    { label: "4-byte emoji", text: "ship it 🚀 now" },
+    { label: "combining marks", text: "égal" },
+  ];
+
+  for (const { label, text } of cases) {
+    test(`${label} survives a split mid-character`, async () => {
+      const line = JSON.stringify({ cmd: "send", args: { text } }) + "\n";
+      const bytes = Buffer.from(line, "utf8");
+      // Cut inside the first multi-byte character of the payload.
+      const cut = bytes.indexOf(Buffer.from(text, "utf8")[0]!) + 1;
+
+      const raw = await sendChunked(splitAt(line, cut));
+      const responses = parseResponses(raw);
+
+      expect(responses.length).toBe(1);
+      const echoed = (responses[0]!.data as { echo: { args: { text: string } } }).echo;
+      expect(echoed.args.text).toBe(text);
+      expect(echoed.args.text).not.toContain("�");
+    });
+  }
+
+  test("a byte-by-byte trickle still reassembles correctly", async () => {
+    const text = "🚀🎉 done";
+    const line = JSON.stringify({ cmd: "send", args: { text } }) + "\n";
+    const bytes = Buffer.from(line, "utf8");
+    const chunks = Array.from(bytes, (b) => Buffer.from([b]));
+
+    const raw = await sendChunked(chunks, 20000);
+    const responses = parseResponses(raw);
+
+    expect(responses.length).toBe(1);
+    const echoed = (responses[0]!.data as { echo: { args: { text: string } } }).echo;
+    expect(echoed.args.text).toBe(text);
+  });
+
+  test("a large chunk carrying many messages is not dropped wholesale", async () => {
+    // The size guard used to run against the accumulated buffer BEFORE
+    // framing, so one big write containing many valid newline-delimited
+    // messages was discarded even though every message was well-formed.
+    const messages = Array.from({ length: 600 }, (_, i) =>
+      JSON.stringify({ cmd: "status", args: { i, pad: "x".repeat(2000) } }));
+    const payload = Buffer.from(messages.join("\n") + "\n", "utf8");
+    expect(payload.length).toBeGreaterThan(1024 * 1024);
+
+    const raw = await sendChunked([payload], 20000);
+    expect(parseResponses(raw).length).toBeGreaterThan(0);
+  });
+});

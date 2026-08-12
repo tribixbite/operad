@@ -7,9 +7,10 @@
  * Claude Code's ~/.claude/history.jsonl.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
+import type { Logger } from "./log.js";
 
 /** A dynamically registered Claude session */
 export interface RegistryEntry {
@@ -63,9 +64,12 @@ const NAME_PATTERN = /^[a-z0-9-]+$/;
 export class Registry {
   private data: RegistryData;
   private filePath: string;
+  /** Optional — load-time problems are silent without it. */
+  private log?: Logger;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, log?: Logger) {
     this.filePath = filePath;
+    this.log = log;
     this.data = this.load();
   }
 
@@ -171,26 +175,58 @@ export class Registry {
 
   // -- Persistence ------------------------------------------------------------
 
+  /**
+   * Move an unusable registry aside before it is overwritten.
+   *
+   * Returning an empty registry is not harmless: the next save() writes that
+   * emptiness over the file, erasing every dynamically registered session.
+   * A version mismatch — running an older operad against a newer registry —
+   * hit exactly that path, so a downgrade silently wiped the user's
+   * registrations. Only the most recent bad copy is kept.
+   */
+  private quarantine(reason: string): void {
+    const backup = `${this.filePath}.corrupt`;
+    try {
+      copyFileSync(this.filePath, backup);
+      this.log?.warn(`Unusable registry saved to ${backup} (${reason})`);
+    } catch { /* nothing more we can do; the original is still about to go */ }
+  }
+
   private load(): RegistryData {
     try {
       if (existsSync(this.filePath)) {
         const content = readFileSync(this.filePath, "utf-8");
         const parsed = JSON.parse(content) as RegistryData;
         if (parsed.version === CURRENT_VERSION && Array.isArray(parsed.sessions)) {
-          // Sanitise session_id values that don't look like UUIDs — the field
-          // gets interpolated into `claude --resume <id>` later, so a tampered
-          // registry could otherwise smuggle shell commands. Names get the
-          // same gate via isValidName when they're added at runtime; the
-          // load path is the only entry that bypasses runtime validation.
-          for (const entry of parsed.sessions) {
+          // Sanitise on load. This path bypasses the validation that add()
+          // applies at runtime, and a registry file can be edited by hand or
+          // written by another tool.
+          //
+          // session_id is interpolated into `claude --resume <id>`, so a
+          // tampered value could otherwise smuggle shell text. Names reach
+          // tmux targets and paths, and — contrary to what the comment here
+          // used to claim — were NOT being checked at all.
+          const clean = parsed.sessions.filter((entry) => {
+            if (!entry || typeof entry.name !== "string" || !isValidName(entry.name)) {
+              this.log?.warn(`Dropping registry entry with invalid name: ${JSON.stringify(entry?.name)}`);
+              return false;
+            }
+            return true;
+          });
+          for (const entry of clean) {
             if (entry.session_id && !isValidSessionId(entry.session_id)) {
               entry.session_id = undefined;
             }
           }
-          return parsed;
+          return { version: CURRENT_VERSION, sessions: clean };
         }
+        // Parsed, but unusable — a future/older schema version, or `sessions`
+        // is not an array. Preserve it: the next save() overwrites the file.
+        this.quarantine(`version ${String(parsed?.version)} != ${CURRENT_VERSION}`);
       }
-    } catch { /* start fresh */ }
+    } catch (err) {
+      if (existsSync(this.filePath)) this.quarantine(String(err));
+    }
     return { version: CURRENT_VERSION, sessions: [] };
   }
 

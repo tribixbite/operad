@@ -5,7 +5,7 @@
  * For actual running status, always trust `tmux list-sessions` over persisted state.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { SessionState, SessionStatus, SystemMemorySnapshot, BatterySnapshot, TmxState, SessionConfig } from "./types.js";
 import { VALID_TRANSITIONS } from "./types.js";
@@ -287,6 +287,28 @@ export class StateManager {
 
   // -- Persistence ------------------------------------------------------------
 
+  /**
+   * Move an unreadable state file aside before it is overwritten.
+   *
+   * A parse or shape failure used to log one warning and return a fresh
+   * state, and the very next persist() — milliseconds later, via
+   * initFromConfig() — wrote over the original. Restart counts, autostart
+   * pins and bound_jsonl_id vanished along with any chance of working out
+   * why. Writes here are atomic (temp + rename), so a corrupt file always
+   * came from outside operad, which is exactly when the evidence is worth
+   * keeping. Only the most recent corruption is retained; a repeating
+   * failure must not fill the disk with copies.
+   */
+  private quarantineStateFile(reason: string): void {
+    const backup = `${this.statePath}.corrupt`;
+    try {
+      copyFileSync(this.statePath, backup);
+      this.log.warn(`Corrupt state file saved to ${backup} (${reason})`);
+    } catch (err) {
+      this.log.warn(`Could not preserve corrupt state file: ${err}`);
+    }
+  }
+
   private loadFromDisk(): TmxState {
     try {
       if (existsSync(this.statePath)) {
@@ -295,6 +317,7 @@ export class StateManager {
         // Validate top-level shape
         if (!parsed || typeof parsed !== "object" || !parsed.daemon_start || !parsed.sessions || typeof parsed.sessions !== "object") {
           this.log.warn("State file has invalid shape, starting fresh");
+          this.quarantineStateFile("invalid shape");
           return newDaemonState();
         }
         // Validate each session entry — drop malformed entries instead of crashing
@@ -317,6 +340,7 @@ export class StateManager {
       this.log.warn(`Failed to load state from ${this.statePath}, starting fresh`, {
         error: String(err),
       });
+      if (existsSync(this.statePath)) this.quarantineStateFile(String(err));
     }
     return newDaemonState();
   }
