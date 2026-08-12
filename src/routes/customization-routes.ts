@@ -39,6 +39,35 @@ function statMeta(path: string): FileMeta {
   }
 }
 
+/**
+ * Mangle an absolute project path into the key Claude Code uses for
+ * ~/.claude/projects/<key>.
+ *
+ * The class must cover backslash and colon, not just `[/.]`. On Windows every
+ * project path is `C:\\Users\\me\\proj`: a POSIX-only class left the
+ * separators intact, so the computed key never matched a real directory and
+ * per-project memories silently resolved to nothing. A colon additionally
+ * cannot appear in a Windows directory name at all, so leaving it guaranteed
+ * an unopenable path.
+ *
+ * The POSIX form is verified against real ~/.claude/projects directories. The
+ * Windows form is deterministic and legal but has not been checked against a
+ * real Claude Code install on Windows — if it ever disagrees, this is the one
+ * function to change.
+ */
+export function mangleProjectKey(projectPath: string): string {
+  return "-" + projectPath.replace(/[/\\.:]/g, "-").replace(/^-+/, "");
+}
+
+/**
+ * Last path segment of a project directory, for display.
+ * `split("/")` returned the whole `C:\\Users\\me\\proj` string on Windows.
+ */
+export function projectLabel(projectPath: string): string {
+  const parts = projectPath.split(/[/\\]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : projectPath;
+}
+
 /** Regex for env key names that should be redacted in API responses */
 const SENSITIVE_ENV_KEYS = /KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL/i;
 
@@ -352,7 +381,7 @@ export class CustomizationRoutes {
         const projAgents = join(projectPath, "AGENTS.md");
         if (existsSync(projAgents)) {
           agentsMdFiles.push({
-            label: `Project: ${projectPath.split("/").pop() ?? projectPath}`,
+            label: `Project: ${projectLabel(projectPath)}`,
             path: projAgents,
             scope: "project",
             consumers: ["Claude Code", "Codex", "OpenCode"],
@@ -360,7 +389,7 @@ export class CustomizationRoutes {
           });
         }
         // Some projects stash a per-project override under ~/.claude/projects/{mangled}/AGENTS.md
-        const mangled = "-" + projectPath.replace(/[/.]/g, "-").replace(/^-+/, "");
+        const mangled = mangleProjectKey(projectPath);
         const projectOverride = join(claudeDir, "projects", mangled, "AGENTS.md");
         if (existsSync(projectOverride)) {
           agentsMdFiles.push({
@@ -406,7 +435,7 @@ export class CustomizationRoutes {
       if (existsSync(projectsDir)) {
         try {
           const mangledProject = projectPath
-            ? "-" + projectPath.replace(/[/.]/g, "-").replace(/^-+/, "")
+            ? mangleProjectKey(projectPath)
             : null;
           for (const d of readdirSync(projectsDir)) {
             if (mangledProject && d !== mangledProject) continue;
@@ -440,7 +469,7 @@ export class CustomizationRoutes {
       if (projectPath) {
         const projMd = join(projectPath, "CLAUDE.md");
         if (existsSync(projMd)) {
-          claudeMds.push({ label: `Project: ${projectPath.split("/").pop() ?? projectPath}`, path: projMd, scope: "project", ...statMeta(projMd) });
+          claudeMds.push({ label: `Project: ${projectLabel(projectPath)}`, path: projMd, scope: "project", ...statMeta(projMd) });
         }
       }
 
@@ -644,7 +673,7 @@ export class CustomizationRoutes {
         // Auto-memory snapshots for this project (~/.claude/projects/{mangled}/memory/*.md).
         // The mangled key is the project path with /., replaced by - and any leading -
         // stripped, mirroring how Claude Code records the project in history.jsonl.
-        const mangled = "-" + proj.path.replace(/[/.]/g, "-").replace(/^-+/, "");
+        const mangled = mangleProjectKey(proj.path);
         const autoMemDir = join(claudeDir, "projects", mangled, "memory");
         if (existsSync(autoMemDir)) {
           try {

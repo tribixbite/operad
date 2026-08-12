@@ -147,6 +147,20 @@ function makeFaultyProvider(failAt: { fetch?: boolean; read?: boolean }): Provid
   };
 }
 
+/**
+ * Initialise a git repo with one tagged commit.
+ *
+ * Separate invocations rather than one `a && b \\` string: execSync uses
+ * cmd.exe on Windows, which cannot parse a backslash-newline continuation.
+ */
+function initFixtureRepo(cwd: string): void {
+  const run = (args: string) => execSync(`git ${args}`, { cwd, stdio: "ignore" });
+  run("init -q");
+  run("add .");
+  run('-c user.name=t -c user.email=t@t.co commit -q -m init');
+  run("tag v0.1.0");
+}
+
 beforeAll(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "operad-skills-crash-home-"));
   // Explicit seams — mock.module("node:os") does not reach modules that bound
@@ -163,9 +177,7 @@ beforeAll(() => {
     join(fixtureRepo, ".operad", "operad.toml"),
     `[skill]\nname = "crash-fixture"\n\n[[tool]]\nname = "crash_echo"\ndescription = "echo"\ncommand = "echo {{x}}"\n  [[tool.params]]\n  name = "x"\n  type = "string"\n  required = true\n`,
   );
-  execSync(`git init -q && git add . && \
-    git -c user.name=t -c user.email=t@t.co commit -q -m init && \
-    git tag v0.1.0`, { cwd: fixtureRepo, stdio: "ignore" });
+  initFixtureRepo(fixtureRepo);
 });
 
 afterAll(() => {
@@ -233,9 +245,9 @@ function assertNoOrphans(env: ReturnType<typeof buildEnv>) {
   }
 }
 
-// Real git + on-disk install/rollback uses POSIX path layouts; the skill
-// marketplace targets the Termux/Linux/macOS daemon, so this is POSIX-only.
-describe.skipIf(process.platform === "win32")("Phase E.4 — install transaction rollback under fault injection", () => {
+// Real git + on-disk install/rollback. Previously skipped on Windows, so the
+// rollback paths had no coverage on a platform the CI matrix builds for.
+describe("Phase E.4 — install transaction rollback under fault injection", () => {
   test("fetch step failure leaves no orphan state", async () => {
     const env = buildEnv(makeFaultyProvider({ fetch: true }));
     await expect(env.mgr.install("git+url", fixtureRepo, "v0.1.0"))
@@ -277,9 +289,7 @@ describe.skipIf(process.platform === "win32")("Phase E.4 — install transaction
         join(r, ".operad", "operad.toml"),
         `[skill]\nname = "multi-${i}"\n\n[[tool]]\nname = "multi_${i}"\ndescription = "echo"\ncommand = "echo {{x}}"\n  [[tool.params]]\n  name = "x"\n  type = "string"\n  required = true\n`,
       );
-      execSync(`git init -q && git add . && \
-        git -c user.name=t -c user.email=t@t.co commit -q -m init && \
-        git tag v0.1.0`, { cwd: r, stdio: "ignore" });
+  initFixtureRepo(r);
       repos.push(r);
     }
 

@@ -38,7 +38,10 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 import { McpRoutes } from "../routes/mcp-routes.js";
-import { CustomizationRoutes } from "../routes/customization-routes.js";
+import { CustomizationRoutes,
+  mangleProjectKey,
+  projectLabel,
+} from "../routes/customization-routes.js";
 import { RestHandler } from "../rest-handler.js";
 import { ToolEngine } from "../tool-engine.js";
 import {
@@ -807,5 +810,63 @@ describe("RestHandler — GET/POST /api/customization-file", () => {
     const h = buildH();
     const res = await h.handleDashboardApi("DELETE", "/api/customization-file", "");
     expect(res.status).toBe(405);
+  });
+});
+
+// -- cross-platform project path handling -----------------------------------
+//
+// Claude Code keys per-project state as ~/.claude/projects/<mangled>. The
+// mangling replaced [/.] only, so on Windows — where every project path is
+// C:\Users\me\proj — the separators survived, the computed key never matched
+// a real directory, and per-project memories silently resolved to nothing.
+
+describe("mangleProjectKey", () => {
+  test("POSIX paths mangle as before", () => {
+    expect(mangleProjectKey("/home/u/git/proj")).toBe("-home-u-git-proj");
+  });
+
+  test("dots become dashes", () => {
+    expect(mangleProjectKey("/home/u/my.proj")).toBe("-home-u-my-proj");
+  });
+
+  test("Windows separators and the drive colon are mangled", () => {
+    // A colon cannot appear in a Windows directory name, so leaving it would
+    // produce a key that can never be opened.
+    expect(mangleProjectKey("C:\\Users\\me\\proj")).toBe("-C--Users-me-proj");
+  });
+
+  test("the result never contains a colon", () => {
+    expect(mangleProjectKey("C:\\a")).not.toContain(":");
+  });
+
+  test("leading separators collapse to a single dash", () => {
+    expect(mangleProjectKey("///a")).toBe("-a");
+  });
+
+  test("the result never contains a path separator", () => {
+    for (const p of ["/a/b", "C:\\a\\b", "\\\\server\\share\\x"]) {
+      const k = mangleProjectKey(p);
+      expect(k).not.toContain("/");
+      expect(k).not.toContain("\\");
+    }
+  });
+});
+
+describe("projectLabel", () => {
+  test("returns the last POSIX segment", () => {
+    expect(projectLabel("/home/u/git/operad")).toBe("operad");
+  });
+
+  test("returns the last Windows segment rather than the whole path", () => {
+    expect(projectLabel("C:\\Users\\me\\operad")).toBe("operad");
+  });
+
+  test("a trailing separator does not produce an empty label", () => {
+    expect(projectLabel("/home/u/operad/")).toBe("operad");
+    expect(projectLabel("C:\\Users\\me\\operad\\")).toBe("operad");
+  });
+
+  test("a bare name is returned unchanged", () => {
+    expect(projectLabel("operad")).toBe("operad");
   });
 });

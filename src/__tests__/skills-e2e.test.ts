@@ -143,6 +143,21 @@ function setupDb(): Database {
   return sql;
 }
 
+/**
+ * Initialise a git repo with one tagged commit.
+ *
+ * Each command runs separately rather than as one `a && b \\` shell string:
+ * execSync uses cmd.exe on Windows, which does not understand a
+ * backslash-newline continuation, so the chained form could never work there.
+ */
+function initFixtureRepo(cwd: string): void {
+  const run = (args: string) => execSync(`git ${args}`, { cwd, stdio: "ignore" });
+  run("init -q");
+  run("add .");
+  run('-c user.name=t -c user.email=t@t.co commit -q -m init');
+  run("tag v0.1.0");
+}
+
 beforeAll(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "operad-skills-e2e-home-"));
   // Explicit seams: mock.module("node:os") only reaches modules that resolve
@@ -185,9 +200,7 @@ name = "e2e-workflow"
   );
 
   // git init + commit + tag.
-  execSync(`git init -q && git add . && \
-    git -c user.name=t -c user.email=t@t.co commit -q -m init && \
-    git tag v0.1.0`, { cwd: fixtureRepo, stdio: "ignore" });
+  initFixtureRepo(fixtureRepo);
 
   // Wire daemon-side dependencies.
   memSql = setupDb();
@@ -223,11 +236,14 @@ afterAll(() => {
 
 // -- Test --------------------------------------------------------------------
 
-// Real git clone/checkout + on-disk skill install exercise POSIX path layouts
-// (file:// URLs, "/"-separated cache paths). The skill marketplace targets the
-// Termux/Linux/macOS daemon; verifying its disk plumbing on Windows is out of
-// scope, so this end-to-end suite is POSIX-only.
-describe.skipIf(process.platform === "win32")("Phase E.3 end-to-end install/use/uninstall (git+url + real disk)", () => {
+// Real git clone/checkout + on-disk skill install.
+//
+// This was skipped on Windows, which left the skill marketplace with zero
+// coverage on a platform the CI matrix builds for. The fixtures are now
+// shell-agnostic (separate git invocations rather than a `&&` chain with
+// backslash continuations, which cmd.exe cannot parse) and the locator and
+// cache-path handling is separator-aware, so it runs wherever git does.
+describe("Phase E.3 end-to-end install/use/uninstall (git+url + real disk)", () => {
   test("install → list → tool registered → workflow registered → uninstall → cleaned up", async () => {
     // Pre-flight sanity.
     expect(toolExecutor.hasTool("e2e_echo")).toBe(false);
@@ -278,9 +294,7 @@ describe.skipIf(process.platform === "win32")("Phase E.3 end-to-end install/use/
       join(conflictRepo, ".operad", "operad.toml"),
       `[skill]\nname = "conflict-fixture"\n\n[[tool]]\nname = "e2e_echo"\ndescription = "different impl"\ncommand = "true"\n`,
     );
-    execSync(`git init -q && git add . && \
-      git -c user.name=t -c user.email=t@t.co commit -q -m init && \
-      git tag v0.1.0`, { cwd: conflictRepo, stdio: "ignore" });
+    initFixtureRepo(conflictRepo);
     await expect(mgr.install("git+url", conflictRepo, "v0.1.0"))
       .rejects.toThrow(/TOOL_NAME_CONFLICT/);
     rmSync(conflictRepo, { recursive: true, force: true });
