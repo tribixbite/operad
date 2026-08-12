@@ -11,6 +11,13 @@ boot_timeout_s = 300
 process_budget = 32
 wake_lock_policy = "active_sessions"   # always | active_sessions | boot_only | never
 dashboard_port = 18970
+# Interface the dashboard binds to. Loopback by default: the API can start and
+# kill processes and install skills, so exposing it is opt-in. Access always
+# requires the token from `operad token`, on any interface.
+bind = "127.0.0.1"
+# Browser origins allowed to make cross-origin API calls. The dashboard itself
+# is same-origin and needs no entry here.
+allowed_origins = []
 memory_warning_mb = 2000
 memory_critical_mb = 1200
 memory_emergency_mb = 800

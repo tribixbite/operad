@@ -2,6 +2,115 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-08-12
+
+A security and correctness release. Four independent audits covered the skill
+marketplace, the agent/cognitive subsystem, workflow/tools/scheduling, and
+session lifecycle/monitoring; this is the result of working the findings in
+severity order.
+
+### Breaking
+
+- **The dashboard API now requires a token and binds `127.0.0.1`.** Run
+  `operad token` for the URL. Set `[operad] bind = "0.0.0.0"` to expose it on
+  the network — still token-gated. The wildcard CORS header is gone; use
+  `[operad] allowed_origins` if a foreign browser origin genuinely needs access.
+- **Workflow `needs: [a, b]` now means AND, not OR.** A node with several
+  incoming edges runs only when all of them fire. Set `join: "any"` on the node
+  for the old fan-in behaviour. The previous reading meant a deploy node ran
+  after its test dependency had failed.
+- **`adb.enabled` now defaults to the platform's ADB capability** rather than
+  `true` everywhere. Set it explicitly to drive a phone from a desktop.
+- **`GET /api/customization-file` serves only `.md`/`.markdown`/`.txt`**, and
+  `POST /api/customization/import` requires `Content-Type: application/json`.
+- **A project's `.claude/agents/*.json` no longer replaces a builtin or enables
+  it implicitly** — it merges, and only an explicit `enabled` changes the flag.
+- **Agent-state import rejects `mode: "replace"`** instead of silently merging.
+- Snapshot filenames now carry a time (`YYYY-MM-DDTHHMMSS`). Existing
+  date-only files are still readable.
+
+### Security
+
+- Dashboard API authentication (Jupyter-style token → `SameSite=Strict`
+  cookie), loopback default bind, origin allowlist, and a gated WebSocket
+  upgrade — previously an unauthenticated side door onto the same command
+  surface.
+- Shell injection closed in `grep-search`, `diff-files`, `notify` and the tmux
+  capture. `JSON.stringify` produces *double* quotes, and sh still expands
+  `$( )`, backticks and `$VAR` inside those. The first two are `analyze` and
+  the tmux one is `observe` — all auto-approved at every autonomy level, so an
+  ostensibly read-only tool was arbitrary code execution.
+- The autonomy gate is now enforced. `isAutoApproved` existed and was never
+  called from anywhere, so `allowed_tool_categories`, `autonomy_level` and
+  `protected_tools` only affected what the prompt advertised.
+- `isAllowedPath` no longer admits the whole home directory. `file-read`
+  (auto-approved everywhere) could read `~/.claude.json`, `~/.npmrc`,
+  `~/.netrc` and `~/.git-credentials`; `file-write` could append hooks to
+  `~/.claude/settings.json` or a `[[tool]]` block to operad's own config.
+- Package names reaching `adb shell` are validated — the remote argv is
+  re-parsed by the device's shell, so argv separation locally is not enough.
+- ADB app control asserts a local target; with a second phone attached,
+  memory pressure force-stopped apps on it.
+
+### Fixed — destructive behaviour
+
+- `operad cleanup` ran `pkill -9 -f` with patterns guessed from the session
+  command, including `chromium.*--type=` and `xfce4-session` — killing every
+  Chromium renderer or the whole desktop. Patterns are now opt-in per session
+  and each PID is signalled individually so the daemon can exclude itself.
+- The boot sweep killed the user's `crond`. It counted `[crond]` zombies and
+  ran `pkill -9 crond`; a zombie cannot be signalled, so the only thing it
+  could kill was the live daemon. Removed.
+- A failed memory or battery read no longer reads as an emergency. Missing
+  fields defaulted to 0 — "no memory left" and "flat battery" — which SIGSTOPped
+  every idle session on a 5s timer with no recovery, and turned off wifi and
+  mobile data.
+- Memory shedding skips sessions with an attached tmux client and never
+  suspends a tree containing the daemon itself.
+- Adopted PIDs are verified before signalling; a stale entry could
+  `SIGTERM` an unrelated process group after PID reuse.
+
+### Fixed — correctness
+
+- Cron day-of-month/day-of-week now follows POSIX. `0 9 * * 1` fired *every
+  day*, so weekly agent schedules burned 7× the tokens.
+- Scheduled runs are no longer re-entered while still executing, transient
+  deferrals (SDK busy, quota) no longer count toward auto-disable, and
+  `upsert` returns the right id.
+- Workflow task timeouts work: tasks run in their own process group and the
+  promise settles on the timeout instead of waiting for pipes a backgrounded
+  grandchild holds open.
+- A duplicate workflow edge no longer deadlocks its target while the run
+  reports success.
+- Auto-restart timers are cancellable and re-validate before firing; they were
+  killing sessions the user had just started.
+- Adopted agent sessions no longer fail health on every sweep and spawn a
+  second agent in the same directory.
+- Snapshots are restorable (`POST /api/agents/<name>/restore`), no longer
+  overwrite same-day copies, and `pruneSnapshots` no longer deletes files it
+  did not create.
+- Agent-state import replays strategies oldest-first (the active one was the
+  oldest), dedupes on re-import, and honours `prefer_import`.
+- Tool execution no longer blocks the daemon's event loop.
+- History tables are pruned on a daily cadence; none had any retention.
+
+### Added
+
+- `operad token`, `POST /api/agents/<name>/restore`, `GET /api/env`,
+  `GET /api/skills/search` (+ `skill.search` IPC and `operad skill search`).
+- Environment migration: `GET /api/customization/export` /
+  `POST /api/customization/import` carry document content and marketplace
+  sources, with a "Migrate environment" section in Settings.
+
+### Platform
+
+- Windows: project-path keys mangle `\` and the drive colon, so per-project
+  memories resolve; the two marketplace suites now run there instead of being
+  skipped.
+- macOS/Windows: process liveness goes through the platform layer. `/proc`
+  checks always answered "dead", so adopted sessions flapped permanently.
+- Off-Android hosts no longer run a doomed ADB connect script on every boot.
+
 ## [0.4.9] - 2026-08-10
 
 ### Fixed — skill marketplace hardening

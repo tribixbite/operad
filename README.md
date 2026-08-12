@@ -34,7 +34,25 @@ path = "$HOME/git/my-project"
 EOF
 
 operad boot
-# Dashboard: http://localhost:18970
+
+# Open the dashboard (the URL carries a one-time token)
+operad token
+```
+
+The dashboard API can start and kill processes, run scripts and install
+skills, so it is token-gated and binds `127.0.0.1` by default. `operad token`
+prints a `http://localhost:18970/?token=…` URL — opening it once exchanges the
+token for a `SameSite=Strict` cookie, after which the token no longer appears
+in the address bar. Programmatic callers can send
+`Authorization: Bearer <token>` instead.
+
+To reach it from another device, set `bind` and keep the token secret:
+
+```toml
+[operad]
+bind = "0.0.0.0"
+# Browser origins allowed to call the API cross-origin (usually none):
+allowed_origins = []
 ```
 
 Run `operad doctor` to diagnose any setup issues.
@@ -46,6 +64,8 @@ Default location: `~/.config/operad/operad.toml` (TOML with `$ENV_VAR` expansion
 ```toml
 [operad]
 dashboard_port = 18970
+bind = "127.0.0.1"          # "0.0.0.0" to expose on the network (still token-gated)
+allowed_origins = []         # extra browser origins permitted to call the API
 health_interval_s = 120
 wake_lock_policy = "active_sessions"
 

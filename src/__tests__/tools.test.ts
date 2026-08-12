@@ -1309,8 +1309,11 @@ describe("ToolExecutor — event loop and cancellation", () => {
     const r = await te.execute("slowtool", {}, { agentName: "a", autonomyLevel: "autonomous" } as any);
     clearInterval(timer);
     expect(r.success).toBe(true);
-    // ~20 ticks expected in 1s; anything above a handful proves the loop ran.
-    expect(ticks).toBeGreaterThan(5);
+    // The distinction that matters is zero vs non-zero: execSync yielded no
+    // ticks at all. A loaded CI box can deliver far fewer than the ~20 a quiet
+    // machine sees, so assert only that the loop ran — a tighter bound here
+    // buys nothing and flakes under load.
+    expect(ticks).toBeGreaterThan(0);
     sql.close();
   });
 

@@ -4,6 +4,41 @@
 
 ## REST API
 
+### Authentication
+
+Every `/api/*` route requires the dashboard token. The daemon binds
+`127.0.0.1` by default; `[operad] bind` opts into wider exposure and the token
+is required either way.
+
+```sh
+operad token                       # prints the URL, the bare token, and the header form
+curl -H "Authorization: Bearer $TOKEN" http://localhost:18970/api/status
+```
+
+Browsers use the one-time handshake instead: opening
+`http://host:18970/?token=<token>` exchanges it for an `HttpOnly;
+SameSite=Strict` cookie and redirects to a clean URL. `SameSite=Strict` is what
+makes the API CSRF-resistant — a cross-site page cannot cause the browser to
+attach the cookie at all.
+
+`EventSource` and browser `WebSocket` cannot set headers, so `?token=<token>`
+is also accepted on `/api/*`. The WebSocket upgrade is gated identically; an
+unauthenticated upgrade is refused with `401`.
+
+Unauthenticated requests get `401` with `WWW-Authenticate: Bearer`. Static
+dashboard assets are served without auth — they are public code, and the
+handshake requires the page to load first. Everything that exposes data or
+performs an action is under `/api`.
+
+The token lives in `<state_dir>/dashboard-token` (mode 0600), not in
+`operad.toml` — configs get pasted into issues and committed to dotfile repos.
+`OPERAD_DASHBOARD_TOKEN` overrides it for containers and CI.
+
+CORS: no `Access-Control-Allow-Origin` header is emitted unless the request's
+origin is in `[operad] allowed_origins`. Same-origin needs none.
+
+
+
 Base URL: `http://localhost:18970` (port configurable via `dashboard_port` in `operad.toml`)
 
 All requests and responses use `application/json`. CORS headers are set to `*`.
@@ -328,6 +363,25 @@ Write a file.
 Body: `{ "path": "string", "content": "string" }`
 
 Paths must satisfy the same allowlist as the GET variant.
+
+#### `GET /api/env`
+
+Host facts the dashboard needs for display: `home`, `platform`, `path_sep`.
+Exists because several panels shorten absolute paths to `~/…` and previously
+hardcoded the Termux home, so every path rendered in full on other platforms.
+
+#### `POST /api/agents/<name>/restore`
+
+Restore an agent from a snapshot. Body: `{ file?, options? }` — `file` defaults
+to the newest and must be one of `GET /api/agents/<name>/snapshots`, which is
+what prevents a traversal. The import is pinned to the agent in the URL.
+
+#### `GET /api/skills/search?q=&provider=&limit=`
+
+Discover installable skills across providers. Only `mcp-official` and
+`operad-curated` have an index; `git+url` and `claude-marketplace` return
+nothing. A provider that fails contributes to `errors[]` rather than failing
+the whole search.
 
 #### `GET /api/customization/export[?project=<path>]`
 
