@@ -354,22 +354,37 @@ function mergeSimilarLearnings(db: MemoryDb, agentName: string): number {
       if (!contentsAreSimilar(c.content, existing.content)) {
         continue;
       }
-      // Merge: keep the one with higher confidence, delete the other
-      if (c.confidence > existing.confidence) {
-        // New one is better — delete old, update map
-        dbHandle.prepare(`DELETE FROM agent_learnings WHERE id = ?`).run(existing.id);
-        // Boost the surviving learning
+      // Merge: keep the one with higher confidence, delete the other.
+      //
+      // The delete and the credit are one invariant — a learning may only
+      // disappear if its reinforcement count lands on the survivor — so they
+      // run in a transaction. Two bare statements could lose the row and not
+      // the credit if the second failed.
+      const winner = c.confidence > existing.confidence ? c : existing;
+      const loser = c.confidence > existing.confidence ? existing : c;
+
+      dbHandle.exec("BEGIN");
+      try {
+        dbHandle.prepare(`DELETE FROM agent_learnings WHERE id = ?`).run(loser.id);
         dbHandle.prepare(
           `UPDATE agent_learnings SET reinforcement_count = reinforcement_count + ? WHERE id = ?`,
-        ).run(existing.reinforcement_count + 1, c.id);
-        seen.set(key, { id: c.id, confidence: c.confidence, reinforcement_count: c.reinforcement_count + existing.reinforcement_count + 1, content: c.content });
-      } else {
-        // Existing is better — delete new
-        dbHandle.prepare(`DELETE FROM agent_learnings WHERE id = ?`).run(c.id);
-        dbHandle.prepare(
-          `UPDATE agent_learnings SET reinforcement_count = reinforcement_count + ? WHERE id = ?`,
-        ).run(c.reinforcement_count + 1, existing.id);
+        ).run(loser.reinforcement_count + 1, winner.id);
+        dbHandle.exec("COMMIT");
+      } catch (err) {
+        try { dbHandle.exec("ROLLBACK"); } catch { /* already unwound */ }
+        throw err;
       }
+
+      // Keep the map in step with the database. The "existing wins" branch
+      // used to leave a stale reinforcement_count behind, so a third row
+      // matching the same key credited the survivor from an out-of-date
+      // total.
+      seen.set(key, {
+        id: winner.id,
+        confidence: winner.confidence,
+        reinforcement_count: winner.reinforcement_count + loser.reinforcement_count + 1,
+        content: winner.content,
+      });
       merged++;
     } else {
       seen.set(key, { id: c.id, confidence: c.confidence, reinforcement_count: c.reinforcement_count, content: c.content });

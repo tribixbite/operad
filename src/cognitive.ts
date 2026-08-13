@@ -417,6 +417,55 @@ export function buildOodaPrompt(ctx: OodaContext): string {
 const MIN_SCHEDULE_DELAY_MIN = 1;
 const MAX_SCHEDULE_DELAY_MIN = 35_791;
 
+/**
+ * Most actions honoured from a single response.
+ *
+ * Every block is a database write, and several are re-read into later
+ * prompts. A response emitting thousands of blocks — a model looping on
+ * itself — would otherwise be applied in full, in one synchronous pass.
+ */
+const MAX_ACTIONS_PER_RESPONSE = 50;
+
+/**
+ * Per-field length caps, in characters.
+ *
+ * These fields are model-authored, persisted, and — critically — re-injected
+ * into every later prompt for that agent: learnings appear under "Accumulated
+ * Knowledge", the strategy under "Your Current Strategy", personality
+ * evidence under the profile, unread message bodies in the OODA context. With
+ * no cap, one oversized block permanently inflated the prompt (and therefore
+ * the bill) for every subsequent run of that agent, with no way to notice
+ * beyond watching the token count climb.
+ *
+ * Truncation is preferable to dropping the block: the agent's intent survives
+ * in the first N characters, and a silently discarded learning is harder to
+ * diagnose than a clipped one.
+ */
+const FIELD_LIMITS = {
+  goalTitle: 200,
+  goalDescription: 2_000,
+  decisionAction: 500,
+  decisionRationale: 2_000,
+  decisionOutcome: 1_000,
+  messageContent: 4_000,
+  strategyText: 8_000,
+  learningContent: 2_000,
+  learningCategory: 100,
+  personalityEvidence: 500,
+  schedulePrompt: 8_000,
+  scheduleName: 200,
+} as const;
+
+/** Clamp a model-authored field, marking it so a reader knows it was cut. */
+function clamp(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}… [truncated]`;
+}
+
+/** Clamp an optional field, preserving undefined. */
+function clampOpt(value: string | undefined, max: number): string | undefined {
+  return value === undefined ? undefined : clamp(value, max);
+}
+
 export function parseOodaResponse(text: string): OodaAction[] {
   const actions: OodaAction[] = [];
 
@@ -425,6 +474,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
   let match: RegExpExecArray | null;
 
   while ((match = blockPattern.exec(text)) !== null) {
+    if (actions.length >= MAX_ACTIONS_PER_RESPONSE) break;
     const [, blockType, body] = match;
     const fields = parseBlockFields(body);
 
@@ -433,8 +483,8 @@ export function parseOodaResponse(text: string): OodaAction[] {
         if (fields.title) {
           actions.push({
             type: "goal",
-            title: fields.title,
-            description: fields.description,
+            title: clamp(fields.title, FIELD_LIMITS.goalTitle),
+            description: clampOpt(fields.description, FIELD_LIMITS.goalDescription),
             priority: fields.priority ? parseInt(fields.priority, 10) : undefined,
             parentId: fields.parent_id ? parseInt(fields.parent_id, 10) : undefined,
           });
@@ -445,10 +495,10 @@ export function parseOodaResponse(text: string): OodaAction[] {
         if (fields.action && fields.rationale) {
           actions.push({
             type: "decision",
-            action: fields.action,
-            rationale: fields.rationale,
-            alternatives: fields.alternatives,
-            expectedOutcome: fields.expected_outcome,
+            action: clamp(fields.action, FIELD_LIMITS.decisionAction),
+            rationale: clamp(fields.rationale, FIELD_LIMITS.decisionRationale),
+            alternatives: clampOpt(fields.alternatives, FIELD_LIMITS.decisionOutcome),
+            expectedOutcome: clampOpt(fields.expected_outcome, FIELD_LIMITS.decisionOutcome),
             goalId: fields.goal_id ? parseInt(fields.goal_id, 10) : undefined,
           });
         }
@@ -460,7 +510,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
             type: "message",
             to: fields.to,
             messageType: fields.type ?? "info",
-            content: fields.content,
+            content: clamp(fields.content, FIELD_LIMITS.messageContent),
           });
         }
         break;
@@ -469,8 +519,8 @@ export function parseOodaResponse(text: string): OodaAction[] {
         if (fields.text && fields.rationale) {
           actions.push({
             type: "strategy",
-            text: fields.text,
-            rationale: fields.rationale,
+            text: clamp(fields.text, FIELD_LIMITS.strategyText),
+            rationale: clamp(fields.rationale, FIELD_LIMITS.decisionRationale),
           });
         }
         break;
@@ -498,10 +548,10 @@ export function parseOodaResponse(text: string): OodaAction[] {
         if (fields.name && fields.prompt) {
           actions.push({
             type: "persistent_schedule",
-            name: fields.name,
+            name: clamp(fields.name, FIELD_LIMITS.scheduleName),
             cronExpr: fields.cron ?? fields.cron_expr,
             intervalMinutes: fields.interval_minutes ? parseInt(fields.interval_minutes, 10) : undefined,
-            prompt: fields.prompt,
+            prompt: clamp(fields.prompt, FIELD_LIMITS.schedulePrompt),
             maxBudgetUsd: fields.max_budget_usd ? parseFloat(fields.max_budget_usd) : undefined,
           });
         }
@@ -511,8 +561,8 @@ export function parseOodaResponse(text: string): OodaAction[] {
         if (fields.content && fields.category) {
           actions.push({
             type: "learning",
-            content: fields.content,
-            category: fields.category,
+            content: clamp(fields.content, FIELD_LIMITS.learningContent),
+            category: clamp(fields.category, FIELD_LIMITS.learningCategory),
             confidence: fields.confidence ? parseFloat(fields.confidence) : undefined,
           });
         }
@@ -522,9 +572,9 @@ export function parseOodaResponse(text: string): OodaAction[] {
         if (fields.trait && fields.value) {
           actions.push({
             type: "personality",
-            trait: fields.trait,
+            trait: clamp(fields.trait, FIELD_LIMITS.learningCategory),
             value: parseFloat(fields.value),
-            evidence: fields.evidence ?? "",
+            evidence: clamp(fields.evidence ?? "", FIELD_LIMITS.personalityEvidence),
           });
         }
         break;

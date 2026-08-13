@@ -785,3 +785,66 @@ describe("buildReflectionPrompt — DB-backed stubs", () => {
     expect(prompt).toContain("Emit `learning`, `personality`, and `strategy` blocks with your insights.");
   });
 });
+
+describe("mergeSimilarLearnings — three-way merge accounting", () => {
+  test("a third duplicate credits the survivor from an up-to-date total", () => {
+    // The "existing wins" branch used to leave the in-memory map holding a
+    // stale reinforcement_count, so a third matching row credited the
+    // survivor from an out-of-date figure and the total came out short.
+    const raw = db.requireDb();
+    const insert = (content: string, confidence: number, reinforced: number, hash: string) =>
+      raw.prepare(
+        `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, reinforcement_count)
+         VALUES ('merger','perf',?,?,?,?)`,
+      ).run(content, hash, confidence, reinforced);
+
+    // Distinct full hashes sharing an 8-char prefix — the schema has a UNIQUE
+    // on (agent_name, content_hash), and grouping keys on the prefix. Rows are
+    // walked in content_hash order, so the ORDER here is the merge order.
+    //
+    // The confidences matter: the highest-confidence row must come LAST, so a
+    // merge happens first and is then followed by a row that WINS. That is
+    // the only path that reads the map's reinforcement_count, and the only
+    // one the staleness corrupted.
+    insert("Batch the writes.", 0.5, 1, "aaaaaaaa-1");
+    insert("batch the writes", 0.4, 7, "aaaaaaaa-2");
+    insert("BATCH THE WRITES!", 0.9, 2, "aaaaaaaa-3"); // wins last
+
+    runConsolidation(db, ["merger"], silentLog());
+
+    const rows = raw.prepare(
+      `SELECT confidence, reinforcement_count FROM agent_learnings WHERE agent_name='merger'`,
+    ).all() as Array<{ confidence: number; reinforcement_count: number }>;
+
+    // One row survives, carrying every merged row's count plus one per merge:
+    // 1 + 7 + 2 + 2 merges = 12. With the stale map the final credit was
+    // computed from the pre-merge count (1) instead of the real one (9), and
+    // the survivor came out at 4.
+    expect(rows.length).toBe(1);
+    expect(rows[0].confidence).toBeCloseTo(0.9, 4);
+    expect(rows[0].reinforcement_count).toBe(12);
+  });
+
+  test("unrelated learnings sharing a hash prefix are never merged", () => {
+    // An 8-char prefix is 32 bits; addLearning already dedupes on the full
+    // hash, so a prefix match between survivors is a birthday collision.
+    const raw = db.requireDb();
+    const pairs: Array<[string, string]> = [
+      ["cache the lookup", "bbbbbbbb-1"],
+      ["rotate the api keys", "bbbbbbbb-2"],
+    ];
+    for (const [content, hash] of pairs) {
+      raw.prepare(
+        `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, reinforcement_count)
+         VALUES ('collider','sec',?,?,0.7,1)`,
+      ).run(content, hash);
+    }
+
+    runConsolidation(db, ["collider"], silentLog());
+
+    const count = raw.prepare(
+      `SELECT COUNT(*) c FROM agent_learnings WHERE agent_name='collider'`,
+    ).get() as any;
+    expect(count.c).toBe(2);
+  });
+});

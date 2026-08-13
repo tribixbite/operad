@@ -1107,3 +1107,76 @@ describe("buildOodaPrompt", () => {
     expect(prompt).toContain("↓");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Model-authored fields are bounded
+//
+// These fields are persisted AND re-injected into every later prompt for the
+// agent — learnings under "Accumulated Knowledge", the strategy under "Your
+// Current Strategy", unread message bodies in the OODA context. Without a cap
+// a single oversized block permanently inflated the prompt, and therefore the
+// bill, for every subsequent run, with nothing to notice but a climbing token
+// count.
+// ---------------------------------------------------------------------------
+
+describe("parseOodaResponse — field length caps", () => {
+  const huge = "x".repeat(50_000);
+
+  test("a giant learning is truncated, not stored whole", () => {
+    const [action] = parseOodaResponse(
+      "```learning\ncategory: perf\ncontent: " + huge + "\nconfidence: 0.5\n```",
+    );
+    expect(action.type).toBe("learning");
+    const content = (action as { content: string }).content;
+    expect(content.length).toBeLessThan(huge.length);
+    expect(content).toEndWith("[truncated]");
+  });
+
+  test("a giant strategy is truncated", () => {
+    const [action] = parseOodaResponse(
+      "```strategy\ntext: " + huge + "\nrationale: because\n```",
+    );
+    expect((action as { text: string }).text.length).toBeLessThan(huge.length);
+  });
+
+  test("a giant message body is truncated", () => {
+    const [action] = parseOodaResponse(
+      "```message\nto: master-controller\ncontent: " + huge + "\n```",
+    );
+    expect((action as { content: string }).content.length).toBeLessThan(huge.length);
+  });
+
+  test("truncation keeps the beginning, so intent survives", () => {
+    const [action] = parseOodaResponse(
+      "```learning\ncategory: perf\ncontent: BATCH THE WRITES " + huge + "\n```",
+    );
+    expect((action as { content: string }).content).toStartWith("BATCH THE WRITES");
+  });
+
+  test("normal-sized content is untouched", () => {
+    const [action] = parseOodaResponse(
+      "```learning\ncategory: perf\ncontent: batch the writes\nconfidence: 0.6\n```",
+    );
+    expect((action as { content: string }).content).toBe("batch the writes");
+  });
+
+  test("a response with thousands of blocks is capped", () => {
+    // Every block is a database write applied in one synchronous pass.
+    const many = Array.from(
+      { length: 500 },
+      (_, i) => "```learning\ncategory: c\ncontent: item " + i + "\n```",
+    ).join("\n");
+    const actions = parseOodaResponse(many);
+    expect(actions.length).toBeGreaterThan(0);
+    expect(actions.length).toBeLessThanOrEqual(50);
+  });
+
+  test("the cap keeps the FIRST actions, not a random slice", () => {
+    const many = Array.from(
+      { length: 100 },
+      (_, i) => "```learning\ncategory: c\ncontent: item " + i + "\n```",
+    ).join("\n");
+    const actions = parseOodaResponse(many);
+    expect((actions[0] as { content: string }).content).toBe("item 0");
+  });
+});
