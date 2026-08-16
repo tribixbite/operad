@@ -399,7 +399,20 @@ async function runUpgrade(): Promise<void> {
   // Step 2: Check if daemon is running
   const running = await client.isRunning();
   if (!running) {
-    console.log(`${DIM}Daemon not running — nothing to restart${RESET}`);
+    // "nothing to restart" was dimmed grey and the command still exited 0, so
+    // an upgrade run against a daemon that had already died — Android's lmkd
+    // kills it under memory pressure, which is the normal way it goes away on
+    // this platform — looked like a clean success and left the user with no
+    // daemon at all. Say so plainly and name the fix.
+    //
+    // Deliberately NOT auto-starting: `operad stream` also starts every
+    // configured session, which is too large a side effect to infer from
+    // "upgrade" when the user may have stopped things on purpose.
+    console.log(`${GREEN}Build complete.${RESET}`);
+    console.log(
+      `${YELLOW}No daemon is running${RESET}${DIM} — nothing was restarted.${RESET}\n`
+      + `${DIM}Start it with:${RESET}  ${CYAN}operad stream${RESET}\n`,
+    );
     return;
   }
 

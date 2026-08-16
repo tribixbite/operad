@@ -17,6 +17,7 @@
  * Exit 0 = tarball complete, exit 1 = missing/empty entries (with details).
  */
 import { execSync } from "node:child_process";
+import { statSync } from "node:fs";
 
 /**
  * Entries that MUST exist in the published tarball.
@@ -94,6 +95,29 @@ if (failures.length > 0) {
       "  cd dashboard && bun install && bun run build\n",
   );
   process.exit(1);
+}
+
+// The CLI bundle carries a `#!/usr/bin/env node` shebang and is the package's
+// `bin` entry, so it must be executable in the working tree. esbuild does not
+// set the bit; when it was missing, every direct invocation failed with exit
+// 126 ("found but not executable"), which silently disabled watchdog.sh — the
+// one thing that restarts the daemon after an OOM kill. It logged 1,036,045
+// consecutive failures before anyone noticed. build.cjs chmods the output now;
+// this keeps it that way.
+//
+// Skipped on Windows, where the POSIX execute bit is not meaningful.
+if (process.platform !== "win32") {
+  const binPath = new URL("../dist/tmx.js", import.meta.url);
+  const mode = statSync(binPath).mode;
+  if ((mode & 0o111) === 0) {
+    console.error(
+      `dist/tmx.js is not executable (mode ${(mode & 0o777).toString(8)}).\n` +
+        `  It is package.json#bin and has a shebang — run 'bun run build' to rebuild,\n` +
+        `  or 'chmod +x dist/tmx.js'. A non-executable bundle exits 126 and breaks\n` +
+        `  watchdog.sh's ability to restart a dead daemon.`,
+    );
+    process.exit(1);
+  }
 }
 
 console.log(
