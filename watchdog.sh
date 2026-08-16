@@ -48,6 +48,10 @@ MIN_BACKOFF=5
 MAX_BACKOFF=300
 backoff=$MIN_BACKOFF
 
+# Poll interval when there is no terminal to attach to, so a headless run
+# supervises quietly instead of looping every three seconds.
+HEADLESS_POLL=60
+
 rotate_log() {
   [ -f "$LOG" ] || return 0
   local size
@@ -112,16 +116,26 @@ while true; do
     sleep 1
   done
 
-  if tmux has-session 2>/dev/null; then
+  # Attaching needs a terminal. Termux:Boot runs this script WITHOUT a tty, and
+  # `tmux attach` then fails instantly ("open terminal failed") — so the loop
+  # fell straight through to `sleep 3` and span every three seconds for as long
+  # as the device stayed up, two log lines a time. Only attach when there is
+  # actually a terminal to attach to; otherwise idle at a sane interval.
+  if [ -t 0 ] && tmux has-session 2>/dev/null; then
     log "Attaching tmux client"
-    # Attach tmux to this terminal — makes the watchdog tab a tmux client.
     # No exec — when tmux exits (daemon shutdown/OOM), the loop continues and reboots.
     tmux attach
     log "tmux exited, loop will restart daemon"
+    # A returning attach means the user detached or tmux died; re-check promptly.
+    sleep 3
   else
-    log "No tmux sessions available, skipping attach"
+    if [ ! -t 0 ]; then
+      log "Headless (no tty) — supervising without attaching"
+    else
+      log "No tmux sessions available, skipping attach"
+    fi
+    # Nothing to attach to, so this is a plain supervision poll. Three seconds
+    # would be a spin; a minute is responsive enough to restart a dead daemon.
+    sleep "$HEADLESS_POLL"
   fi
-
-  # Brief pause before checking again — prevents tight loop if daemon keeps crashing
-  sleep 3
 done
