@@ -7,6 +7,29 @@
 # After a successful boot, this script attaches tmux to the current terminal
 # so the watchdog's Termux tab becomes a tmux client (enabling tab switching).
 
+# Termux:Boot runs this without a login shell, so the environment a normal
+# terminal would set up is absent — including LD_PRELOAD.
+#
+# That matters because dist/tmx.js carries a `#!/usr/bin/env node` shebang,
+# which is correct for npm on Linux and macOS but unresolvable on Termux:
+# there is no /usr/bin/env. Termux's exec shim rewrites the interpreter path
+# at exec time, but only when it is preloaded into the CALLING shell. Without
+# it every invocation dies with "bad interpreter" (exit 127), so the watchdog
+# could never start or even detect the daemon — the exact failure that left
+# operad down after an OOM kill.
+#
+# Guarded on the file existing, so this is a no-op off Termux.
+for _shim in "$PREFIX/lib/libtermux-exec-ld-preload.so" "$PREFIX/lib/libtermux-exec.so"; do
+  if [ -f "$_shim" ]; then
+    case ":${LD_PRELOAD:-}:" in
+      *":$_shim:"*) ;;                                   # already present
+      *) export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$_shim" ;;
+    esac
+    break
+  fi
+done
+unset _shim
+
 LOG_DIR="$HOME/.local/share/tmx/logs"
 SOCKET="$PREFIX/tmp/tmx.sock"
 TMX="$HOME/.local/bin/tmx"
