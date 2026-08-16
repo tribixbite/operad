@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the build could disable the watchdog
+
+- **`dist/tmx.js` was not built executable.** It carries a
+  `#!/usr/bin/env node` shebang and is the package's `bin` entry, but
+  `build.cjs` never set the bit — esbuild does not, and npm only applies it to
+  `bin` targets at install time, so a git checkout got whatever the umask
+  allowed. Invoking a non-executable file fails with exit 126.
+
+  `watchdog.sh` calls the binary to decide whether to restart a dead daemon,
+  so a rebuild could silently disable the one mechanism that brings operad
+  back after an OOM kill. It did: this machine's `watchdog.log` recorded
+  **1,036,045 consecutive exit-126 retries** — roughly two months of retrying
+  every five seconds, growing the log to 144 MB — while the daemon stayed
+  down. The build now chmods the output, `verify-package.mjs` fails CI if the
+  bit is missing, and the watchdog repairs it before retrying.
+- **`watchdog.sh` retried forever at a fixed interval with no log cap.** A
+  failure retrying could never fix therefore ran indefinitely. Retries now
+  back off geometrically (5 s → 5 min) and the log rotates at 5 MB.
+- **`operad upgrade` reported success while leaving nothing running.** Finding
+  no daemon, it printed a dimmed "nothing to restart" and exited 0 — so an
+  upgrade against a daemon that had already been killed looked clean. It now
+  says so plainly and names the command to start one.
+
 ### Added
 
 - **Tool leases do something.** `createToolLease` and `hasActiveLease` had no
