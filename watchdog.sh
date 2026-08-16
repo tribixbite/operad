@@ -30,9 +30,68 @@ for _shim in "$PREFIX/lib/libtermux-exec-ld-preload.so" "$PREFIX/lib/libtermux-e
 done
 unset _shim
 
+# Tell `operad stream` that supervision already exists. Without this the two
+# would start each other without end: stream now spawns a watchdog when none
+# is running, and the watchdog runs stream.
+export OPERAD_WATCHDOG=1
+
 LOG_DIR="$HOME/.local/share/tmx/logs"
 SOCKET="$PREFIX/tmp/tmx.sock"
 TMX="$HOME/.local/bin/tmx"
+PIDFILE="${TMPDIR:-$PREFIX/tmp}/operad-watchdog.pid"
+
+# Is this pid a live watchdog other than us?
+#
+# Deliberately no grep — on this platform grep can be a login-profile shell
+# function that injects flags, and it survives into non-interactive bash.
+is_live_watchdog() {
+  local pid="$1"
+  case "$pid" in (""|*[!0-9]*) return 1 ;; esac
+  [ "$pid" = "$$" ] && return 1
+  [ "$pid" = "$PPID" ] && return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Match an actual script ARGUMENT, not the substring anywhere in the command
+  # line. `bash -c '... startup.sh ...'` — a shell that merely mentions the
+  # path, an editor, a grep — would otherwise look like a running watchdog and
+  # block a real one from ever starting.
+  local -a args=()
+  mapfile -d '' -t args < "/proc/$pid/cmdline" 2>/dev/null || return 1
+  local a
+  for a in "${args[@]}"; do
+    case "${a##*/}" in
+      watchdog.sh|startup.sh) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Single instance. Two watchdogs both poll, both decide the daemon is dead at
+# the same moment, and both run `operad stream`; that happened on this device
+# and ran for weeks.
+#
+# The pidfile alone is not enough to detect it: a watchdog started before this
+# guard existed, or one whose pidfile was removed, is invisible to it — which
+# is precisely how the duplicate pair arose. So scan /proc for a sibling too,
+# and treat the pidfile as a fast path rather than the source of truth.
+RUNNING_PID=""
+if [ -f "$PIDFILE" ] && is_live_watchdog "$(cat "$PIDFILE" 2>/dev/null)"; then
+  RUNNING_PID=$(cat "$PIDFILE" 2>/dev/null)
+else
+  for _p in /proc/[0-9]*; do
+    _pid=${_p#/proc/}
+    if is_live_watchdog "$_pid"; then RUNNING_PID="$_pid"; break; fi
+  done
+  unset _p _pid
+fi
+
+if [ -n "$RUNNING_PID" ]; then
+  echo "operad watchdog already running (PID $RUNNING_PID) — exiting" >&2
+  exit 0
+fi
+
+mkdir -p "$(dirname "$PIDFILE")" 2>/dev/null || true
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT INT TERM
 LOG="$LOG_DIR/watchdog.log"
 mkdir -p "$LOG_DIR"
 

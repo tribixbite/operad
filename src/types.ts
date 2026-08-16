@@ -237,6 +237,15 @@ export interface OrchestratorConfig {
   /** Android 12+ phantom process limit */
   process_budget: number;
   wake_lock_policy: WakeLockPolicy;
+  /**
+   * Start the supervision watchdog from `operad stream` when none is running.
+   *
+   * The watchdog restarts the daemon after an OOM kill — the normal way it
+   * dies on Android. Nothing else starts the watchdog itself, so without this
+   * a killed daemon stays dead until someone notices. Set false to manage
+   * supervision yourself (systemd, launchd, a boot script you control).
+   */
+  auto_watchdog: boolean;
   /** HTTP dashboard port (0 = disabled) */
   dashboard_port: number;
   /**

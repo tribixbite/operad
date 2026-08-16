@@ -109,6 +109,7 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
     process_budget: asNumber(orc.process_budget, "orchestrator.process_budget", 32),
     wake_lock_policy: asEnum(orc.wake_lock_policy, VALID_WAKE_POLICIES,
       "orchestrator.wake_lock_policy", "active_sessions") as WakeLockPolicy,
+    auto_watchdog: asBool(orc.auto_watchdog, "orchestrator.auto_watchdog", true),
     dashboard_port: asNumber(orc.dashboard_port, "orchestrator.dashboard_port", 18970),
     bind: asString(orc.bind, "orchestrator.bind", "127.0.0.1"),
     allowed_origins: asStringArray(orc.allowed_origins, "orchestrator.allowed_origins", []),

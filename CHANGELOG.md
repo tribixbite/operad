@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`operad stream` now starts the supervision watchdog when none is running.**
+  The dependency only ever ran one way: the watchdog starts `operad stream`,
+  but nothing started the watchdog. So when it died — or, on the author's
+  device, when it had never been able to invoke the binary at all — an
+  OOM-killed daemon simply stayed dead, silently, until somebody noticed.
+
+  Guarded against the obvious hazard: watchdog.sh exports `OPERAD_WATCHDOG=1`
+  before running `operad stream`, so the two cannot spawn each other without
+  end. Opt out with `--no-watchdog` or `[operad] auto_watchdog = false`.
+  Skipped on Windows. Verified end to end: `SIGKILL` the daemon, and the
+  watchdog restarts it at its next poll (42 s measured).
+
 ### Fixed — the build could disable the watchdog
 
 - **`dist/tmx.js` was not built executable.** It carries a
@@ -22,6 +36,12 @@ All notable changes to this project will be documented in this file.
 - **`watchdog.sh` retried forever at a fixed interval with no log cap.** A
   failure retrying could never fix therefore ran indefinitely. Retries now
   back off geometrically (5 s → 5 min) and the log rotates at 5 MB.
+- **The watchdog could run twice at once.** Two instances both poll, both
+  decide the daemon is dead at the same moment, and both run `operad stream`;
+  that happened on this device. A pidfile alone could not detect it — an
+  instance started before the guard existed is invisible to one — so the check
+  also scans `/proc` for a sibling, matching an actual script argument rather
+  than any command line that merely mentions the path.
 - **`operad upgrade` reported success while leaving nothing running.** Finding
   no daemon, it printed a dimmed "nothing to restart" and exited 0 — so an
   upgrade against a daemon that had already been killed looked clean. It now

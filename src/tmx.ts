@@ -190,6 +190,65 @@ export function resolveSkillsPreviewFlag(argv: string[]): boolean | undefined {
 }
 
 /** Stream: start daemon if needed, then boot all sessions */
+/**
+ * Start the supervision watchdog if nothing is supervising already.
+ *
+ * The dependency only ran one way: the watchdog starts `operad stream`, but
+ * nothing started the watchdog. So when it died — or, on this author's device,
+ * when it had never been able to invoke the binary at all — an OOM-killed
+ * daemon simply stayed dead, silently, until somebody noticed. `operad stream`
+ * is the command whose job is "get everything running", so it is the right
+ * place to close the loop.
+ *
+ * Refuses to act in four cases:
+ *   - `OPERAD_WATCHDOG=1` in the environment. The watchdog exports this before
+ *     running `operad stream`, so without it the two would spawn each other
+ *     without end.
+ *   - `--no-watchdog`, or `auto_watchdog = false` in config, for anyone who
+ *     supervises with systemd, launchd or their own boot script.
+ *   - Windows, where this shell script means nothing.
+ *   - watchdog.sh not found next to the bundle.
+ *
+ * Whether one is ALREADY running is left to watchdog.sh's own single-instance
+ * guard rather than duplicated here: it checks at startup and scans /proc, so
+ * it cannot race with us, and one source of truth beats two that can disagree.
+ * A redundant spawn therefore costs one short-lived process that prints why it
+ * declined.
+ */
+async function ensureWatchdog(configPath: string | undefined): Promise<void> {
+  if (process.env.OPERAD_WATCHDOG === "1") return;
+  if (subArgs.includes("--no-watchdog")) return;
+  if (process.platform === "win32") return;
+
+  try {
+    if (!loadConfig(configPath).orchestrator.auto_watchdog) return;
+  } catch {
+    // No readable config — a first run. Supervising is the safer default.
+  }
+
+  const repoRoot = join(dirname(realpathSync(__filename)), "..");
+  const watchdogPath = join(repoRoot, "watchdog.sh");
+  if (!existsSync(watchdogPath)) return;
+
+  try {
+    // setsid-equivalent: detached + unref so it survives this process exiting,
+    // and stdio ignored so it never holds this terminal open. No tty means the
+    // watchdog takes its headless path and polls instead of trying to attach.
+    const child = spawn("bash", [watchdogPath], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, OPERAD_WATCHDOG: "1" },
+    });
+    child.unref();
+    console.log(
+      `${DIM}Watchdog supervising (restarts the daemon if it is OOM-killed).${RESET}\n`
+      + `${DIM}Disable with --no-watchdog or [operad] auto_watchdog = false.${RESET}`,
+    );
+  } catch (err) {
+    console.log(`${YELLOW}Could not start the watchdog: ${err}${RESET}`);
+  }
+}
+
 async function runStream(): Promise<void> {
   const configPath = getConfigFlag();
   const client = getClient(configPath);
@@ -281,6 +340,11 @@ async function runStream(): Promise<void> {
     console.error(`${RED}Stream failed: ${resp.error}${RESET}`);
     process.exit(1);
   }
+
+  // Close the supervision loop — see ensureWatchdog. Deliberately after the
+  // daemon is confirmed up, so the watchdog's first poll finds it alive and
+  // does not immediately try to boot a second one.
+  await ensureWatchdog(configPath);
 
   // --attach: exec into tmux after stream so this terminal becomes a tmux client.
   // Used by watchdog.sh to make its Termux tab interactive after boot.

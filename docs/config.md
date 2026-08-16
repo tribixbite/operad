@@ -21,6 +21,7 @@ Also accepted as `[orchestrator]` for backwards compatibility.
 | `boot_timeout_s` | number | `300` | Max seconds to wait for all sessions to reach `running` state on boot. |
 | `process_budget` | number | `32` | Android 12+ phantom process limit. Must be ≥ enabled sessions + 5 overhead. |
 | `wake_lock_policy` | enum | `active_sessions` | When to hold a wake lock. One of: `always`, `active_sessions`, `boot_only`, `never`. |
+| `auto_watchdog` | bool | `true` | Start the supervision watchdog from `operad stream` when none is running. The watchdog restarts the daemon after an OOM kill — the usual way it dies on Android — and nothing else starts the watchdog itself, so a killed daemon otherwise stays dead. Set `false` if you supervise with systemd, launchd or your own boot script. `operad stream --no-watchdog` skips it for one run. |
 | `dashboard_port` | number | `18970` | HTTP port for the web dashboard and REST API. `0` disables the dashboard. |
 | `memory_warning_mb` | number | `2000` | MemAvailable threshold (MB) for "warning" memory pressure. |
 | `memory_critical_mb` | number | `1200` | MemAvailable threshold (MB) for "critical" pressure — may trigger auto-suspend. |
