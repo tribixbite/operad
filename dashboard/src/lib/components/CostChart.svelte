@@ -1,13 +1,18 @@
 <script lang="ts">
-  import { fetchDailyTokens } from "$lib/api";
-  import { store } from "$lib/store.svelte";
-  import type { DailyTokens } from "$lib/types";
+  import type { TokenDayBucket } from "$lib/types";
+
+  // -- Props -------------------------------------------------------------------
+
+  interface Props {
+    /** Daily buckets to plot, ascending by date. */
+    days: TokenDayBucket[];
+    /** Heading shown above the chart. */
+    title?: string;
+  }
+
+  const { days, title = "Daily tokens" }: Props = $props();
 
   // -- Reactive state ----------------------------------------------------------
-
-  let days: DailyTokens[] = $state([]);
-  let loading = $state(true);
-  let error: string | null = $state(null);
 
   /** Index of the currently hovered bar (-1 = none) */
   let hoverIdx = $state(-1);
@@ -21,175 +26,111 @@
 
   // -- Chart geometry ----------------------------------------------------------
 
+  const VIEW_W = 600;
   const CHART_H = 140;
   const PAD_TOP = 16;
   const PAD_BOTTOM = 22;
   const PAD_LEFT = 4;
   const PAD_RIGHT = 4;
-  /** Fraction of bar slot used for the bar itself (rest is gap) */
+  /** Fraction of a bar slot used by the bar itself (the rest is gap) */
   const BAR_RATIO = 0.7;
+  /** Keeps a single-day range from rendering one absurdly wide bar */
+  const MAX_BAR_W = 44;
 
   // -- Derived values ----------------------------------------------------------
 
-  /** Maximum daily total across all loaded days (for Y scale) */
+  /** Largest daily total, used for the Y scale (never 0, to avoid /0) */
   const maxTokens = $derived(
-    days.length > 0
-      ? Math.max(...days.map((d) => d.total_tokens), 1)
-      : 1,
+    days.length > 0 ? Math.max(...days.map((d) => d.total_tokens), 1) : 1,
   );
 
-  /** 14-day total tokens */
   const totalTokens = $derived(days.reduce((s, d) => s + d.total_tokens, 0));
 
-  /** Quota data from SSE store */
-  const quota = $derived(store.daemon?.quota ?? null);
-
-  // -- Data loading ------------------------------------------------------------
-
-  async function load() {
-    try {
-      days = await fetchDailyTokens(14);
-      error = null;
-    } catch (e: any) {
-      error = e.message ?? "Failed to load token data";
-    } finally {
-      loading = false;
-    }
-  }
-
-  $effect(() => {
-    if (typeof window === "undefined") return;
-    load();
-    const timer = setInterval(load, 60_000);
-    return () => clearInterval(timer);
-  });
+  /**
+   * Show at most ~8 date labels regardless of range length, so a 60-day
+   * all-time view doesn't overlap its own axis.
+   */
+  const labelStride = $derived(Math.max(1, Math.ceil(days.length / 8)));
 
   // -- Helpers -----------------------------------------------------------------
 
-  /** Format a date string as abbreviated day label ("Apr 9") */
-  function fmtDate(iso: string): string {
-    const d = new Date(iso);
+  /** Format a `YYYY-MM-DD` key as an abbreviated label ("Apr 9") */
+  function fmtDate(key: string): string {
+    const [y, m, d] = key.split("-").map(Number);
     const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-    return `${months[d.getMonth()]} ${d.getDate()}`;
+    if (!m || !d) return key;
+    return `${months[m - 1]} ${d}`;
   }
 
-  /** Format token count with K/M suffix */
+  /** Format token count with K/M/B suffix */
   function fmtTokens(n: number): string {
+    if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
     return String(n);
   }
 
-  /** Compute bar geometry for a given day index within a known viewBox width */
-  function barGeom(idx: number, viewW: number) {
-    const usableW = viewW - PAD_LEFT - PAD_RIGHT;
+  /**
+   * Bar geometry for one day.
+   *
+   * The stack is ordered cache-read → cache-write → in+out (bottom to top).
+   * Cache reads dominate real usage by an order of magnitude, so plotting
+   * them as the base makes the remaining work visible rather than crushing
+   * it into a sub-pixel sliver at the bottom of the bar.
+   */
+  function barGeom(idx: number) {
+    const usableW = VIEW_W - PAD_LEFT - PAD_RIGHT;
     const slotW = usableW / days.length;
-    const barW = Math.max(slotW * BAR_RATIO, 2);
+    const barW = Math.min(Math.max(slotW * BAR_RATIO, 2), MAX_BAR_W);
     const x = PAD_LEFT + slotW * idx + (slotW - barW) / 2;
     const usableH = CHART_H - PAD_TOP - PAD_BOTTOM;
 
     const day = days[idx];
-    const totalH = (day.total_tokens / maxTokens) * usableH;
-    const inputH = (day.input_tokens / maxTokens) * usableH;
-    const outputH = (day.output_tokens / maxTokens) * usableH;
+    const scale = usableH / maxTokens;
+    const cacheReadH = day.cache_read_tokens * scale;
+    const cacheWriteH = day.cache_creation_tokens * scale;
+    const workH = (day.input_tokens + day.output_tokens) * scale;
 
-    // Stack bottom-up: output, input
     const barBottom = CHART_H - PAD_BOTTOM;
-    const outputY = barBottom - outputH;
-    const inputY = outputY - inputH;
+    const cacheReadY = barBottom - cacheReadH;
+    const cacheWriteY = cacheReadY - cacheWriteH;
+    const workY = cacheWriteY - workH;
 
-    return { x, barW, slotW, inputY, inputH, outputY, outputH, totalH, barBottom };
+    return {
+      x, barW, slotW, barBottom,
+      cacheReadY, cacheReadH,
+      cacheWriteY, cacheWriteH,
+      workY, workH,
+      totalH: cacheReadH + cacheWriteH + workH,
+    };
   }
 
-  /** Handle pointer move over the SVG to position tooltip */
+  /**
+   * Track the pointer to position the tooltip and select the hovered bar.
+   *
+   * Hit-testing is done here from the pointer's x offset rather than with a
+   * transparent <rect> per day: it keeps the DOM to three shapes per bar and
+   * avoids attaching interaction handlers to individual graphic primitives.
+   */
   function onPointerMove(e: PointerEvent) {
     if (!svgEl || days.length === 0) return;
     const rect = svgEl.getBoundingClientRect();
     tooltipX = e.clientX - rect.left;
     tooltipY = e.clientY - rect.top;
-  }
 
-  /** Map client X to bar index */
-  function idxFromEvent(e: PointerEvent | MouseEvent): number {
-    if (!svgEl || days.length === 0) return -1;
-    const rect = svgEl.getBoundingClientRect();
-    const viewW = rect.width;
-    const usableW = viewW - PAD_LEFT - PAD_RIGHT;
+    // Map client x → bar index using the rendered (not viewBox) width.
+    const usableW = rect.width - PAD_LEFT - PAD_RIGHT;
+    if (usableW <= 0) return;
     const slotW = usableW / days.length;
-    const localX = e.clientX - rect.left - PAD_LEFT;
-    const idx = Math.floor(localX / slotW);
-    if (idx < 0 || idx >= days.length) return -1;
-    return idx;
-  }
-
-  /** Quota level to CSS color variable */
-  function levelColor(level: string): string {
-    switch (level) {
-      case "ok": return "var(--accent-green)";
-      case "warning": return "var(--accent-yellow)";
-      case "critical": case "exceeded": return "var(--accent-red)";
-      default: return "var(--text-muted)";
-    }
-  }
-
-  /** Velocity trend arrow */
-  function trendArrow(trend: string): string {
-    if (trend === "rising") return "↑";
-    if (trend === "falling") return "↓";
-    return "";
-  }
-
-  /** Velocity trend color */
-  function trendColor(trend: string): string {
-    if (trend === "rising") return "var(--accent-yellow)";
-    if (trend === "falling") return "var(--accent-green)";
-    return "var(--text-muted)";
+    const idx = Math.floor((e.clientX - rect.left - PAD_LEFT) / slotW);
+    hoverIdx = idx >= 0 && idx < days.length ? idx : -1;
   }
 </script>
 
-<div class="card cost-chart-card">
-  <!-- Plan + quota status bar -->
-  {#if quota}
-    <div class="quota-bar">
-      <div class="quota-info">
-        {#if quota.plan}
-          <span class="plan-badge">Claude {quota.plan}</span>
-        {/if}
-        {#if quota.weekly_tokens_limit > 0}
-          <span class="quota-value" style="color: {levelColor(quota.weekly_level)}">
-            {fmtTokens(quota.weekly_tokens_used)} / {fmtTokens(quota.weekly_tokens_limit)}
-            ({quota.weekly_pct}%)
-          </span>
-        {:else}
-          <span class="quota-value">{fmtTokens(quota.weekly_tokens_used)} this week</span>
-        {/if}
-      </div>
-      {#if quota.weekly_tokens_limit > 0}
-        <div class="quota-track">
-          <div
-            class="quota-fill"
-            style="width: {Math.min(quota.weekly_pct, 100)}%; background: {levelColor(quota.weekly_level)};"
-          ></div>
-        </div>
-      {/if}
-      <div class="quota-meta">
-        <span>
-          {fmtTokens(quota.tokens_per_hour)}/hr
-          {#if quota.velocity_trend !== "stable"}
-            <span class="trend" style="color: {trendColor(quota.velocity_trend)}">
-              {trendArrow(quota.velocity_trend)}
-            </span>
-          {/if}
-        </span>
-        <span>avg {fmtTokens(quota.daily_avg_tokens)}/day</span>
-        <span>{fmtTokens(quota.window_tokens_used)} in {quota.window_hours}h window</span>
-      </div>
-    </div>
-  {/if}
-
-  <div class="card-title">
-    <span class="label">Daily Tokens</span>
-    {#if !loading && days.length > 0}
+<div class="chart-block">
+  <div class="chart-head">
+    <span class="label">{title}</span>
+    {#if days.length > 0}
       <span class="total-badge">
         {fmtTokens(totalTokens)}
         <span class="unit">{days.length}d</span>
@@ -197,22 +138,15 @@
     {/if}
   </div>
 
-  {#if loading}
-    <div class="placeholder">Loading token data...</div>
-  {:else if error}
-    <div class="placeholder error-msg">{error}</div>
-  {:else if days.length === 0}
-    <div class="placeholder">No token data available</div>
+  {#if days.length === 0}
+    <div class="placeholder">No usage recorded in this range</div>
   {:else}
-    <!-- Chart container -->
-    <div
-      class="chart-container"
-      role="img"
-      aria-label="Daily token usage stacked bar chart"
-    >
+    <div class="chart-container">
       <svg
         bind:this={svgEl}
-        viewBox="0 0 600 {CHART_H}"
+        role="img"
+        aria-label="{title}: stacked token usage by day, {days.length} days, {fmtTokens(totalTokens)} total"
+        viewBox="0 0 {VIEW_W} {CHART_H}"
         preserveAspectRatio="none"
         width="100%"
         height="{CHART_H}px"
@@ -220,223 +154,92 @@
         onpointerleave={() => (hoverIdx = -1)}
       >
         <!-- Y-axis grid lines -->
-        {#each [0.25, 0.5, 0.75, 1.0] as frac}
+        {#each [0.25, 0.5, 0.75, 1.0] as frac (frac)}
           {@const y = CHART_H - PAD_BOTTOM - (CHART_H - PAD_TOP - PAD_BOTTOM) * frac}
           <line
-            x1={PAD_LEFT}
-            y1={y}
-            x2={600 - PAD_RIGHT}
-            y2={y}
-            stroke="var(--border)"
-            stroke-width="0.5"
-            stroke-dasharray="3,3"
+            x1={PAD_LEFT} y1={y} x2={VIEW_W - PAD_RIGHT} y2={y}
+            stroke="var(--border)" stroke-width="0.5" stroke-dasharray="3,3"
           />
         {/each}
 
-        <!-- Bars -->
-        {#each days as day, i}
-          {@const g = barGeom(i, 600)}
-          <!-- Hit area -->
-          <rect
-            x={PAD_LEFT + g.slotW * i}
-            y={PAD_TOP}
-            width={g.slotW}
-            height={CHART_H - PAD_TOP - PAD_BOTTOM}
-            fill="transparent"
-            onpointerenter={() => (hoverIdx = i)}
-            style="cursor: pointer;"
-          />
-          <!-- Output (bottom) -->
-          {#if g.outputH > 0.2}
-            <rect
-              x={g.x}
-              y={g.outputY}
-              width={g.barW}
-              height={g.outputH}
-              rx="1"
-              fill="#22c55e"
-              opacity={hoverIdx === i ? 1 : 0.85}
-            />
+        {#each days as day, i (day.date)}
+          {@const g = barGeom(i)}
+          {#if g.cacheReadH > 0.2}
+            <rect x={g.x} y={g.cacheReadY} width={g.barW} height={g.cacheReadH}
+              rx="1" fill="#3b6ea5" opacity={hoverIdx === i ? 1 : 0.85} />
           {/if}
-          <!-- Input (top) -->
-          {#if g.inputH > 0.2}
-            <rect
-              x={g.x}
-              y={g.inputY}
-              width={g.barW}
-              height={g.inputH}
-              rx="1"
-              fill="#58a6ff"
-              opacity={hoverIdx === i ? 1 : 0.85}
-            />
+          {#if g.cacheWriteH > 0.2}
+            <rect x={g.x} y={g.cacheWriteY} width={g.barW} height={g.cacheWriteH}
+              rx="1" fill="#a78bfa" opacity={hoverIdx === i ? 1 : 0.85} />
           {/if}
-          <!-- Hover outline -->
+          {#if g.workH > 0.2}
+            <rect x={g.x} y={g.workY} width={g.barW} height={g.workH}
+              rx="1" fill="#22c55e" opacity={hoverIdx === i ? 1 : 0.85} />
+          {/if}
           {#if hoverIdx === i && g.totalH > 0.2}
             <rect
-              x={g.x - 0.5}
-              y={g.inputY - 0.5}
-              width={g.barW + 1}
-              height={g.outputY + g.outputH - g.inputY + 1}
-              rx="1.5"
-              fill="none"
-              stroke="var(--text-secondary)"
-              stroke-width="1"
+              x={g.x - 0.5} y={g.workY - 0.5}
+              width={g.barW + 1} height={g.totalH + 1}
+              rx="1.5" fill="none" stroke="var(--text-secondary)" stroke-width="1"
             />
           {/if}
-          <!-- X-axis date labels -->
-          {#if days.length <= 14 || i % 2 === 0}
+          {#if i % labelStride === 0}
+            <!-- Anchor the edge labels inward so they are not clipped by the
+                 viewBox (a centred label on the first/last bar overflows). -->
+            {@const isFirst = i === 0}
+            {@const isLast = i + labelStride >= days.length}
+            {@const anchor = isFirst ? "start" : isLast ? "end" : "middle"}
             <text
-              x={g.x + g.barW / 2}
+              x={isFirst ? PAD_LEFT : isLast ? VIEW_W - PAD_RIGHT : g.x + g.barW / 2}
               y={CHART_H - 4}
-              text-anchor="middle"
-              fill="var(--text-muted)"
-              font-size="9"
-              font-family="inherit"
-            >
-              {fmtDate(day.date)}
-            </text>
+              text-anchor={anchor} fill="var(--text-muted)"
+              font-size="9" font-family="inherit"
+            >{fmtDate(day.date)}</text>
           {/if}
         {/each}
 
-        <!-- Y-axis max label -->
-        <text
-          x={PAD_LEFT + 2}
-          y={PAD_TOP - 4}
-          fill="var(--text-muted)"
-          font-size="8"
-          font-family="inherit"
-        >
+        <text x={PAD_LEFT + 2} y={PAD_TOP - 4} fill="var(--text-muted)" font-size="8" font-family="inherit">
           {fmtTokens(maxTokens)}
         </text>
       </svg>
 
-      <!-- Hover tooltip -->
       {#if hoverIdx >= 0 && hoverIdx < days.length}
         {@const day = days[hoverIdx]}
-        <div
-          class="tooltip"
-          style="left: {tooltipX}px; top: {tooltipY}px;"
-        >
+        <div class="tooltip" style="left: {tooltipX}px; top: {tooltipY}px;">
           <div class="tooltip-date">{fmtDate(day.date)}</div>
           <div class="tooltip-total">{fmtTokens(day.total_tokens)} tokens</div>
-          <div class="tooltip-detail">{day.turns} turn{day.turns !== 1 ? "s" : ""}</div>
+          <div class="tooltip-detail">
+            {day.turns} turn{day.turns !== 1 ? "s" : ""} · ${day.cost_usd.toFixed(2)}
+          </div>
           <div class="tooltip-breakdown">
-            <span class="tb-input">{fmtTokens(day.input_tokens)} in</span>
-            <span class="tb-output">{fmtTokens(day.output_tokens)} out</span>
+            <span class="tb-work">{fmtTokens(day.input_tokens + day.output_tokens)} in+out</span>
+            <span class="tb-write">{fmtTokens(day.cache_creation_tokens)} write</span>
+            <span class="tb-read">{fmtTokens(day.cache_read_tokens)} read</span>
           </div>
         </div>
       {/if}
     </div>
 
-    <!-- Legend -->
     <div class="legend">
-      <span class="legend-item"><span class="swatch swatch-input"></span>Input</span>
-      <span class="legend-item"><span class="swatch swatch-output"></span>Output</span>
+      <span class="legend-item"><span class="swatch swatch-work"></span>In + Out</span>
+      <span class="legend-item"><span class="swatch swatch-write"></span>Cache write</span>
+      <span class="legend-item"><span class="swatch swatch-read"></span>Cache read</span>
     </div>
-
-    <!-- Top sessions this week -->
-    {#if quota && quota.top_sessions.length > 0}
-      <div class="breakdown">
-        <div class="breakdown-header">
-          <span>Top consumers this week</span>
-        </div>
-        <table class="breakdown-table">
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th class="right">Tokens</th>
-              <th class="right">%</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each quota.top_sessions as sess}
-              <tr>
-                <td class="sess-name">{sess.name}</td>
-                <td class="right nums">{fmtTokens(sess.tokens)}</td>
-                <td class="right nums">{sess.pct}%</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
   {/if}
 </div>
 
 <style>
-  .cost-chart-card {
-    padding: 0;
-    overflow: hidden;
-  }
+  .chart-block { margin-bottom: 0.5rem; }
 
-  /* -- Quota bar ------------------------------------------------------------- */
-
-  .quota-bar {
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .quota-info {
+  .chart-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 0.25rem;
-  }
-
-  .plan-badge {
-    font-size: 0.5625rem;
-    font-weight: 600;
-    padding: 0.0625rem 0.375rem;
-    border-radius: 3px;
-    background: rgba(139, 92, 246, 0.15);
-    color: #a78bfa;
-    letter-spacing: 0.02em;
-  }
-
-  .trend {
-    font-weight: 700;
-    font-size: 0.625rem;
-  }
-
-  .quota-value {
-    font-size: 0.6875rem;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .quota-track {
-    height: 4px;
-    background: var(--bg-tertiary);
-    border-radius: 2px;
-    overflow: hidden;
-    margin-bottom: 0.25rem;
-  }
-
-  .quota-fill {
-    height: 100%;
-    border-radius: 2px;
-    transition: width 0.3s ease;
-  }
-
-  .quota-meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.5625rem;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* -- Card title ------------------------------------------------------------ */
-
-  .card-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.625rem 0.75rem;
+    padding: 0.375rem 0 0.375rem;
   }
 
   .label {
-    font-size: 0.6875rem;
+    font-size: 0.625rem;
     font-weight: 500;
     color: var(--text-secondary);
     text-transform: uppercase;
@@ -463,14 +266,10 @@
   }
 
   .placeholder {
-    padding: 2rem 0.75rem;
+    padding: 1.25rem 0.75rem;
     text-align: center;
     font-size: 0.6875rem;
     color: var(--text-muted);
-  }
-
-  .error-msg {
-    color: var(--accent-red);
   }
 
   /* -- Chart area ---------------------------------------------------------- */
@@ -483,9 +282,7 @@
     touch-action: none;
   }
 
-  .chart-container svg {
-    display: block;
-  }
+  .chart-container svg { display: block; }
 
   /* -- Tooltip ------------------------------------------------------------- */
 
@@ -518,6 +315,7 @@
   .tooltip-detail {
     color: var(--text-muted);
     font-size: 0.5625rem;
+    font-variant-numeric: tabular-nums;
   }
 
   .tooltip-breakdown {
@@ -528,16 +326,18 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .tb-input { color: #58a6ff; }
-  .tb-output { color: #22c55e; }
+  .tb-work { color: #22c55e; }
+  .tb-write { color: #a78bfa; }
+  .tb-read { color: #3b6ea5; }
 
   /* -- Legend -------------------------------------------------------------- */
 
   .legend {
     display: flex;
     gap: 0.75rem;
-    padding: 0.375rem 0.75rem;
+    padding: 0.375rem 0;
     justify-content: center;
+    flex-wrap: wrap;
   }
 
   .legend-item {
@@ -555,56 +355,7 @@
     border-radius: 2px;
   }
 
-  .swatch-input { background: #58a6ff; }
-  .swatch-output { background: #22c55e; }
-
-  /* -- Per-session breakdown ----------------------------------------------- */
-
-  .breakdown {
-    border-top: 1px solid var(--border);
-    padding: 0.5rem 0.75rem;
-  }
-
-  .breakdown-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 0.625rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    margin-bottom: 0.375rem;
-  }
-
-  .breakdown-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.625rem;
-  }
-
-  .breakdown-table th {
-    text-align: left;
-    font-size: 0.5625rem;
-    font-weight: 500;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0 0.25rem 0.25rem;
-  }
-
-  .breakdown-table td {
-    padding: 0.1875rem 0.25rem;
-    border-top: 1px solid var(--border);
-  }
-
-  .right { text-align: right; }
-  .nums { font-variant-numeric: tabular-nums; }
-
-  .sess-name {
-    font-weight: 500;
-    color: var(--accent-blue);
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .swatch-work { background: #22c55e; }
+  .swatch-write { background: #a78bfa; }
+  .swatch-read { background: #3b6ea5; }
 </style>

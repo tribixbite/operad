@@ -654,6 +654,21 @@ export async function fetchTokens(): Promise<ProjectTokenUsage[]> {
   return checkedJson(res);
 }
 
+/**
+ * Fetch a range-scoped token summary (all time / this week / today).
+ *
+ * Backed by the Claude Code JSONL logs, so it reports real usage even when
+ * the agent/SDK `costs` tables are empty — unlike /api/tokens-daily and
+ * /api/quota, which return zeroes unless the agent features are in use.
+ */
+export async function fetchTokenUsage(
+  range: import("./types").TokenRange,
+  signal?: AbortSignal,
+): Promise<import("./types").TokenRangeSummary> {
+  const res = await fetch(`/api/token-usage?range=${encodeURIComponent(range)}`, { signal });
+  return checkedJson(res);
+}
+
 /** Fetch token usage for a specific session */
 export async function fetchSessionTokens(name: string): Promise<ProjectTokenUsage> {
   const res = await fetch(`/api/tokens/${encodeURIComponent(name)}`);

@@ -9,9 +9,11 @@
 import { existsSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, basename } from "node:path";
 import { createReadStream } from "node:fs";
-import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import type {
   SessionTokenUsage, ProjectTokenUsage,
+  TokenDayBucket, TokenTotals, TokenRange, TokenRangeSummary,
+  TokenRangeProject, TokenRangeSession,
   ConversationEntry, ConversationBlock, ConversationPage,
   TimelineEvent, DailyCost,
 } from "./types.js";
@@ -280,26 +282,133 @@ export function bindProjectConversations(
 
 // -- Token usage streaming ---------------------------------------------------
 
-/** LRU cache for token usage results — keyed by path+mtime+size */
-const tokenCache = new Map<string, { result: SessionTokenUsage; accessTime: number }>();
-const TOKEN_CACHE_MAX = 10;
-
-function tokenCacheKey(path: string, mtime: number, size: number): string {
-  return `${path}|${mtime}|${size}`;
+/**
+ * Mutable per-day accumulator. Kept separate from the immutable
+ * {@link TokenDayBucket} wire type so incremental scans can keep adding to it.
+ */
+interface DayAccumulator {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  turns: number;
 }
 
-/** Evict oldest entries if cache exceeds max size */
+/**
+ * Incremental scan state for one JSONL file.
+ *
+ * Claude Code conversation logs are strictly append-only, which lets us treat
+ * a grown file as "previous state + new tail" and parse only the appended
+ * bytes. That is the difference between re-reading a 48MB log on every poll
+ * and reading the few KB that were actually added.
+ */
+interface ScanState {
+  /** Bytes already consumed from the file. */
+  size: number;
+  /** mtime at the time `size` bytes were consumed — used for the no-op fast path. */
+  mtimeMs: number;
+  /** Trailing bytes after the last newline (an entry still being written). */
+  partial: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  turns: number;
+  /** date (YYYY-MM-DD, local) → running totals for that day. */
+  days: Map<string, DayAccumulator>;
+  /** Last touch, for LRU eviction. */
+  accessTime: number;
+}
+
+/**
+ * Per-path incremental scan cache.
+ *
+ * Previously this was keyed by `path|mtime|size` and capped at 10 entries.
+ * With a real working set of 28+ conversation files that guaranteed 100%
+ * eviction thrash — every `/api/tokens` poll re-parsed the entire corpus
+ * (measured: ~137MB and 1.1–1.6s per call, with five consecutive identical
+ * calls all paying full price). Keying by path (so a grown file updates its
+ * entry instead of adding a new one) and sizing the cap above the plausible
+ * file count makes repeat polls cache hits.
+ */
+const scanCache = new Map<string, ScanState>();
+const TOKEN_CACHE_MAX = 512;
+
+/**
+ * In-flight scans, keyed by path, so concurrent callers (multiple dashboard
+ * tabs, or a poll overlapping a manual refresh) share one read instead of
+ * each doing the same work.
+ */
+const inflightScans = new Map<string, Promise<SessionTokenUsage>>();
+
+/** Evict least-recently-used entries if the cache exceeds its cap. */
 function evictTokenCache(): void {
-  if (tokenCache.size <= TOKEN_CACHE_MAX) return;
-  let oldest: string | null = null;
-  let oldestTime = Infinity;
-  for (const [key, val] of tokenCache) {
-    if (val.accessTime < oldestTime) {
-      oldestTime = val.accessTime;
-      oldest = key;
+  while (scanCache.size > TOKEN_CACHE_MAX) {
+    let oldest: string | null = null;
+    let oldestTime = Infinity;
+    for (const [key, val] of scanCache) {
+      if (val.accessTime < oldestTime) {
+        oldestTime = val.accessTime;
+        oldest = key;
+      }
     }
+    if (!oldest) return;
+    scanCache.delete(oldest);
   }
-  if (oldest) tokenCache.delete(oldest);
+}
+
+/**
+ * Reset a scan state to "nothing consumed". Used for a first scan and when a
+ * file shrinks (truncated or replaced), where the append assumption is void.
+ */
+function freshScanState(): ScanState {
+  return {
+    size: 0,
+    mtimeMs: 0,
+    partial: "",
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheCreation: 0,
+    turns: 0,
+    days: new Map(),
+    accessTime: Date.now(),
+  };
+}
+
+/** Local-time `YYYY-MM-DD` for an ISO timestamp; null when unparseable. */
+function localDateKey(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const ms = d.getTime();
+  if (Number.isNaN(ms)) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Fold a day accumulator into the immutable wire shape. */
+function toDayBucket(date: string, a: DayAccumulator): TokenDayBucket {
+  const usage = {
+    input_tokens: a.input,
+    output_tokens: a.output,
+    cache_read_tokens: a.cacheRead,
+    cache_creation_tokens: a.cacheCreation,
+  };
+  return {
+    date,
+    ...usage,
+    total_tokens: a.input + a.output + a.cacheRead + a.cacheCreation,
+    turns: a.turns,
+    cost_usd: calculateCost(usage),
+  };
+}
+
+/** Test seam: drop all cached scan state. */
+export function resetTokenCache(): void {
+  scanCache.clear();
+  inflightScans.clear();
 }
 
 /** Calculate USD cost from token counts */
@@ -323,101 +432,182 @@ export function calculateCost(usage: {
  * Results are LRU-cached by file path+mtime+size.
  */
 export async function streamTokenUsage(jsonlPath: string): Promise<SessionTokenUsage> {
-  const st = statSync(jsonlPath);
-  const cacheKey = tokenCacheKey(jsonlPath, st.mtimeMs, st.size);
+  const existing = inflightScans.get(jsonlPath);
+  if (existing) return existing;
 
-  // Check cache
-  const cached = tokenCache.get(cacheKey);
-  if (cached) {
-    cached.accessTime = Date.now();
-    return cached.result;
+  const scan = scanTokenUsage(jsonlPath).finally(() => {
+    inflightScans.delete(jsonlPath);
+  });
+  inflightScans.set(jsonlPath, scan);
+  return scan;
+}
+
+/**
+ * Apply one JSONL line to a scan state. Only assistant entries carry usage.
+ */
+function applyLine(state: ScanState, line: string): void {
+  // Cheap substring reject before the (comparatively costly) JSON.parse.
+  if (!line.includes('"type":"assistant"') && !line.includes('"type": "assistant"')) return;
+
+  try {
+    const entry = JSON.parse(line) as {
+      type?: string;
+      timestamp?: string;
+      message?: {
+        role?: string;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+        stop_reason?: string | null;
+      };
+    };
+
+    if (entry.type !== "assistant") return;
+
+    const usage = entry.message?.usage;
+    // A final assistant turn is one that carries a stop_reason.
+    const isTurn = Boolean(entry.message?.stop_reason);
+    if (!usage && !isTurn) return;
+
+    const input = usage?.input_tokens ?? 0;
+    const output = usage?.output_tokens ?? 0;
+    const cacheRead = usage?.cache_read_input_tokens ?? 0;
+    const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+
+    state.input += input;
+    state.output += output;
+    state.cacheRead += cacheRead;
+    state.cacheCreation += cacheCreation;
+    if (isTurn) state.turns++;
+
+    // Attribute the same numbers to the entry's calendar day so range views
+    // (today / this week / all time) come from this one pass.
+    const dateKey = localDateKey(entry.timestamp);
+    if (!dateKey) return;
+    let bucket = state.days.get(dateKey);
+    if (!bucket) {
+      bucket = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0 };
+      state.days.set(dateKey, bucket);
+    }
+    bucket.input += input;
+    bucket.output += output;
+    bucket.cacheRead += cacheRead;
+    bucket.cacheCreation += cacheCreation;
+    if (isTurn) bucket.turns++;
+  } catch { /* skip malformed lines */ }
+}
+
+/**
+ * Bring the cached scan state for `jsonlPath` up to date and materialise it.
+ *
+ * Three paths:
+ *  - unchanged (same size+mtime) → pure cache hit, no I/O beyond the stat;
+ *  - grown → read only `[cachedSize, currentSize)` and keep accumulating;
+ *  - shrunk → the append-only assumption is broken, so rescan from zero.
+ */
+async function scanTokenUsage(jsonlPath: string): Promise<SessionTokenUsage> {
+  const st = statSync(jsonlPath);
+  let state = scanCache.get(jsonlPath);
+
+  if (state && st.size < state.size) {
+    // Truncated, rotated, or replaced — previous accumulation is invalid.
+    state = undefined;
+  }
+  if (!state) {
+    state = freshScanState();
+    scanCache.set(jsonlPath, state);
+  }
+  state.accessTime = Date.now();
+
+  const upToDate = state.size === st.size && state.mtimeMs === st.mtimeMs;
+  if (!upToDate && st.size > state.size) {
+    // Read only the appended tail. `end` is inclusive in createReadStream.
+    const start = state.size;
+    const end = st.size - 1;
+    const stream = createReadStream(jsonlPath, {
+      start,
+      end,
+      // Larger chunks mean fewer syscalls on a cold scan; the `for await`
+      // loop still returns to the event loop between chunks, so a 48MB
+      // first read stays interleaved with other daemon work.
+      highWaterMark: 256 * 1024,
+    });
+    const decoder = new StringDecoder("utf8");
+
+    // The decoded remainder is carried across calls rather than re-read.
+    //
+    // That deserves a note, because it is only safe for a reason that is not
+    // obvious. A poll can land mid-write, so the tail can end inside a
+    // multi-byte UTF-8 sequence; `decoder.end()` then flushes it as U+FFFD and
+    // the continuation bytes decode to another U+FFFD on the next read, so the
+    // reassembled line really does differ from what was written. It stays
+    // harmless because JSON's own syntax is ASCII — a multi-byte character can
+    // only ever appear inside a string VALUE, and U+FFFD is legal there. So
+    // `JSON.parse` still succeeds and `usage` is read correctly; only a couple
+    // of characters of text nothing here reads are mangled. Verified against a
+    // deliberately split sequence.
+    //
+    // If this scan ever starts extracting message TEXT, that stops being
+    // acceptable: switch to advancing `size` to the last complete line and
+    // re-reading the fragment, which is exact.
+    let carry = state.partial;
+    try {
+      for await (const chunk of stream) {
+        carry += decoder.write(chunk as Buffer);
+        // Process every complete line in the buffer, keeping the remainder.
+        let nl = carry.indexOf("\n");
+        while (nl !== -1) {
+          const line = carry.slice(0, nl);
+          carry = carry.slice(nl + 1);
+          if (line.length > 0) applyLine(state, line);
+          nl = carry.indexOf("\n");
+        }
+      }
+      carry += decoder.end();
+    } catch {
+      // A read failure leaves the state consistent with what was consumed so
+      // far; drop the cache entry so the next call retries from scratch.
+      scanCache.delete(jsonlPath);
+      throw new Error(`Failed reading ${jsonlPath}`);
+    }
+
+    // Whatever follows the last newline is an entry still being written.
+    state.partial = carry;
+    state.size = st.size;
+    state.mtimeMs = st.mtimeMs;
+  } else if (!upToDate) {
+    // Same size but a different mtime (rewritten in place at equal length):
+    // record the new mtime so the fast path engages next time.
+    state.mtimeMs = st.mtimeMs;
   }
 
-  const sessionId = basename(jsonlPath, ".jsonl");
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheCreationTokens = 0;
-  let turns = 0;
-  let lineCount = 0;
+  evictTokenCache();
 
-  return new Promise<SessionTokenUsage>((resolve, reject) => {
-    const rl = createInterface({
-      input: createReadStream(jsonlPath, { encoding: "utf-8" }),
-      crlfDelay: Infinity,
-    });
+  const daily = [...state.days.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([date, acc]) => toDayBucket(date, acc));
 
-    rl.on("line", (line: string) => {
-      lineCount++;
-      // Yield to event loop periodically for large files
-      if (lineCount % 2000 === 0) {
-        rl.pause();
-        setImmediate(() => rl.resume());
-      }
-
-      // Quick prefix check before parsing full JSON
-      if (!line.includes('"type":"assistant"') && !line.includes('"type": "assistant"')) return;
-
-      try {
-        const entry = JSON.parse(line) as {
-          type?: string;
-          message?: {
-            role?: string;
-            usage?: {
-              input_tokens?: number;
-              output_tokens?: number;
-              cache_read_input_tokens?: number;
-              cache_creation_input_tokens?: number;
-            };
-            stop_reason?: string | null;
-          };
-        };
-
-        if (entry.type !== "assistant") return;
-
-        const usage = entry.message?.usage;
-        if (usage) {
-          inputTokens += usage.input_tokens ?? 0;
-          outputTokens += usage.output_tokens ?? 0;
-          cacheReadTokens += usage.cache_read_input_tokens ?? 0;
-          cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
-        }
-
-        // Count only final assistant turns (with stop_reason)
-        if (entry.message?.stop_reason) {
-          turns++;
-        }
-      } catch { /* skip malformed lines */ }
-    });
-
-    rl.on("close", () => {
-      const result: SessionTokenUsage = {
-        session_id: sessionId,
-        jsonl_path: jsonlPath,
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        cache_read_tokens: cacheReadTokens,
-        cache_creation_tokens: cacheCreationTokens,
-        turns,
-        cost_usd: calculateCost({
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
-          cache_read_tokens: cacheReadTokens,
-          cache_creation_tokens: cacheCreationTokens,
-        }),
-        file_size_bytes: st.size,
-        last_modified: new Date(st.mtimeMs).toISOString(),
-      };
-
-      // Cache result
-      tokenCache.set(cacheKey, { result, accessTime: Date.now() });
-      evictTokenCache();
-
-      resolve(result);
-    });
-
-    rl.on("error", reject);
-  });
+  return {
+    session_id: basename(jsonlPath, ".jsonl"),
+    jsonl_path: jsonlPath,
+    input_tokens: state.input,
+    output_tokens: state.output,
+    cache_read_tokens: state.cacheRead,
+    cache_creation_tokens: state.cacheCreation,
+    turns: state.turns,
+    cost_usd: calculateCost({
+      input_tokens: state.input,
+      output_tokens: state.output,
+      cache_read_tokens: state.cacheRead,
+      cache_creation_tokens: state.cacheCreation,
+    }),
+    file_size_bytes: st.size,
+    last_modified: new Date(st.mtimeMs).toISOString(),
+    daily,
+  };
 }
 
 /**
@@ -458,6 +648,118 @@ export async function getProjectTokenUsage(
   }
 
   return { name, path: projectPath, sessions, total };
+}
+
+// -- Range aggregation --------------------------------------------------------
+
+/** A zeroed {@link TokenTotals}. */
+function emptyTotals(): TokenTotals {
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    total_tokens: 0,
+    turns: 0,
+    cost_usd: 0,
+  };
+}
+
+/** Accumulate `src` into `dst` in place. */
+function addTotals(dst: TokenTotals, src: TokenTotals): void {
+  dst.input_tokens += src.input_tokens;
+  dst.output_tokens += src.output_tokens;
+  dst.cache_read_tokens += src.cache_read_tokens;
+  dst.cache_creation_tokens += src.cache_creation_tokens;
+  dst.total_tokens += src.total_tokens;
+  dst.turns += src.turns;
+  dst.cost_usd += src.cost_usd;
+}
+
+/**
+ * Inclusive lower bound for a range, as a local `YYYY-MM-DD` key.
+ *
+ * - `day`  → today only
+ * - `week` → the last 7 calendar days (today inclusive), matching how the
+ *            dashboard's other rolling stats read
+ * - `all`  → no bound
+ */
+export function rangeStartKey(range: TokenRange, now = new Date()): string | null {
+  if (range === "all") return null;
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (range === "week") start.setDate(start.getDate() - 6);
+  const y = start.getFullYear();
+  const m = String(start.getMonth() + 1).padStart(2, "0");
+  const d = String(start.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Build the range-scoped summary the dashboard's Tokens panel renders.
+ *
+ * `projects` are the already-scanned per-project usages, so this is pure
+ * in-memory folding — switching ranges in the UI costs no extra file I/O
+ * beyond the (now incremental) rescan of whatever changed.
+ */
+export function summariseTokenRange(
+  projects: ProjectTokenUsage[],
+  range: TokenRange,
+  now = new Date(),
+): Omit<TokenRangeSummary, "generated_at" | "scan_ms"> {
+  const since = rangeStartKey(range, now);
+  const totals = emptyTotals();
+  const dailyMap = new Map<string, TokenDayBucket>();
+  const outProjects: TokenRangeProject[] = [];
+
+  for (const project of projects) {
+    const projectTotals = emptyTotals();
+    const outSessions: TokenRangeSession[] = [];
+
+    for (const session of project.sessions) {
+      const sessionTotals = emptyTotals();
+
+      for (const bucket of session.daily) {
+        if (since && bucket.date < since) continue;
+        addTotals(sessionTotals, bucket);
+
+        // Fold into the cross-project daily series.
+        let day = dailyMap.get(bucket.date);
+        if (!day) {
+          day = { ...emptyTotals(), date: bucket.date };
+          dailyMap.set(bucket.date, day);
+        }
+        addTotals(day, bucket);
+      }
+
+      // Drop sessions that contributed nothing to this range.
+      if (sessionTotals.total_tokens === 0 && sessionTotals.turns === 0) continue;
+      outSessions.push({
+        session_id: session.session_id,
+        project: project.name,
+        path: session.jsonl_path,
+        totals: sessionTotals,
+        last_modified: session.last_modified,
+      });
+      addTotals(projectTotals, sessionTotals);
+    }
+
+    if (projectTotals.total_tokens === 0 && projectTotals.turns === 0) continue;
+    outSessions.sort((a, b) => b.totals.total_tokens - a.totals.total_tokens);
+    outProjects.push({
+      name: project.name,
+      path: project.path,
+      totals: projectTotals,
+      sessions: outSessions,
+    });
+    addTotals(totals, projectTotals);
+  }
+
+  outProjects.sort((a, b) => b.totals.total_tokens - a.totals.total_tokens);
+  const daily = [...dailyMap.values()].sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : 0,
+  );
+
+  return { range, since, totals, projects: outProjects, daily };
 }
 
 // -- Conversation tail reader -------------------------------------------------

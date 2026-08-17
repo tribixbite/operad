@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — the dashboard's Tokens panel is interactive
+
+- **The Tokens card now has an All time / Week / Today selector**, headline
+  stats for the selected range, a daily chart, and a per-project breakdown that
+  expands to individual sessions. Backed by a new
+  `GET /api/token-usage?range=all|week|day`, which shares its collection step
+  with `/api/tokens` so the two cannot drift.
+
+  Deliberately built on the JSONL scan rather than the SQLite aggregates
+  (`getDailyTokens`, `getWindowTokens`, `computeQuotaStatus`). Those read the
+  `costs` table, which only the agent/SDK path writes — on an install that runs
+  no agents it is empty, and the old expanded view rendered "No token data
+  available" permanently as a result.
+
+### Fixed — the Tokens panel was expensive and mostly empty
+
+- **`/api/tokens` re-parsed the entire JSONL corpus on every call.** The result
+  cache held 10 entries against a 28-file / 137 MB working set, so it thrashed
+  100%: five consecutive identical requests measured 1.284 s, 1.578 s, 1.221 s,
+  1.100 s and 1.075 s — a working cache serves the last four in milliseconds.
+  Requests to `/api/status` sampled during a scan spiked from 2–4 ms to 260 ms.
+
+  The scanner is now incremental. Claude's logs are append-only, so a grown
+  file is parsed as "cached state + the appended bytes"; a shrunk one falls
+  back to a full rescan. Measured against the same corpus: cold 806 ms, then
+  2 ms and 1 ms. A 46.5 MB file costs 187 ms cold and 1 ms after one appended
+  line, with the delta exact. Concurrent callers share one in-flight scan.
+
+- **The panel polled every 30 s even while collapsed**, so the cost above was
+  paid continuously in the background. Polling is now scoped to the open card.
+
+- **The weekly quota display had disappeared from the dashboard entirely** —
+  plan badge, weekly budget bar, velocity trend, rolling-window usage. It lived
+  in `CostChart`, which became a presentational component. Restored to the
+  Tokens card, and now rendered only when there is a configured limit or
+  recorded usage, so an install with neither gets no dead 0 / 0 bar.
+
 ### Added
 
 - **`operad stream` now starts the supervision watchdog when none is running.**

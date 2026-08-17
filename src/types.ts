@@ -555,6 +555,30 @@ export interface SessionTokenUsage {
   cost_usd: number;
   file_size_bytes: number;
   last_modified: string;
+  /**
+   * Per-calendar-day usage buckets (local time), ascending by date.
+   * Produced by the same single pass that computes the totals above, so
+   * All-time / Weekly / Daily views need no extra file reads. Empty only
+   * for sessions whose entries carried no parseable `timestamp`.
+   */
+  daily: TokenDayBucket[];
+}
+
+/** Token counters accumulated over an arbitrary period. */
+export interface TokenTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  /** input + output + cache_read + cache_creation */
+  total_tokens: number;
+  turns: number;
+  cost_usd: number;
+}
+
+/** Usage attributed to a single calendar day (`YYYY-MM-DD`, local time). */
+export interface TokenDayBucket extends TokenTotals {
+  date: string;
 }
 
 /** Aggregated token usage for a project (all JSONL files) */
@@ -570,6 +594,44 @@ export interface ProjectTokenUsage {
     turns: number;
     cost_usd: number;
   };
+}
+
+/** Selectable window for the dashboard's token view. */
+export type TokenRange = "all" | "week" | "day";
+
+/** One session's contribution within a selected range. */
+export interface TokenRangeSession {
+  session_id: string;
+  project: string;
+  path: string;
+  totals: TokenTotals;
+  last_modified: string;
+}
+
+/** One project's contribution within a selected range. */
+export interface TokenRangeProject {
+  name: string;
+  path: string;
+  totals: TokenTotals;
+  sessions: TokenRangeSession[];
+}
+
+/**
+ * Range-scoped token summary served by `GET /api/token-usage`.
+ * All figures derive from the Claude Code JSONL logs — the only source that
+ * is populated regardless of whether the agent/SDK cost tables are in use.
+ */
+export interface TokenRangeSummary {
+  range: TokenRange;
+  /** Inclusive ISO start of the range; null for all-time. */
+  since: string | null;
+  totals: TokenTotals;
+  projects: TokenRangeProject[];
+  /** Daily series covering the range (ascending). Always ≥1 entry when data exists. */
+  daily: TokenDayBucket[];
+  generated_at: string;
+  /** Wall-clock milliseconds the scan took (cache hits make this ~0). */
+  scan_ms: number;
 }
 
 // -- Conversation viewer ------------------------------------------------------

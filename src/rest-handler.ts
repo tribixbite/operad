@@ -23,12 +23,15 @@ import { homedir } from "node:os";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { AgentEngine } from "./agent-engine.js";
 import type { ToolEngine } from "./tool-engine.js";
-import type { Switchboard, SessionConfig } from "./types.js";
+import type {
+  Switchboard, SessionConfig, ProjectTokenUsage, TokenRange, TokenRangeSummary,
+} from "./types.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
 import { buildOodaContext } from "./cognitive.js";
 import {
   getProjectTokenUsage,
+  summariseTokenRange,
   getConversationPage,
   readTimeline,
   resolveActiveJsonl,
@@ -160,6 +163,44 @@ export class RestHandler {
   // ---------------------------------------------------------------------------
   // REST API handler (extracted from Daemon.handleDashboardApi — Sprint 13 Task 7)
   // ---------------------------------------------------------------------------
+
+  /**
+   * Token usage for every non-stopped Claude project, from both the configured
+   * sessions and the dynamic registry (registry entries whose path is already
+   * covered by a config session are skipped).
+   *
+   * Shared by `/api/tokens` and `/api/token-usage` so the two cannot drift.
+   * Per-file results are incrementally cached in claude-session.ts, so repeat
+   * calls only read bytes appended since the previous scan.
+   */
+  private async collectActiveProjectUsage(): Promise<ProjectTokenUsage[]> {
+    const results: ProjectTokenUsage[] = [];
+
+    /** A session counts as live unless it has stopped or failed. */
+    const isLive = (sessionName: string): boolean => {
+      const state = this.ctx.state.getSession(sessionName);
+      return Boolean(state) && state!.status !== "stopped" && state!.status !== "failed";
+    };
+
+    for (const cfg of this.ctx.config.sessions) {
+      if (cfg.type !== "claude" || !cfg.path) continue;
+      if (!isLive(cfg.name)) continue;
+      try {
+        results.push(await getProjectTokenUsage(cfg.name, cfg.path));
+      } catch { /* best-effort: one unreadable project must not fail the request */ }
+    }
+
+    for (const entry of this.ctx.registry.entries()) {
+      if (!entry.path) continue;
+      if (!isLive(entry.name)) continue;
+      if (results.some((r) => r.path === entry.path)) continue;
+      try {
+        results.push(await getProjectTokenUsage(entry.name, entry.path));
+      } catch { /* best-effort */ }
+    }
+
+    return results;
+  }
 
   /**
    * Handle a REST API request from DashboardServer.
@@ -754,27 +795,34 @@ export class RestHandler {
             }
           }
           try {
-            const results = [];
-            for (const cfg of this.ctx.config.sessions) {
-              if (cfg.type !== "claude" || !cfg.path) continue;
-              const state = this.ctx.state.getSession(cfg.name);
-              if (!state || state.status === "stopped" || state.status === "failed") continue;
-              try {
-                results.push(await getProjectTokenUsage(cfg.name, cfg.path));
-              } catch { /* best-effort */ }
-            }
-            for (const entry of this.ctx.registry.entries()) {
-              if (!entry.path) continue;
-              const state = this.ctx.state.getSession(entry.name);
-              if (!state || state.status === "stopped" || state.status === "failed") continue;
-              if (results.some(r => r.path === entry.path)) continue;
-              try {
-                results.push(await getProjectTokenUsage(entry.name, entry.path));
-              } catch { /* best-effort */ }
-            }
-            return { status: 200, data: results };
+            return { status: 200, data: await this.collectActiveProjectUsage() };
           } catch (err) {
             return { status: 500, data: { error: `Failed to compute tokens: ${err}` } };
+          }
+        }
+        case "token-usage": {
+          // Range-scoped token summary backing the dashboard's Tokens panel.
+          // Derived from the Claude Code JSONL logs rather than the `costs`
+          // SQLite table, because that table is only written by the agent/SDK
+          // path and is empty for anyone not using those features — which is
+          // why /api/tokens-daily and /api/quota report zeroes.
+          const rangeParam = (queryParams.get("range") ?? "all").toLowerCase();
+          const range: TokenRange =
+            rangeParam === "day" || rangeParam === "week" ? rangeParam : "all";
+          try {
+            const started = Date.now();
+            const projects = await this.collectActiveProjectUsage();
+            const summary = summariseTokenRange(projects, range);
+            return {
+              status: 200,
+              data: {
+                ...summary,
+                generated_at: new Date().toISOString(),
+                scan_ms: Date.now() - started,
+              } satisfies TokenRangeSummary,
+            };
+          } catch (err) {
+            return { status: 500, data: { error: `Failed to compute token usage: ${err}` } };
           }
         }
         case "conversation": {

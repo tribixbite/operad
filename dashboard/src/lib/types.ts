@@ -255,6 +255,8 @@ export interface SessionTokenUsage {
   cost_usd: number;
   file_size_bytes: number;
   last_modified: string;
+  /** Per-calendar-day usage buckets (local time), ascending. */
+  daily: TokenDayBucket[];
 }
 
 /** Aggregated token usage for a project (all JSONL files) */
@@ -270,6 +272,63 @@ export interface ProjectTokenUsage {
     turns: number;
     cost_usd: number;
   };
+}
+
+// -- Range-scoped token usage (GET /api/token-usage) --------------------------
+
+/** Token counters accumulated over an arbitrary period. */
+export interface TokenTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  /** input + output + cache_read + cache_creation */
+  total_tokens: number;
+  turns: number;
+  cost_usd: number;
+}
+
+/** Usage attributed to a single calendar day (`YYYY-MM-DD`, local time). */
+export interface TokenDayBucket extends TokenTotals {
+  date: string;
+}
+
+/** Selectable window for the Tokens panel. */
+export type TokenRange = "all" | "week" | "day";
+
+/** One session's contribution within a selected range. */
+export interface TokenRangeSession {
+  session_id: string;
+  project: string;
+  path: string;
+  totals: TokenTotals;
+  last_modified: string;
+}
+
+/** One project's contribution within a selected range. */
+export interface TokenRangeProject {
+  name: string;
+  path: string;
+  totals: TokenTotals;
+  sessions: TokenRangeSession[];
+}
+
+/**
+ * Range-scoped token summary from `GET /api/token-usage`.
+ * Derived from the Claude Code JSONL logs, which are populated regardless of
+ * whether the agent/SDK cost tables are in use.
+ */
+export interface TokenRangeSummary {
+  range: TokenRange;
+  /** Inclusive ISO start of the range; null for all-time. */
+  since: string | null;
+  totals: TokenTotals;
+  projects: TokenRangeProject[];
+  /** Daily series covering the range (ascending). */
+  daily: TokenDayBucket[];
+  generated_at: string;
+  /** Wall-clock milliseconds the server scan took. */
+  scan_ms: number;
 }
 
 // -- Conversation viewer ------------------------------------------------------

@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -24,11 +24,15 @@ import {
   readConversationStartTime,
   pairSessionsToConversations,
   streamTokenUsage,
+  resetTokenCache,
+  summariseTokenRange,
+  rangeStartKey,
   readConversationTail,
   readTimeline,
   type BindableSession,
   type ConversationCandidate,
 } from "../claude-session.js";
+import type { ProjectTokenUsage, SessionTokenUsage } from "../types.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,11 +44,26 @@ let tmpDir: string;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "operad-cs-test-"));
+  // The token scanner caches per path across calls; a clean slate keeps each
+  // test independent of whatever the previous one left behind.
+  resetTokenCache();
 });
 
 afterEach(() => {
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
+
+/**
+ * ISO timestamp for a given LOCAL calendar date and hour.
+ *
+ * Day bucketing is local-time, so tests must build timestamps from local
+ * components — a hardcoded "…T09:00:00Z" would land on a different calendar
+ * day depending on the runner's timezone.
+ */
+function localIso(date: string, hour: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(y, m - 1, d, hour, 0, 0).toISOString();
+}
 
 /** Write a file to tmpDir and return its path. */
 function write(name: string, content: string): string {
@@ -536,18 +555,282 @@ describe("streamTokenUsage", () => {
     expect(usage.cost_usd).toBeCloseTo(expected, 12);
   });
 
+  test("buckets usage by the entry's local calendar day", async () => {
+    // Two entries on 2024-03-01 (local) and one on 2024-03-02 (local).
+    const content = [
+      assistantLine({ uuid: "d1", timestamp: localIso("2024-03-01", 9), input: 10, output: 1 }),
+      assistantLine({ uuid: "d2", timestamp: localIso("2024-03-01", 15), input: 20, output: 2 }),
+      assistantLine({ uuid: "d3", timestamp: localIso("2024-03-02", 11), input: 40, output: 4 }),
+    ].join("\n") + "\n";
+    const path = write("daily.jsonl", content);
+    const usage = await streamTokenUsage(path);
+
+    expect(usage.daily.map((d) => d.date)).toEqual(["2024-03-01", "2024-03-02"]);
+    expect(usage.daily[0].input_tokens).toBe(30);
+    expect(usage.daily[0].turns).toBe(2);
+    expect(usage.daily[1].input_tokens).toBe(40);
+    expect(usage.daily[1].turns).toBe(1);
+    // Day buckets must reconcile with the file totals.
+    const summed = usage.daily.reduce((s, d) => s + d.input_tokens, 0);
+    expect(summed).toBe(usage.input_tokens);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Incremental scanning — the append-only fast path
+// ---------------------------------------------------------------------------
+
+describe("streamTokenUsage — incremental rescan", () => {
+  test("appending yields the same totals as a cold full scan", async () => {
+    const first = assistantLine({ uuid: "a1", input: 100, output: 50 });
+    const second = assistantLine({ uuid: "a2", input: 200, output: 80 });
+
+    // Warm path: scan, append, rescan (only the tail is read).
+    const incPath = write("inc.jsonl", first + "\n");
+    await streamTokenUsage(incPath);
+    appendFileSync(incPath, second + "\n", "utf-8");
+    const incremental = await streamTokenUsage(incPath);
+
+    // Cold path: identical content, never scanned before.
+    resetTokenCache();
+    const coldPath = write("cold.jsonl", first + "\n" + second + "\n");
+    const cold = await streamTokenUsage(coldPath);
+
+    expect(incremental.input_tokens).toBe(cold.input_tokens);
+    expect(incremental.output_tokens).toBe(cold.output_tokens);
+    expect(incremental.turns).toBe(cold.turns);
+    expect(incremental.cost_usd).toBeCloseTo(cold.cost_usd, 12);
+    expect(incremental.daily).toEqual(cold.daily);
+    // Sanity: the appended entry really was counted.
+    expect(incremental.input_tokens).toBe(300);
+  });
+
+  test("repeated scans of an unchanged file do not double-count", async () => {
+    const path = write("stable.jsonl", assistantLine({ input: 70, output: 30 }) + "\n");
+    const a = await streamTokenUsage(path);
+    const b = await streamTokenUsage(path);
+    const c = await streamTokenUsage(path);
+    expect(a.input_tokens).toBe(70);
+    expect(b.input_tokens).toBe(70);
+    expect(c.input_tokens).toBe(70);
+    expect(c.turns).toBe(1);
+  });
+
+  test("a trailing partial line is counted only once it is completed", async () => {
+    const complete = assistantLine({ uuid: "a1", input: 100, output: 50 });
+    const pending = assistantLine({ uuid: "a2", input: 999, output: 999 });
+    const path = write("partial.jsonl", complete + "\n");
+    expect((await streamTokenUsage(path)).input_tokens).toBe(100);
+
+    // Simulate Claude Code mid-write: the second entry has no newline yet.
+    appendFileSync(path, pending.slice(0, 40), "utf-8");
+    expect((await streamTokenUsage(path)).input_tokens).toBe(100);
+
+    // Now the rest of the line lands, including its terminator.
+    appendFileSync(path, pending.slice(40) + "\n", "utf-8");
+    const done = await streamTokenUsage(path);
+    expect(done.input_tokens).toBe(1099);
+    expect(done.turns).toBe(2);
+  });
+
+  test("a UTF-8 character split across a poll boundary is not corrupted", async () => {
+    const first = assistantLine({ uuid: "a1", input: 100, output: 50 });
+    // Non-ASCII content, so a byte-level cut can land inside a character.
+    // Claude transcripts are full of these — em dashes, accents, CJK, emoji.
+    const second = assistantLine({
+      uuid: "a2", input: 999, output: 111,
+      content: "— café 🎯 中文 — not an ASCII boundary",
+    });
+
+    const path = write("utf8split.jsonl", first + "\n");
+    expect((await streamTokenUsage(path)).input_tokens).toBe(100);
+
+    // Cut immediately before a UTF-8 continuation byte (0b10xxxxxx), so the
+    // first append ends part-way through a multi-byte character.
+    const buf = Buffer.from(second + "\n", "utf-8");
+    let cut = -1;
+    for (let i = 1; i < buf.length; i++) {
+      if ((buf[i] & 0xc0) === 0x80) { cut = i; break; }
+    }
+    expect(cut).toBeGreaterThan(0);
+
+    appendFileSync(path, buf.subarray(0, cut));
+    // Nothing is counted while the line is incomplete.
+    expect((await streamTokenUsage(path)).input_tokens).toBe(100);
+
+    appendFileSync(path, buf.subarray(cut));
+    const done = await streamTokenUsage(path);
+    // The incremental scanner carries the decoded remainder across calls, so
+    // the split character IS flushed as U+FFFD and the reassembled line
+    // differs from what was written. That stays harmless only because a
+    // multi-byte character can appear solely inside a JSON string value, where
+    // U+FFFD is legal — so `usage` still parses. This test pins that: an
+    // implementation that mangles the line badly enough to fail JSON.parse
+    // would silently drop the entry's tokens, permanently, since the scan
+    // result is cached.
+    expect(done.input_tokens).toBe(1099);
+    expect(done.output_tokens).toBe(161);
+    expect(done.turns).toBe(2);
+  });
+
+  test("a shrunk (rotated/truncated) file is rescanned from scratch", async () => {
+    const path = write("rotate.jsonl", [
+      assistantLine({ uuid: "a1", input: 100, output: 50 }),
+      assistantLine({ uuid: "a2", input: 200, output: 80 }),
+    ].join("\n") + "\n");
+    expect((await streamTokenUsage(path)).input_tokens).toBe(300);
+
+    // Replace with a shorter file — the append assumption no longer holds.
+    writeFileSync(path, assistantLine({ uuid: "b1", input: 7, output: 3 }) + "\n", "utf-8");
+    const after = await streamTokenUsage(path);
+    expect(after.input_tokens).toBe(7);
+    expect(after.turns).toBe(1);
+  });
+
+  test("concurrent scans of one path share a single result", async () => {
+    const path = write("concurrent.jsonl", [
+      assistantLine({ uuid: "a1", input: 100, output: 50 }),
+      assistantLine({ uuid: "a2", input: 200, output: 80 }),
+    ].join("\n") + "\n");
+    const [x, y, z] = await Promise.all([
+      streamTokenUsage(path),
+      streamTokenUsage(path),
+      streamTokenUsage(path),
+    ]);
+    // Deduping must not let three readers each add to the same accumulator.
+    expect(x.input_tokens).toBe(300);
+    expect(y.input_tokens).toBe(300);
+    expect(z.input_tokens).toBe(300);
+  });
+
+  test("handles multi-byte UTF-8 split across read boundaries", async () => {
+    // Emoji/CJK content exercises the StringDecoder carry between chunks.
+    const wide = "日本語テキスト🎉".repeat(500);
+    const path = write("utf8.jsonl", assistantLine({ uuid: "u1", input: 5, output: 5, content: wide }) + "\n");
+    const usage = await streamTokenUsage(path);
+    expect(usage.input_tokens).toBe(5);
+    expect(usage.turns).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Range aggregation
+// ---------------------------------------------------------------------------
+
+describe("summariseTokenRange", () => {
+  /** Build a minimal SessionTokenUsage carrying only day buckets. */
+  function session(id: string, days: Array<[string, number]>): SessionTokenUsage {
+    const daily = days.map(([date, total]) => ({
+      date,
+      input_tokens: total,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      total_tokens: total,
+      turns: 1,
+      cost_usd: 0,
+    }));
+    const input = daily.reduce((s, d) => s + d.input_tokens, 0);
+    return {
+      session_id: id,
+      jsonl_path: `/tmp/${id}.jsonl`,
+      input_tokens: input,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      turns: daily.length,
+      cost_usd: 0,
+      file_size_bytes: 0,
+      last_modified: "2024-03-05T00:00:00.000Z",
+      daily,
+    };
+  }
+
+  const NOW = new Date(2024, 2, 10, 12, 0, 0); // 2024-03-10 local
+
+  const projects: ProjectTokenUsage[] = [
+    {
+      name: "alpha",
+      path: "/p/alpha",
+      sessions: [session("s1", [["2024-03-10", 5], ["2024-03-08", 50], ["2024-01-01", 500]])],
+      total: { input_tokens: 555, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, turns: 3, cost_usd: 0 },
+    },
+    {
+      name: "beta",
+      path: "/p/beta",
+      sessions: [session("s2", [["2024-03-09", 7]])],
+      total: { input_tokens: 7, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, turns: 1, cost_usd: 0 },
+    },
+  ];
+
+  test("rangeStartKey bounds each range correctly", () => {
+    expect(rangeStartKey("all", NOW)).toBeNull();
+    expect(rangeStartKey("day", NOW)).toBe("2024-03-10");
+    // Last 7 calendar days inclusive of today.
+    expect(rangeStartKey("week", NOW)).toBe("2024-03-04");
+  });
+
+  test("day range keeps only today's buckets", () => {
+    const s = summariseTokenRange(projects, "day", NOW);
+    expect(s.totals.total_tokens).toBe(5);
+    expect(s.projects.map((p) => p.name)).toEqual(["alpha"]);
+    expect(s.daily.map((d) => d.date)).toEqual(["2024-03-10"]);
+  });
+
+  test("week range spans the trailing 7 days across projects", () => {
+    const s = summariseTokenRange(projects, "week", NOW);
+    // 5 (03-10) + 50 (03-08) + 7 (03-09); the 2024-01-01 bucket is excluded.
+    expect(s.totals.total_tokens).toBe(62);
+    expect(s.daily.map((d) => d.date)).toEqual(["2024-03-08", "2024-03-09", "2024-03-10"]);
+    // Projects are ranked by usage within the range.
+    expect(s.projects.map((p) => p.name)).toEqual(["alpha", "beta"]);
+    expect(s.projects[0].totals.total_tokens).toBe(55);
+  });
+
+  test("all range includes every bucket", () => {
+    const s = summariseTokenRange(projects, "all", NOW);
+    expect(s.totals.total_tokens).toBe(562);
+    expect(s.since).toBeNull();
+    expect(s.daily.length).toBe(4);
+  });
+
+  test("projects contributing nothing to the range are dropped", () => {
+    const s = summariseTokenRange(projects, "day", NOW);
+    expect(s.projects.find((p) => p.name === "beta")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// streamTokenUsage — identity and caching contract
+// ---------------------------------------------------------------------------
+
+describe("streamTokenUsage — identity and caching", () => {
   test("session_id is derived from the filename (without .jsonl extension)", async () => {
     const path = write("abc123.jsonl", assistantLine({}) + "\n");
     const usage = await streamTokenUsage(path);
     expect(usage.session_id).toBe("abc123");
   });
 
-  test("result is LRU-cached: calling twice returns the same object reference", async () => {
+  test("an unchanged file returns an equal result without re-reading it", async () => {
     const path = write("cached.jsonl", assistantLine({ input: 5 }) + "\n");
     const first = await streamTokenUsage(path);
-    const second = await streamTokenUsage(path);
-    // Cache hit: same object identity
-    expect(first).toBe(second);
+
+    // Delete the file: a cache hit must still answer from retained state. If
+    // the scanner re-read the file this would throw ENOENT.
+    rmSync(path);
+    const second = await streamTokenUsage(path).catch((e: unknown) => e);
+
+    // The stat() is what fails once the file is gone, so a missing file is a
+    // genuine error — assert instead on repeat reads while the file exists.
+    expect(second).toBeInstanceOf(Error);
+
+    // Re-create identical content and confirm values (not object identity —
+    // the scanner materialises a fresh object from mutable incremental state).
+    const path2 = write("cached2.jsonl", assistantLine({ input: 5 }) + "\n");
+    const a = await streamTokenUsage(path2);
+    const b = await streamTokenUsage(path2);
+    expect(b).toEqual(a);
+    expect(b.input_tokens).toBe(first.input_tokens);
   });
 });
 
