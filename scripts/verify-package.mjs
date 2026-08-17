@@ -26,6 +26,12 @@ import { statSync } from "node:fs";
  */
 const REQUIRED = [
   { path: "dist/tmx.js", why: "CLI entry point (package.json#bin)" },
+  // `operad stream` spawns this to supervise the daemon, but skips silently
+  // when it is absent (it has to — a global install may legitimately not ship
+  // it). Dropping it from files[] would therefore disable OOM recovery for
+  // every npm user with no signal at all, which is the failure mode the rest
+  // of this file exists to prevent.
+  { path: "watchdog.sh", why: "supervision script spawned by `operad stream`" },
   { path: "dashboard/dist/index.html", why: "dashboard SPA shell" },
   { path: "dashboard/dist/_app/", why: "dashboard JS/CSS assets", prefix: true },
   { path: "README.md", why: "shown on the npmjs package page" },
