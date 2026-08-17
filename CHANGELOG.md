@@ -18,6 +18,47 @@ All notable changes to this project will be documented in this file.
   Skipped on Windows. Verified end to end: `SIGKILL` the daemon, and the
   watchdog restarts it at its next poll (42 s measured).
 
+### Fixed — the watchdog only worked on the author's machine
+
+- **`watchdog.sh` hardcoded the binary as `$HOME/.local/bin/tmx`** — the
+  author's dev symlink. The package's `bin` entry is named `operad` and lands
+  wherever the package manager puts it, so on every install but that one the
+  path did not exist: `daemon_alive` exited 127 and read as "daemon is dead",
+  then `"$TMX" stream` exited 127 too, and the retry loop span on that forever.
+  Harmless while nothing started the watchdog automatically — but `operad
+  stream` now does, so the previous release would have left an orphaned
+  looping process behind on every install that is not this one.
+
+  The binary is resolved properly now: `$OPERAD_BIN` (which `operad stream`
+  sets to the exact bundle that spawned the watchdog), then `operad` or `tmx`
+  on `PATH`, then the legacy symlink, then `dist/tmx.js` beside the script.
+  When none of those exist the watchdog logs why and **exits 1** instead of
+  retrying something no retry can fix — the same principle the backoff was
+  added for.
+
+- **The single-instance guard silently passed on any system without `/proc`.**
+  It read `/proc/$pid/cmdline` via `mapfile -d`, so on macOS — no `/proc`, and
+  bash 3.2 has no `mapfile -d` — every check returned "not a watchdog" and the
+  unmatched `/proc/[0-9]*` glob was tested as a literal string. The guard was
+  therefore inert exactly where it was needed, and with `operad stream`
+  spawning one, each invocation would have stacked another watchdog. Process
+  inspection now falls back to `ps`, the scan is skipped rather than run
+  against a literal glob, and neither path needs bash 4.4.
+
+- **`daemon_alive` treated a missing `timeout(1)` as a dead daemon.** Stock
+  macOS ships neither `timeout` nor `gtimeout`; the resulting 127 meant the
+  watchdog would restart a daemon that was never down, on every poll. It now
+  detects `timeout`/`gtimeout` and runs the check unbounded (with a log line)
+  when neither is present, and `rotate_log` falls back to BSD `stat -f %z` so
+  the log actually rotates there.
+
+- **The watchdog log went to the Android path on every platform.** `operad
+  stream` passes `$OPERAD_LOG_DIR` from the platform layer, so the log lands
+  where `operad logs` looks for it instead of in a directory nothing reads.
+
+- Removed a dead `SOCKET` variable, and stopped logging "attaching tmux" on the
+  headless path, where it was written every poll and was never true.
+
 ### Fixed — the build could disable the watchdog
 
 - **`dist/tmx.js` was not built executable.** It carries a

@@ -17,9 +17,10 @@ import type { OrchestratorContext } from "./orchestrator-context.js";
  *   - Daily agent snapshots (self-deduplicating, called from cognitive timer)
  *   - Memory consolidation during idle periods (maybeConsolidate)
  *
- * Methods not yet extracted (entangled with Daemon private state):
- *   - executeScheduledRun — calls extractAgentActions + executeOodaActions,
- *     themselves not yet extracted; stays in Daemon for now (TODO)
+ * Scheduled runs (executeScheduledRun) have since moved to AgentEngine — this
+ * note used to say they stayed in Daemon and applied both extractAgentActions
+ * and executeOodaActions, which is now doubly wrong: running both on one
+ * response applied every learning twice, and that pairing was removed.
  *
  * Extraction is incremental — this class establishes the injection point.
  * Add methods here as Daemon dependencies are disentangled.

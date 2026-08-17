@@ -226,7 +226,8 @@ async function ensureWatchdog(configPath: string | undefined): Promise<void> {
     // No readable config — a first run. Supervising is the safer default.
   }
 
-  const repoRoot = join(dirname(realpathSync(__filename)), "..");
+  const bundlePath = realpathSync(__filename);
+  const repoRoot = join(dirname(bundlePath), "..");
   const watchdogPath = join(repoRoot, "watchdog.sh");
   if (!existsSync(watchdogPath)) return;
 
@@ -234,10 +235,25 @@ async function ensureWatchdog(configPath: string | undefined): Promise<void> {
     // setsid-equivalent: detached + unref so it survives this process exiting,
     // and stdio ignored so it never holds this terminal open. No tty means the
     // watchdog takes its headless path and polls instead of trying to attach.
+    //
+    // OPERAD_BIN names the exact bundle running right now. The script used to
+    // hardcode `$HOME/.local/bin/tmx` — the author's dev symlink — so on any
+    // other install it invoked a path that did not exist, got 127, and retried
+    // that forever. It still falls back to a PATH lookup, but being told beats
+    // guessing: it supervises the build that spawned it rather than whichever
+    // copy wins a PATH lookup.
+    //
+    // OPERAD_LOG_DIR likewise, because the directory is platform-dependent
+    // (Android keeps the legacy `tmx` name) and this side knows which one.
     const child = spawn("bash", [watchdogPath], {
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, OPERAD_WATCHDOG: "1" },
+      env: {
+        ...process.env,
+        OPERAD_WATCHDOG: "1",
+        OPERAD_BIN: bundlePath,
+        OPERAD_LOG_DIR: detectPlatform().defaultLogDir(),
+      },
     });
     child.unref();
     console.log(
