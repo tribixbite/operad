@@ -1861,6 +1861,11 @@ ${BOLD}OPTIONS${RESET}
   -h, --help           Show this help
   -v, --version        Show version
 
+${BOLD}STREAM OPTIONS${RESET}
+  --attach             Attach this terminal to tmux once boot finishes
+  --no-watchdog        Don't start the supervision watchdog for this run
+                       (permanently: [operad] auto_watchdog = false)
+
 ${BOLD}EXAMPLES${RESET}
   operad stream            # Start everything (daemon + sessions + dashboard)
   operad status clev       # Fuzzy match → cleverkeys status
