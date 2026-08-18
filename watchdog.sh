@@ -188,6 +188,17 @@ backoff=$MIN_BACKOFF
 # supervises quietly instead of looping every three seconds.
 HEADLESS_POLL=60
 
+# Write a heartbeat every this many unchanged polls (30 x 60s = 30 min). The
+# loop otherwise logs only changes, so without this a healthy watchdog would be
+# indistinguishable in the log from one that had stopped.
+HEARTBEAT_EVERY=30
+
+# Loop state for change-only logging.
+LAST_STATE=""
+DAEMON_WAS_UP=""
+POLLS=0
+STATE=""
+
 rotate_log() {
   [ -f "$LOG" ] || return 0
   local size
@@ -202,6 +213,62 @@ rotate_log() {
 log() {
   rotate_log
   echo "[$(date)] $*" >> "$LOG"
+}
+
+# Keep the CPU awake, independently of the daemon.
+#
+# This is the difference between supervising and only appearing to. Without a
+# wake lock Android suspends the CPU, and `sleep` counts CLOCK_MONOTONIC, which
+# does not advance across suspend — so the poll below silently becomes 5, 10 or
+# 340 minutes instead of one, and a daemon that dies at the start of such a
+# window is not noticed until it ends. Measured on this device before the fix:
+# 60 gaps totalling 933 minutes over three days, the daemon frozen in step.
+#
+# The daemon acquires a lock too, but the daemon is the thing that might be
+# dead — so the supervisor cannot depend on it for the conditions it needs to
+# supervise. Acquire-only, never released: termux-wake-unlock gets processes
+# killed.
+#
+# No grep and no rg: grep can be a login-profile shell function on this device
+# that injects flags and survives into non-interactive bash, and rg is not
+# guaranteed to be installed. bash's own pattern matching has neither problem.
+ensure_wake_lock() {
+  command -v termux-wake-lock > /dev/null 2>&1 || return 0
+
+  # Absolute path: Termux's PATH does not include /system/bin. Overridable so
+  # both branches of this function can actually be tested.
+  local dumpsys="${OPERAD_DUMPSYS:-/system/bin/dumpsys}"
+  if [ -x "$dumpsys" ]; then
+    local power
+    # `termux:service-wakelock` is the tag Termux registers with PowerManager.
+    power=$("$dumpsys" power 2>/dev/null) || power=""
+    case "$power" in
+      *"termux:service-wakelock"*) return 0 ;;   # already held, nothing to do
+    esac
+    # Only report a LOSS once we have seen the lock exist at least once;
+    # otherwise a device where dumpsys is unreadable logs every poll.
+    if [ -n "$power" ]; then
+      log "Wake lock not held by Termux — acquiring (without it the device suspends and this loop stops polling)"
+    fi
+  fi
+
+  termux-wake-lock > /dev/null 2>&1 || log "WARNING: termux-wake-lock failed"
+}
+
+# Sleep, then report how much wall-clock actually passed.
+#
+# The overshoot IS the outage: it is exactly the interval during which a dead
+# daemon would not have been noticed. Logging it turns an invisible failure
+# into an entry someone can find.
+sleep_reporting_overshoot() {
+  local want="$1" t0 t1 actual
+  t0=$(date +%s)
+  sleep "$want"
+  t1=$(date +%s)
+  actual=$((t1 - t0))
+  if [ "$actual" -gt $((want * 2)) ]; then
+    log "SUSPENDED: asked for ${want}s, ${actual}s of wall clock passed — supervision was blind for $((actual - want))s"
+  fi
 }
 
 # Resolve the binary once, up front. If it cannot be found there is nothing to
@@ -238,13 +305,23 @@ daemon_alive() {
 }
 
 while true; do
+  # Before anything else: make sure the CPU can stay awake. Every other check
+  # in this loop is worthless if the device suspends between iterations,
+  # because this process stops running without ever stopping "running".
+  ensure_wake_lock
+
   # If daemon is already running, skip boot entirely — just attach tmux.
   if daemon_alive; then
-    # Said "attaching tmux" unconditionally, which is wrong on the headless
-    # path below — where it is also the line written every poll, forever.
-    log "Daemon already running"
+    # Only worth a line when it is news. This said "Daemon already running,
+    # attaching tmux" on every poll — wrong on the headless path, and the
+    # steady-state noise that made a real outage hard to see in the log.
+    if [ "$DAEMON_WAS_UP" != "1" ]; then
+      log "Daemon is up"
+      DAEMON_WAS_UP=1
+    fi
     backoff=$MIN_BACKOFF
   else
+    DAEMON_WAS_UP=0
     log "Starting operad stream..."
 
     # Exit 126 is "found but not executable" — a rebuild that dropped the +x bit
@@ -295,13 +372,27 @@ while true; do
     # A returning attach means the user detached or tmux died; re-check promptly.
     sleep 3
   else
-    if [ ! -t 0 ]; then
-      log "Headless (no tty) — supervising without attaching"
-    else
-      log "No tmux sessions available, skipping attach"
+    # These two lines used to be written on every poll, alongside "Daemon
+    # already running" — two lines a minute, forever, which is how this log
+    # reached 692 KB saying nothing. Log a state CHANGE always, and otherwise
+    # only a periodic heartbeat: enough to prove the loop is alive and to date
+    # any gap in it, without burying the lines that matter.
+    if [ ! -t 0 ]; then STATE=headless; else STATE=noattach; fi
+    POLLS=$((POLLS + 1))
+    if [ "$STATE" != "$LAST_STATE" ]; then
+      if [ "$STATE" = headless ]; then
+        log "Headless (no tty) — supervising without attaching"
+      else
+        log "No tmux sessions available, skipping attach"
+      fi
+      LAST_STATE="$STATE"
+      POLLS=0
+    elif [ "$POLLS" -ge "$HEARTBEAT_EVERY" ]; then
+      log "Still supervising ($STATE, daemon up)"
+      POLLS=0
     fi
     # Nothing to attach to, so this is a plain supervision poll. Three seconds
     # would be a spin; a minute is responsive enough to restart a dead daemon.
-    sleep "$HEADLESS_POLL"
+    sleep_reporting_overshoot "$HEADLESS_POLL"
   fi
 done

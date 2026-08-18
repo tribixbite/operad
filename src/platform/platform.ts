@@ -107,6 +107,21 @@ export interface Platform {
   /** Acquire a wake/sleep inhibitor. Returns true if acquired. */
   acquireWakeLock(): boolean;
 
+  /**
+   * Is a wake lock actually held right now, according to the OS?
+   *
+   * `acquireWakeLock()` returning true only means the command ran. On Android
+   * it fires an intent at TermuxService, and the lock disappears if that
+   * service is later killed or restarted — with nothing reported to us. The
+   * daemon believed it still held one for over a day while `dumpsys power`
+   * listed none, the device suspended freely, and supervision went blind for
+   * minutes at a time.
+   *
+   * Returns null when the platform cannot answer cheaply; callers must treat
+   * null as "unknown", never as "not held".
+   */
+  isWakeLockHeld(): boolean | null;
+
   // -- Session env (session.ts) ---------------------------------------------
 
   /**

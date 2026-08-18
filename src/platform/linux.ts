@@ -183,6 +183,27 @@ export class LinuxPlatform implements Platform {
 
   // -- Wake lock -------------------------------------------------------------
 
+  /** PID of the detached `systemd-inhibit` child that holds the inhibitor. */
+  private inhibitorPid: number | null = null;
+
+  /**
+   * Is the inhibitor still up? The lock lives exactly as long as the child
+   * process does, so its liveness IS the answer — and the child can be killed
+   * (OOM, a stray pkill) without anything telling the daemon.
+   *
+   * Returns null before any acquire has been attempted: "not yet tried" is not
+   * the same as "tried and gone".
+   */
+  isWakeLockHeld(): boolean | null {
+    if (this.inhibitorPid === null) return null;
+    try {
+      process.kill(this.inhibitorPid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Acquire a sleep inhibitor via systemd-inhibit.
    * Spawns a detached `systemd-inhibit sleep infinity` process that keeps the
@@ -217,6 +238,7 @@ export class LinuxPlatform implements Platform {
         },
       );
       child.unref();
+      this.inhibitorPid = child.pid ?? null;
       return true;
     } catch {
       return false;

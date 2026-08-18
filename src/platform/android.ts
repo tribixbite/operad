@@ -642,6 +642,36 @@ export class AndroidPlatform implements Platform {
     }
   }
 
+  /**
+   * Ask the OS whether Termux actually holds a wake lock.
+   *
+   * `termux-wake-lock` exits 0 as soon as the intent is delivered, so a zero
+   * exit says nothing about whether TermuxService took (or kept) the lock.
+   * This device ran for over a day with the daemon reporting "wake: held"
+   * while `dumpsys power` listed exactly one wake lock, belonging to Google
+   * Messages. The CPU suspended freely as a result, freezing the daemon and
+   * the watchdog together for 5-10 minutes at a time.
+   *
+   * `dumpsys` is at an absolute path because Termux's PATH does not include
+   * /system/bin. Returns null when it cannot be run at all, so "we could not
+   * check" is never mistaken for "the lock is gone" — the caller would
+   * otherwise re-acquire on a loop forever.
+   */
+  isWakeLockHeld(): boolean | null {
+    try {
+      const out = execSync("/system/bin/dumpsys power", {
+        timeout: 5000,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      // The tag Termux registers with PowerManager.
+      return out.includes("termux:service-wakelock");
+    } catch {
+      return null;
+    }
+  }
+
   // -- Session env ------------------------------------------------------------
 
   /**

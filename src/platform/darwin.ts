@@ -381,6 +381,25 @@ export class DarwinPlatform implements Platform {
 
   // -- Wake lock ------------------------------------------------------------
 
+  /** PID of the detached `caffeinate -i` child holding the assertion. */
+  private caffeinatePid: number | null = null;
+
+  /**
+   * The assertion lives exactly as long as the caffeinate child, so its
+   * liveness IS the answer — and the child can be killed without anything
+   * telling the daemon. Null before any acquire has been attempted, so
+   * "not yet tried" is never read as "tried and gone".
+   */
+  isWakeLockHeld(): boolean | null {
+    if (this.caffeinatePid === null) return null;
+    try {
+      process.kill(this.caffeinatePid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Prevent idle sleep by spawning `caffeinate -i` detached.
    * The -i flag creates an assertion to prevent system idle sleep.
@@ -393,6 +412,7 @@ export class DarwinPlatform implements Platform {
         stdio: "ignore",
       });
       child.unref();
+      this.caffeinatePid = child.pid ?? null;
       return true;
     } catch {
       return false;

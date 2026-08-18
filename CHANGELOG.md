@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — supervision was blind for 933 minutes and nothing said so
+
+- **The wake lock silently stopped being held, and the daemon never noticed.**
+  `WakeLockManager.acquire()` gated on a private `held` flag that latched: set
+  true on the first successful acquire and never cleared. `termux-wake-lock`
+  exits 0 as soon as the intent reaches TermuxService, so a zero exit says
+  nothing about whether the lock was taken or kept. When it later went away
+  with the service, `acquire()` early-returned on the stale flag forever after
+  and `operad status` kept printing `wake: held`.
+
+  Measured on the author's device: `dumpsys power` listed exactly **one** wake
+  lock, belonging to Google Messages, while the daemon had claimed to hold one
+  for over a day. `com.termux` is in the Doze whitelist, so Doze was not the
+  cause — there simply was no lock.
+
+  The consequence was not cosmetic. Without a wake lock the CPU suspends, and
+  `sleep` counts `CLOCK_MONOTONIC`, which does not advance across suspend — so
+  the daemon's timers and `watchdog.sh`'s poll loop froze **together**. The
+  watchdog was never killed; it is the same process throughout. Its 60-second
+  poll became 5-10 minutes, worst case 5h43m. Over three days: **60 gaps
+  totalling 933 minutes** in which a dead daemon would not have been noticed,
+  with the daemon confirmed silent in 17 of 18 sampled windows.
+
+  Now: `Platform.isWakeLockHeld()` asks the OS (Android via `dumpsys power`,
+  Linux/macOS via the liveness of the inhibitor child they spawn), `isHeld()`
+  reports that rather than an intention, and the health timer calls a new
+  `verify()` that re-acquires a dropped lock and logs that it did. `null` means
+  "cannot determine" and is never treated as "gone", so a platform without a
+  check does not re-acquire in a loop.
+
+- **`watchdog.sh` now holds a wake lock itself.** The supervisor cannot depend
+  on the daemon for the conditions it needs to supervise — the daemon is the
+  thing that might be dead. Acquire-only, never released.
+
+- **The watchdog reports its own suspend gaps.** It measures wall-clock across
+  each poll and logs the overshoot, which is precisely the interval during
+  which a dead daemon would have gone unnoticed. That failure was previously
+  invisible: the log looked healthy, just sparse.
+
+- **Steady-state log noise removed.** The loop wrote two lines every poll
+  regardless of state — 692 KB of "Daemon already running" / "Headless" — which
+  is what made a real outage hard to see. It logs state *changes* plus a
+  half-hourly heartbeat now, so a gap is still datable.
+
 ### Changed — the dashboard's Tokens panel is interactive
 
 - **The Tokens card now has an All time / Week / Today selector**, headline

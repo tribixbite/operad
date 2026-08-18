@@ -1237,6 +1237,16 @@ export class Daemon {
     }
     const intervalMs = this.config.orchestrator.health_interval_s * 1000;
     this.healthTimer = setInterval(() => {
+      // Re-check the wake lock on the same cadence. A lock silently dropped by
+      // the OS lets the device suspend, and suspend freezes this timer and
+      // watchdog.sh's poll loop alike — so supervision stops without any
+      // component noticing it has stopped. Deliberately before the sweep, and
+      // never allowed to prevent one.
+      try {
+        this.wake.verify();
+      } catch (err) {
+        this.log.warn(`Wake lock verification failed: ${err}`);
+      }
       this.healthSweepAndRestart();
     }, intervalMs);
   }

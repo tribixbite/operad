@@ -295,6 +295,15 @@ export class WindowsPlatform implements Platform {
     return false;
   }
 
+  /**
+   * Nothing is ever acquired here, so nothing is ever held. Reported as a
+   * definite false rather than null: this is a known answer, not an
+   * unavailable one, and returning null would make the manager retry forever.
+   */
+  isWakeLockHeld(): boolean | null {
+    return false;
+  }
+
   // -- Session env -------------------------------------------------------------
 
   /**
