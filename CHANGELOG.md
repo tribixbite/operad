@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — three defects found by running the above, not trusting it
+
+- **The watchdog could not invoke operad at all unless Termux:Boot started it.**
+  `dist/tmx.js` carries `#!/usr/bin/env node` and Termux has no `/usr/bin/env`.
+  The exec shim rewrites that at `execve` time, but only when it was
+  `LD_PRELOAD`ed into the process *doing* the exec — and the dynamic linker
+  reads `LD_PRELOAD` once, at process start. So the `export LD_PRELOAD` at the
+  top of `watchdog.sh` never applied to its own `execve`, only to
+  grandchildren; the comment claiming otherwise has been corrected.
+
+  It worked from Termux:Boot solely because the login environment had already
+  loaded the shim into bash. Once `operad stream` began spawning the watchdog,
+  every invocation exited 126, `daemon_alive` read that as "daemon dead", and
+  the loop retried `Starting operad stream...` forever against a daemon that
+  was alive throughout. A startup probe now falls back to naming the
+  interpreter (`node`, then `bun`), logs which form it used, and exits 1 if
+  neither works.
+
+- **The wake-lock check reported "held" forever once a lock had ever existed.**
+  `dumpsys power` prints the active `Wake Locks: size=N` block and, far below,
+  a wake-lock *event history* that retains the tag for days after release. Both
+  the shell check and `android.ts` matched the whole output, so they saw a
+  three-day-old history line and answered "held" — which would have defeated
+  the re-acquire mechanism entirely. Both now scan only the active block.
+
+- **`trap 'rm -f "$PIDFILE"' EXIT INT TERM` made the watchdog ignore SIGTERM.**
+  A trap replaces the default action, and a handler that does not exit returns
+  to the loop — so the process survived `kill` while deleting its own pidfile,
+  losing the single-instance fast path and becoming killable only by SIGKILL.
+  The handler re-raises with itself removed now.
+
+- Steady-state log noise removed: the loop wrote two lines per poll regardless
+  of state, which is what grew this log to 692 KB of nothing and made the real
+  outage hard to see. It logs state changes plus a half-hourly heartbeat.
+
 ### Fixed — supervision was blind for 933 minutes and nothing said so
 
 - **The wake lock silently stopped being held, and the daemon never noticed.**
@@ -42,11 +77,6 @@ All notable changes to this project will be documented in this file.
   each poll and logs the overshoot, which is precisely the interval during
   which a dead daemon would have gone unnoticed. That failure was previously
   invisible: the log looked healthy, just sparse.
-
-- **Steady-state log noise removed.** The loop wrote two lines every poll
-  regardless of state — 692 KB of "Daemon already running" / "Headless" — which
-  is what made a real outage hard to see. It logs state *changes* plus a
-  half-hourly heartbeat now, so a gap is still datable.
 
 ### Changed — the dashboard's Tokens panel is interactive
 
