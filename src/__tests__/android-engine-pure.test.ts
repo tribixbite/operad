@@ -18,6 +18,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { activeWakeLockBlockHas } from "../platform/android.js";
 import { tmpdir } from "node:os";
 import {
   parseAdbDevicesOutput,
@@ -471,5 +472,68 @@ describe("AndroidEngine.getAutoStopList", () => {
     } finally {
       rmSync(td, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// activeWakeLockBlockHas — dumpsys power parsing
+// ---------------------------------------------------------------------------
+
+describe("activeWakeLockBlockHas", () => {
+  const TAG = "termux:service-wakelock";
+
+  /**
+   * Shape of real `dumpsys power` output: an active list, then — far below — a
+   * wake-lock EVENT HISTORY that keeps tags for days after release.
+   */
+  function dumpsys(activeLines: string[], historyHasTag: boolean): string {
+    return [
+      "POWER MANAGER (dumpsys power)",
+      "",
+      `Wake Locks: size=${activeLines.length}`,
+      ...activeLines,
+      "",
+      "Settings and Configuration:",
+      "  mScreenBrightnessSetting=128",
+      "",
+      "Wake Lock Event History:",
+      ...(historyHasTag
+        ? [`  08-18 10:57:00.356 - 10364 (com.termux,...) - ACQ ${TAG} (partial)`]
+        : []),
+    ].join("\n");
+  }
+
+  test("false when the tag appears ONLY in the event history", () => {
+    // The bug this exists for: a naive whole-output `includes()` answers true
+    // here, so a dropped lock is reported held forever and never re-acquired.
+    const out = dumpsys(["  DOZE_WAKE_LOCK 'dream:doze' ACQ=-6m (uid=1000)"], true);
+    expect(out.includes(TAG)).toBe(true);        // the naive check
+    expect(activeWakeLockBlockHas(out, TAG)).toBe(false); // the correct one
+  });
+
+  test("true when the tag is in the active block", () => {
+    const out = dumpsys([
+      "  DOZE_WAKE_LOCK 'dream:doze' ACQ=-6m (uid=1000)",
+      `  PARTIAL_WAKE_LOCK '${TAG}' ACQ=-2s (uid=10364)`,
+    ], true);
+    expect(activeWakeLockBlockHas(out, TAG)).toBe(true);
+  });
+
+  test("false for an empty active list", () => {
+    expect(activeWakeLockBlockHas(dumpsys([], true), TAG)).toBe(false);
+  });
+
+  test("false when there is no Wake Locks block at all", () => {
+    expect(activeWakeLockBlockHas("garbage\noutput\n", TAG)).toBe(false);
+  });
+
+  test("does not run past the blank line that ends the block", () => {
+    const out = [
+      "Wake Locks: size=1",
+      "  DOZE_WAKE_LOCK 'dream:doze' ACQ=-6m (uid=1000)",
+      "",
+      `  PARTIAL_WAKE_LOCK '${TAG}' ACQ=-2s (uid=10364)`, // after the block
+    ].join("\n");
+    expect(activeWakeLockBlockHas(out, TAG)).toBe(false);
   });
 });

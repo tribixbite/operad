@@ -12,11 +12,16 @@
 #
 # That matters because dist/tmx.js carries a `#!/usr/bin/env node` shebang,
 # which is correct for npm on Linux and macOS but unresolvable on Termux:
-# there is no /usr/bin/env. Termux's exec shim rewrites the interpreter path
-# at exec time, but only when it is preloaded into the CALLING shell. Without
-# it every invocation dies with "bad interpreter" (exit 127), so the watchdog
-# could never start or even detect the daemon — the exact failure that left
-# operad down after an OOM kill.
+# there is no /usr/bin/env. Termux's exec shim rewrites the interpreter path at
+# execve time, so any process that needs to run the bundle wants it loaded.
+#
+# NOTE: this export does NOT fix our own invocations, and an earlier version of
+# this comment wrongly claimed it did. The dynamic linker reads LD_PRELOAD once,
+# when a process starts — exporting it here cannot retroactively load the shim
+# into the bash already running this script, only into its grandchildren. When
+# the shim is missing from bash itself, every direct invocation exits 126; see
+# the RUNNER probe below, which is what actually makes this work. Kept because
+# it does help anything operad itself later spawns.
 #
 # Guarded on the file existing, so this is a no-op off Termux.
 for _shim in "$PREFIX/lib/libtermux-exec-ld-preload.so" "$PREFIX/lib/libtermux-exec.so"; do
@@ -168,7 +173,20 @@ fi
 
 mkdir -p "$(dirname "$PIDFILE")" 2>/dev/null || true
 echo $$ > "$PIDFILE"
-trap 'rm -f "$PIDFILE"' EXIT INT TERM
+
+# Clean up the pidfile on the way out — and actually die when asked to.
+#
+# This was `trap 'rm -f "$PIDFILE"' EXIT INT TERM`, which is worse than it
+# looks. A trap on TERM REPLACES the default action, and a handler that does
+# not exit simply returns to the loop: the watchdog ignored SIGTERM entirely
+# (confirmed — `kill <pid>` left it running) while deleting its own pidfile,
+# so it also lost the single-instance fast path and became killable only with
+# SIGKILL. Re-raise the signal with the handler removed so the process dies
+# with the right exit status, the way the sender expects.
+cleanup() { rm -f "$PIDFILE"; }
+trap cleanup EXIT
+trap 'cleanup; trap - TERM; kill -TERM $$' TERM
+trap 'cleanup; trap - INT;  kill -INT  $$' INT
 LOG="$LOG_DIR/watchdog.log"
 mkdir -p "$LOG_DIR"
 
@@ -240,11 +258,28 @@ ensure_wake_lock() {
   local dumpsys="${OPERAD_DUMPSYS:-/system/bin/dumpsys}"
   if [ -x "$dumpsys" ]; then
     local power
-    # `termux:service-wakelock` is the tag Termux registers with PowerManager.
     power=$("$dumpsys" power 2>/dev/null) || power=""
-    case "$power" in
-      *"termux:service-wakelock"*) return 0 ;;   # already held, nothing to do
-    esac
+
+    # Only the ACTIVE "Wake Locks:" block counts.
+    #
+    # dumpsys also prints a wake-lock EVENT HISTORY much further down, and that
+    # still contains `termux:service-wakelock` long after the lock is gone — a
+    # line from three days earlier was still there. Matching the whole output
+    # therefore reports "held" forever once a lock has ever been taken, which is
+    # precisely the never-re-acquire bug this function exists to fix. Caught
+    # because the first version of this check did exactly that.
+    local line in_block=0 held=0
+    while IFS= read -r line; do
+      case "$line" in
+        "Wake Locks: size="*) in_block=1; continue ;;
+      esac
+      [ "$in_block" = 1 ] || continue
+      [ -z "$line" ] && break                      # blank line ends the block
+      case "$line" in
+        *"termux:service-wakelock"*) held=1; break ;;
+      esac
+    done <<< "$power"
+    [ "$held" = 1 ] && return 0                    # already held, nothing to do
     # Only report a LOSS once we have seen the lock exist at least once;
     # otherwise a device where dumpsys is unreadable logs every poll.
     if [ -n "$power" ]; then
@@ -281,7 +316,52 @@ if [ -z "$TMX" ]; then
   echo "operad watchdog: no operad binary found — nothing to supervise" >&2
   exit 1
 fi
-log "Supervising via $TMX"
+# How to actually invoke the bundle.
+#
+# dist/tmx.js carries `#!/usr/bin/env node`, and Termux has no /usr/bin/env.
+# Termux's exec shim rewrites that at execve time — but only when it was
+# LD_PRELOADed into the process DOING the exec. The dynamic linker reads
+# LD_PRELOAD once, at process start, so the `export LD_PRELOAD` at the top of
+# this script does nothing for our own execve; it only helps grandchildren.
+#
+# That distinction never mattered while Termux:Boot was the only launcher,
+# because the login environment had already loaded the shim into bash before
+# this script ran. Now that `operad stream` also spawns the watchdog, it does:
+# started from a shell without the shim, every single invocation exited 126 and
+# the loop sat there retrying "Starting operad stream..." forever against a
+# daemon that was alive the whole time. Observed exactly that.
+#
+# Naming the interpreter sidesteps the shebang, and works either way.
+RUNNER=""
+if ! "$TMX" --version > /dev/null 2>&1; then
+  for _i in node bun; do
+    if command -v "$_i" > /dev/null 2>&1 && "$_i" "$TMX" --version > /dev/null 2>&1; then
+      RUNNER="$_i"
+      break
+    fi
+  done
+  unset _i
+  if [ -z "$RUNNER" ]; then
+    log "FATAL: $TMX cannot be run directly (no exec shim) and no node/bun can run it either"
+    echo "operad watchdog: cannot invoke $TMX" >&2
+    exit 1
+  fi
+fi
+
+# Run an operad subcommand, however this install has to be invoked.
+run_operad() {
+  if [ -n "$RUNNER" ]; then
+    "$RUNNER" "$TMX" "$@"
+  else
+    "$TMX" "$@"
+  fi
+}
+
+if [ -n "$RUNNER" ]; then
+  log "Supervising via $RUNNER $TMX (direct exec unavailable — no exec shim in this process)"
+else
+  log "Supervising via $TMX"
+fi
 
 # `timeout` is GNU coreutils. Stock macOS has neither it nor `gtimeout` unless
 # coreutils is installed, and a missing command exits 127 — which daemon_alive
@@ -299,9 +379,15 @@ fi
 # Check if daemon is alive by testing the IPC socket with a status command.
 # Returns 0 if daemon responds, 1 otherwise.
 daemon_alive() {
-  # Unquoted on purpose: TIMEOUT_CMD is a command plus its argument, or empty.
+  # TIMEOUT_CMD is unquoted on purpose: it is a command plus its argument, or
+  # empty. It cannot wrap run_operad, because `timeout` execs a program and
+  # run_operad is a shell function — so the two forms are spelled out.
   # shellcheck disable=SC2086
-  $TIMEOUT_CMD "$TMX" status > /dev/null 2>&1
+  if [ -n "$RUNNER" ]; then
+    $TIMEOUT_CMD "$RUNNER" "$TMX" status > /dev/null 2>&1
+  else
+    $TIMEOUT_CMD "$TMX" status > /dev/null 2>&1
+  fi
 }
 
 while true; do
@@ -336,7 +422,7 @@ while true; do
     # Do NOT delete the socket here — isRunning() handles stale detection.
     # Deleting an active socket causes duplicate daemon spawns.
 
-    "$TMX" stream
+    run_operad stream
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -ne 0 ]; then

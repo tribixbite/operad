@@ -424,6 +424,32 @@ const AM_BIN = resolveTermuxBin("am");
  * all Termux-specific functionality (notifications, battery, wake lock,
  * ADB protections, terminal tabs, session environment).
  */
+/**
+ * Does the ACTIVE wake-lock list in `dumpsys power` output contain `tag`?
+ *
+ * Scoped to the "Wake Locks: size=N" block on purpose. `dumpsys power` also
+ * prints a wake-lock EVENT HISTORY much further down, and that keeps the tag
+ * for days after the lock was released — a line from three days earlier was
+ * still present on the author's device. A naive `out.includes(tag)` therefore
+ * answers "held" forever once a lock has ever been taken, which would defeat
+ * the entire point of checking: the manager would never re-acquire a dropped
+ * lock. The first version of this did exactly that.
+ *
+ * Exported for testing; the block ends at the first blank line.
+ */
+export function activeWakeLockBlockHas(dumpsysPowerOutput: string, tag: string): boolean {
+  let inBlock = false;
+  for (const line of dumpsysPowerOutput.split("\n")) {
+    if (!inBlock) {
+      if (line.startsWith("Wake Locks: size=")) inBlock = true;
+      continue;
+    }
+    if (line.trim() === "") break;
+    if (line.includes(tag)) return true;
+  }
+  return false;
+}
+
 export class AndroidPlatform implements Platform {
   readonly id: PlatformId = "android";
   readonly hasAdb = true;
@@ -665,8 +691,7 @@ export class AndroidPlatform implements Platform {
         stdio: ["ignore", "pipe", "ignore"],
         maxBuffer: 4 * 1024 * 1024,
       });
-      // The tag Termux registers with PowerManager.
-      return out.includes("termux:service-wakelock");
+      return activeWakeLockBlockHas(out, "termux:service-wakelock");
     } catch {
       return null;
     }
