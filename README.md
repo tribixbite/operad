@@ -194,9 +194,16 @@ Windows requires tmux via MSYS2 (`pacman -S tmux`) or WSL. See [docs/windows.md]
 
 ## Crash Resilience
 
-On Android, the daemon, watchdog, and tmux server all run as independent processes (PPid: 1). When Android kills the Termux app, only the terminal UI dies — all sessions continue running. The watchdog auto-restarts the daemon, which re-adopts existing sessions.
+On Android the tmux server is its own process and outlives the daemon, so when Android kills the Termux app only the terminal UI dies — sessions keep running, and a restarted daemon re-adopts them rather than recreating them.
 
-Defense layers: wake lock (never released), phantom process killer fix, Doze whitelist, process detach, IPC socket self-healing, watchdog loop, crash-safe trace log.
+Two separate things have to hold, and surviving one says nothing about the other:
+
+- **Surviving app death** depends on *which APK spawned the daemon*, because that fixes its Android cgroup — `ActivityManager` reaps every PID in the app's cgroup, and detaching to PPid 1 does not move a process out of it. Only Termux:Boot escapes.
+- **Surviving an OOM kill of the daemon** depends on `watchdog.sh` still polling. That is a live control loop, and it can stop working without stopping *running* — most importantly when the device suspends, since `sleep` does not advance across suspend.
+
+Defense layers: correct spawn-root, verified wake lock with re-acquire, phantom process killer fix, Doze whitelist, IPC socket self-healing, watchdog loop with suspend self-reporting, crash-safe trace log.
+
+**[docs/persistence.md](docs/persistence.md)** covers all of this in detail, including the failure modes each layer was added for and how to verify the layers are actually holding.
 
 ---
 
@@ -230,6 +237,9 @@ cd dashboard && bun run build  # build dashboard
 ## Docs
 
 [operad.stream](https://operad.stream)
+
+- [Crash resilience](docs/persistence.md) — how sessions survive app death, OOM kills and suspend
+- [Configuration](docs/config.md) · [REST API](docs/api.md) · [Customization](docs/customization.md) · [Skills](docs/skills.md) · [Windows](docs/windows.md)
 
 ## License
 
