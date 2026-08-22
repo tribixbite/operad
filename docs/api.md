@@ -238,6 +238,50 @@ Returns IPC `config` response — the sanitized (no secrets) parsed config. TBD 
 
 ### Token Quota
 
+> **Two sources, and they disagree by design.** `/api/quota`,
+> `/api/tokens-daily` and `/api/tokens-window` read the `costs` SQLite table,
+> which **only the agent/SDK path writes** — on an install that runs no agents
+> they legitimately return zeros. `/api/token-usage` and `/api/tokens` derive
+> from the Claude Code JSONL transcripts instead, so they report real usage on
+> any install. The dashboard's Tokens panel uses `/api/token-usage` for that
+> reason.
+
+> **Costs are estimates, not bills.** Every `cost_usd` is list API pricing for
+> the model that produced the tokens, including the cache multipliers
+> (0.1x input for a read, 1.25x for a 5-minute write, 2x for a 1-hour write).
+> Tokens from a model with no published rate are excluded from `cost_usd` and
+> reported in `unpriced_tokens` / `unpriced_models` — a non-zero
+> `unpriced_tokens` means the cost shown is incomplete.
+
+#### `GET /api/token-usage`
+Range-scoped token summary derived from the Claude Code JSONL transcripts.
+Backs the dashboard's Tokens panel.
+
+Query: `?range=all|week|day` (default `all`; anything else falls back to `all`).
+
+Response (`TokenRangeSummary`):
+
+```json
+{
+  "range": "week",
+  "since": "2026-08-15T00:00:00.000Z",
+  "totals": {
+    "input_tokens": 0, "output_tokens": 0,
+    "cache_read_tokens": 0, "cache_creation_tokens": 0,
+    "total_tokens": 0, "turns": 0,
+    "cost_usd": 0, "unpriced_tokens": 0, "unpriced_models": []
+  },
+  "projects": [{ "name": "...", "path": "...", "totals": {}, "sessions": [] }],
+  "daily": [{ "date": "2026-08-21", "total_tokens": 0, "cost_usd": 0 }],
+  "generated_at": "2026-08-22T00:00:00.000Z",
+  "scan_ms": 2
+}
+```
+
+`since` is null for `range=all`. `scan_ms` is the wall-clock cost of the scan;
+it is ~0 on a cache hit, because the scanner reads only bytes appended since
+the previous call.
+
 #### `GET /api/quota`
 Returns current quota status including weekly token usage, velocity, and projected total.
 
@@ -263,7 +307,8 @@ Token usage from Claude JSONL files.
 - `GET /api/tokens` — aggregate over all running Claude sessions.
 - `GET /api/tokens/:name` — single session.
 
-Response: `ProjectTokenUsage` or `ProjectTokenUsage[]`.
+Response: `ProjectTokenUsage` or `ProjectTokenUsage[]`. Per-session totals
+carry `cost_usd`, `unpriced_tokens` and `unpriced_models` as described above.
 
 #### `GET /api/costs`
 Aggregate costs (legacy compatibility endpoint, now token-centric).

@@ -91,11 +91,19 @@ jobs:
       - name: Check API docs updated if API source changed
         if: github.event_name == 'pull_request' && runner.os != 'Windows'
         run: |
-          API_CHANGED=$(git diff --name-only origin/main HEAD -- src/http.ts src/ipc.ts 2>/dev/null | wc -l)
+          # Watch the files that actually define the surface. This used to list
+          # only src/http.ts and src/ipc.ts, but the daemon split moved every
+          # REST route into rest-handler.ts and the IPC commands into
+          # ipc-handler.ts — so the gate silently stopped firing, and
+          # /api/token-usage shipped undocumented as a result.
+          API_SRC="src/http.ts src/ipc.ts src/rest-handler.ts src/ipc-handler.ts src/ws-handler.ts"
+          # shellcheck disable=SC2086
+          API_CHANGED=$(git diff --name-only origin/main HEAD -- $API_SRC 2>/dev/null | wc -l)
           if [ "$API_CHANGED" -gt "0" ]; then
             DOCS_CHANGED=$(git diff --name-only origin/main HEAD -- docs/api.md | wc -l)
             if [ "$DOCS_CHANGED" -eq "0" ]; then
-              echo "ERROR: API source changed (src/http.ts or src/ipc.ts) but docs/api.md was not updated."
+              echo "ERROR: API source changed but docs/api.md was not updated."
+              echo "Changed: $(git diff --name-only origin/main HEAD -- $API_SRC | tr '\n' ' ')"
               echo "Please update docs/api.md to reflect the API changes."
               exit 1
             fi

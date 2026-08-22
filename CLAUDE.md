@@ -14,23 +14,23 @@ Cross-platform tmux session orchestrator for managing Claude Code sessions. npm 
 ### Source Structure
 ```
 src/
-  tmx.ts                  — CLI entry point (~1050 lines)
-  daemon.ts               — Main daemon lifecycle (~1490 lines — boot, session start/stop, shutdown, dashboard server)
-  agent-engine.ts         — OODA loop, agent dispatch, context builder, chat, executeOodaActions, reloadAgents, seedSpecializations, executeScheduledRun (~940 lines)
+  tmx.ts                  — CLI entry point (~1900 lines)
+  daemon.ts               — Main daemon lifecycle (~1900 lines — boot, session start/stop, shutdown, dashboard server)
+  agent-engine.ts         — OODA loop, agent dispatch, context builder, chat, executeOodaActions, reloadAgents, seedSpecializations, executeScheduledRun (~1300 lines)
   tool-engine.ts          — ToolContext builder for agent tool dispatch (~70 lines)
-  persistence.ts          — Memory consolidation + daily snapshots (~95 lines)
-  ws-handler.ts           — WebSocket message dispatch + switchboard payload builders (~245 lines)
-  ipc-handler.ts          — IPC command routing (~130 lines)
-  rest-handler.ts         — REST API handler — 103 routes + MCP/scripts/ADB helpers (~2230 lines)
-  workflow.ts             — DAG task executor: nodes + edges, cycle detection, Kahn topo, persistent run history (~430 lines)
+  persistence.ts          — Memory consolidation + daily snapshots (~120 lines)
+  ws-handler.ts           — WebSocket message dispatch + switchboard payload builders (~280 lines)
+  ipc-handler.ts          — IPC command routing (~250 lines)
+  rest-handler.ts         — REST API handler — 103 routes + MCP/scripts/ADB helpers (~2210 lines)
+  workflow.ts             — DAG task executor: nodes + edges, cycle detection, Kahn topo, persistent run history (~720 lines)
   session-controller.ts   — Session lifecycle state machine (unit-testable; future integration target)
-  session-commands.ts     — cmd* handlers (status/start/stop/restart/go/send/tabs/open/close/etc.) (~780 lines)
+  session-commands.ts     — cmd* handlers (status/start/stop/restart/go/send/tabs/open/close/etc.) (~1150 lines)
   session-resolver.ts     — Pure resolveSessionName/Path/OpenTarget + resolveBootSessions helpers (~235 lines)
-  android-engine.ts       — ADB serial resolution, phantom-process fix, auto-stop list, Android apps (~635 lines)
-  monitoring-engine.ts    — Memory polling + shedding, battery polling, SSE push, status notification (~440 lines)
-  orchestrator-context.ts — Shared dependency interface for extracted engines (~180 lines)
+  android-engine.ts       — ADB serial resolution, phantom-process fix, auto-stop list, Android apps (~940 lines)
+  monitoring-engine.ts    — Memory polling + shedding, battery polling, SSE push, status notification (~610 lines)
+  orchestrator-context.ts — Shared dependency interface for extracted engines (~280 lines)
   config.ts               — TOML config parser with env var expansion
-  session.ts              — Session lifecycle, tmux interaction (~780 lines)
+  session.ts              — Session lifecycle, tmux interaction (~730 lines)
   http.ts                 — Dashboard HTTP server + SSE + REST API
   ipc.ts                  — Unix socket IPC (newline-delimited JSON)
   health.ts               — Health check engine (tmux/http/process/custom)
@@ -43,10 +43,11 @@ src/
   registry.ts             — Dynamic session registry
   log.ts                  — Structured logging + crash-safe trace log
   notifications.ts        — Claude session notification parsing
-  claude-session.ts       — Claude readiness detection
+  claude-session.ts       — JSONL resolution, per-model token/cost scanning (incremental),
+                            conversation + timeline parsing, readiness detection (~1490 lines)
   prompts.ts              — Prompt history extraction from Claude JSONL
   migrate.ts              — Legacy config migration
-  types.ts                — Type definitions (~530 lines)
+  types.ts                — Type definitions (~800 lines)
   deps.ts                 — Dependency graph (topological sort)
   git-info.ts             — Git repo metadata
   telemetry-sink.ts       — Token usage tracking

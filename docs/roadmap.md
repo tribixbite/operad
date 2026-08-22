@@ -100,6 +100,34 @@ The Operit review (commit `4c2b20c`+) ported the DAG workflow engine. Items not 
 
 ---
 
+## Deferred from the 2026-08 resilience + token work
+
+- **`termux-job-scheduler` as the supervision floor.** `watchdog.sh` now holds
+  its own wake lock and reports suspend overshoot, which fixed the observed
+  outage (60 gaps / 933 blind minutes over three days → zero in the 25 h after).
+  But it is still a userspace `sleep` loop: if the wake lock is ever taken away
+  by something re-acquiring cannot beat, the loop stops polling again. Android's
+  JobScheduler (via `termux-job-scheduler`) is suspend-proof by construction and
+  is the escalation. Trigger to implement: repeated `SUSPENDED` lines in
+  `watchdog.log` despite the lock being held. See `docs/persistence.md`.
+
+- **Rates for legacy models.** `MODEL_RATES` in `claude-session.ts` covers the
+  models with currently published pricing. Anything else — Opus 4.5, Sonnet 4.5,
+  Opus 4.1, the retired 3.x line — is deliberately reported as
+  `unpriced_tokens` rather than charged a guessed rate. A corpus with heavy
+  legacy usage will therefore show a cost lower than reality, flagged in the UI.
+  Filling those in needs a source for historical list prices, not recall.
+
+- **Cost is list price, not spend.** `cost_usd` ignores subscription plans,
+  batch (50%) discounts, and the `service_tier` field the transcripts already
+  carry. Every entry observed so far is `standard`, so nothing is mispriced
+  today, but a batch-heavy workload would read high.
+
+- **Dashboard type debt.** `bunx svelte-check` reports 58 errors across 27
+  files, all pre-existing and unrelated to any single feature — mostly
+  `Property 'x' does not exist on type 'never'` from untyped store access.
+  Worth a dedicated pass rather than opportunistic fixes.
+
 ## Quality of life
 
 - **`tmx doctor` JSON output**: structured output mode for CI pipelines.
@@ -107,4 +135,4 @@ The Operit review (commit `4c2b20c`+) ported the DAG workflow engine. Items not 
 
 ---
 
-Last updated: 2026-05-21.
+Last updated: 2026-08-22.
