@@ -553,6 +553,18 @@ export interface SessionTokenUsage {
   cache_creation_tokens: number;
   turns: number;
   cost_usd: number;
+  /**
+   * Tokens from models with no published rate, excluded from `cost_usd`.
+   *
+   * Cost was previously computed by applying one hardcoded Opus-3-era rate to
+   * every model, which made every figure wrong by whatever ratio the real
+   * model differed by. Rather than guess a rate for a model we do not have
+   * one for, its tokens are reported here so the UI can say the total is
+   * incomplete instead of silently under-reporting.
+   */
+  unpriced_tokens: number;
+  /** Normalized ids of the models counted in `unpriced_tokens`. */
+  unpriced_models: string[];
   file_size_bytes: number;
   last_modified: string;
   /**
@@ -574,6 +586,18 @@ export interface TokenTotals {
   total_tokens: number;
   turns: number;
   cost_usd: number;
+  /**
+   * Tokens from models with no published rate, excluded from `cost_usd`.
+   *
+   * Cost was previously computed by applying one hardcoded Opus-3-era rate to
+   * every model, which made every figure wrong by whatever ratio the real
+   * model differed by. Rather than guess a rate for a model we do not have
+   * one for, its tokens are reported here so the UI can say the total is
+   * incomplete instead of silently under-reporting.
+   */
+  unpriced_tokens: number;
+  /** Normalized ids of the models counted in `unpriced_tokens`. */
+  unpriced_models: string[];
 }
 
 /** Usage attributed to a single calendar day (`YYYY-MM-DD`, local time). */

@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — token costs were 57% too high
+
+- **One hardcoded rate was applied to every model.** `PRICING` in
+  `claude-session.ts` held `{input: 15, output: 75, cache_read: 1.5,
+  cache_creation: 18.75}` — Claude 3 Opus / Opus 4-era rates — and every cost
+  in the dashboard, the daily chart and `/api/token-usage` was computed from
+  it regardless of which model produced the tokens. Opus 5 is $5/$25, so its
+  figures read 3× high; Haiku 4.5 is $1/$5, so its output read 15× high.
+
+  Rates are now per model, resolved from the `model` field each JSONL entry
+  already carries, with dated snapshots (`claude-haiku-4-5-20251001`) pricing
+  as their alias.
+
+- **Cache writes ignored their TTL.** Cache pricing is a multiple of a model's
+  input rate — 0.1× read, **1.25× for a 5-minute write, 2× for a 1-hour
+  write** — and the code charged every write at 1.25×. Claude Code records the
+  split under `usage.cache_creation`, and on the author's corpus **89% of all
+  cache-creation tokens are 1-hour writes**, so the dominant path was
+  under-counted by 37.5% while everything else was over-counted.
+
+  Measured across 492 real transcripts: the old figure was **$29,564.42**, the
+  corrected one is **$12,843.34** — 56.6% too high.
+
+- **A model with no published rate is now reported, not guessed at.** Its
+  tokens are excluded from the cost and surfaced as `unpriced_tokens` /
+  `unpriced_models`, with the panel saying so, rather than being charged some
+  other model's rate. The cost stat is labelled "est. cost": it is list API
+  rates applied to recorded usage, not a bill.
+
+### Removed
+
+- Five dashboard API wrappers with no remaining consumers after the Tokens
+  rework — `fetchTokens`, `fetchDailyTokens`, `fetchWindowTokens`,
+  `fetchQuotaStatus`, `fetchSdkCosts`. The REST endpoints they called are
+  unchanged; only the dead client code is gone.
+
 ### Fixed — three defects found by running the above, not trusting it
 
 - **The watchdog could not invoke operad at all unless Termux:Boot started it.**

@@ -192,6 +192,15 @@
   const projects = $derived(summary?.projects ?? []);
   const daily = $derived(summary?.daily ?? []);
   const rangeShort = $derived(RANGES.find((r) => r.id === range)?.short ?? "");
+
+  /**
+   * Tokens the server could not price (a model with no published rate).
+   * Surfaced rather than swallowed: a silently-incomplete total is the class
+   * of bug this panel already had once, when one hardcoded rate was applied
+   * to every model.
+   */
+  const unpriced = $derived(totals?.unpriced_tokens ?? 0);
+  const unpricedModels = $derived(totals?.unpriced_models ?? []);
   const sessionCount = $derived(projects.reduce((s, p) => s + p.sessions.length, 0));
 </script>
 
@@ -291,13 +300,20 @@
           </div>
           <div class="stat">
             <span class="stat-value cost">{fmtCost(totals.cost_usd)}</span>
-            <span class="stat-label">cost</span>
+            <span class="stat-label" title="List API rates for each model used, including cache read/write multipliers. Not a bill.">est. cost</span>
           </div>
           <div class="stat">
             <span class="stat-value cache">{cachePct(totals)}%</span>
             <span class="stat-label">cached</span>
           </div>
         </div>
+
+        {#if unpriced > 0}
+          <p class="unpriced">
+            {fmtTokens(unpriced)} tokens excluded from cost — no published rate for
+            {unpricedModels.join(", ") || "an unrecognised model"}.
+          </p>
+        {/if}
 
         <!-- Daily series (real data, from the JSONL scan) -->
         <CostChart days={daily} title={range === "day" ? "Today" : "Daily tokens"} />
@@ -545,6 +561,13 @@
     color: var(--text-primary);
   }
   .stat-value.cost { color: var(--accent-blue); }
+
+  .unpriced {
+    font-size: 0.625rem;
+    color: var(--accent-yellow);
+    margin: 0.25rem 0 0;
+    line-height: 1.4;
+  }
   .stat-value.cache { color: var(--accent-green); }
 
   .stat-label {

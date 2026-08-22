@@ -65,6 +65,16 @@ function localIso(date: string, hour: number): string {
   return new Date(y, m - 1, d, hour, 0, 0).toISOString();
 }
 
+/**
+ * Model used by fixtures that assert on cost.
+ *
+ * Must be one with a published rate — cost is now per-model, so a fixture
+ * using an unpriced id (the helper previously hardcoded "claude-opus-4",
+ * which has no published rate) would correctly produce $0 and quietly make
+ * every cost assertion vacuous.
+ */
+const TEST_MODEL = "claude-opus-5";
+
 /** Write a file to tmpDir and return its path. */
 function write(name: string, content: string): string {
   const p = join(tmpDir, name);
@@ -86,6 +96,10 @@ function assistantLine(opts: {
   /** undefined → "end_turn" (default); null → stop_reason:null (streaming partial) */
   stopReason?: string | null;
   content?: string;
+  /** Override the model id — use an unlisted one to exercise the unpriced path. */
+  model?: string;
+  /** 1-hour-TTL cache writes, which bill at 2x input rather than 1.25x. */
+  cacheCreate1h?: number;
 }): string {
   // Use "end_turn" only when stopReason is not explicitly provided (undefined).
   // When the caller passes null, preserve it so the serialised JSON has stop_reason:null.
@@ -96,7 +110,7 @@ function assistantLine(opts: {
     timestamp: opts.timestamp ?? "2024-01-15T10:00:00.000Z",
     message: {
       role: "assistant",
-      model: "claude-opus-4",
+      model: opts.model ?? TEST_MODEL,
       stop_reason: stopReason,
       content: opts.content
         ? [{ type: "text", text: opts.content }]
@@ -105,7 +119,11 @@ function assistantLine(opts: {
         input_tokens: opts.input ?? 0,
         output_tokens: opts.output ?? 0,
         cache_read_input_tokens: opts.cacheRead ?? 0,
-        cache_creation_input_tokens: opts.cacheCreate ?? 0,
+        cache_creation_input_tokens: (opts.cacheCreate ?? 0) + (opts.cacheCreate1h ?? 0),
+        cache_creation: {
+          ephemeral_5m_input_tokens: opts.cacheCreate ?? 0,
+          ephemeral_1h_input_tokens: opts.cacheCreate1h ?? 0,
+        },
       },
     },
   });
@@ -163,45 +181,59 @@ describe("manglePath", () => {
 // ---------------------------------------------------------------------------
 
 describe("calculateCost", () => {
+  /** A zeroed bucket set, so each test names only the field it exercises. */
+  const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
+
   test("zero usage produces zero cost", () => {
-    expect(
-      calculateCost({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 }),
-    ).toBe(0);
+    expect(calculateCost("claude-opus-5", zero)).toBe(0);
   });
 
-  test("1M input tokens costs exactly $15", () => {
-    expect(
-      calculateCost({ input_tokens: 1_000_000, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 }),
-    ).toBeCloseTo(15, 8);
+  test("input and output use the model's own published rates", () => {
+    // Opus 5 is $5/$25 per MTok. The previous implementation charged $15/$75
+    // — Opus-3-era rates — to every model, so this read 3x high.
+    expect(calculateCost("claude-opus-5", { ...zero, input: 1_000_000 })).toBeCloseTo(5, 8);
+    expect(calculateCost("claude-opus-5", { ...zero, output: 1_000_000 })).toBeCloseTo(25, 8);
+    // Haiku 4.5 is $1/$5 — 15x cheaper on output than the old flat rate.
+    expect(calculateCost("claude-haiku-4-5", { ...zero, input: 1_000_000 })).toBeCloseTo(1, 8);
+    expect(calculateCost("claude-haiku-4-5", { ...zero, output: 1_000_000 })).toBeCloseTo(5, 8);
+    // Fable 5 is the premium tier at $10/$50.
+    expect(calculateCost("claude-fable-5", { ...zero, output: 1_000_000 })).toBeCloseTo(50, 8);
   });
 
-  test("1M output tokens costs exactly $75", () => {
-    expect(
-      calculateCost({ input_tokens: 0, output_tokens: 1_000_000, cache_read_tokens: 0, cache_creation_tokens: 0 }),
-    ).toBeCloseTo(75, 8);
+  test("cache rates are multiples of the model's input rate", () => {
+    const m = "claude-opus-5"; // $5/MTok input
+    expect(calculateCost(m, { ...zero, cacheRead: 1_000_000 })).toBeCloseTo(0.5, 8);   // 0.1x
+    expect(calculateCost(m, { ...zero, cacheWrite5m: 1_000_000 })).toBeCloseTo(6.25, 8); // 1.25x
+    expect(calculateCost(m, { ...zero, cacheWrite1h: 1_000_000 })).toBeCloseTo(10, 8);   // 2.0x
   });
 
-  test("1M cache-read tokens costs exactly $1.50", () => {
-    expect(
-      calculateCost({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 1_000_000, cache_creation_tokens: 0 }),
-    ).toBeCloseTo(1.5, 8);
+  test("a 1h cache write costs 1.6x a 5m one", () => {
+    // The dominant real-world path: 89% of cache-creation tokens on the
+    // author's machine were 1h writes. Charging them all at the 5m rate — as
+    // the flat implementation did — under-counted them by 37.5%.
+    const m = "claude-opus-5";
+    const w5 = calculateCost(m, { ...zero, cacheWrite5m: 1_000_000 });
+    const w1h = calculateCost(m, { ...zero, cacheWrite1h: 1_000_000 });
+    expect(w1h / w5).toBeCloseTo(1.6, 10);
   });
 
-  test("1M cache-creation tokens costs exactly $18.75", () => {
-    expect(
-      calculateCost({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 1_000_000 }),
-    ).toBeCloseTo(18.75, 8);
+  test("dated snapshot ids price as their alias", () => {
+    const a = calculateCost("claude-haiku-4-5-20251001", { ...zero, input: 1_000_000 });
+    const b = calculateCost("claude-haiku-4-5", { ...zero, input: 1_000_000 });
+    expect(a).toBe(b);
+    expect(a).toBeCloseTo(1, 8);
+  });
+
+  test("a model with no published rate costs zero rather than guessing", () => {
+    expect(calculateCost("claude-does-not-exist", { ...zero, input: 1_000_000 })).toBe(0);
   });
 
   test("mixed tokens — sum of individual costs", () => {
-    const cost = calculateCost({
-      input_tokens: 1000,
-      output_tokens: 200,
-      cache_read_tokens: 500,
-      cache_creation_tokens: 100,
+    const cost = calculateCost("claude-opus-5", {
+      input: 1000, output: 200, cacheRead: 500, cacheWrite5m: 100, cacheWrite1h: 400,
     });
     const expected =
-      (1000 * 15 + 200 * 75 + 500 * 1.5 + 100 * 18.75) / 1_000_000;
+      (1000 * 5 + 200 * 25 + 500 * 0.5 + 100 * 6.25 + 400 * 10) / 1_000_000;
     expect(cost).toBeCloseTo(expected, 10);
   });
 });
@@ -546,11 +578,8 @@ describe("streamTokenUsage", () => {
     const line = assistantLine({ input: 1000, output: 200, cacheRead: 50, cacheCreate: 10, stopReason: "end_turn" });
     const path = write("cost.jsonl", line + "\n");
     const usage = await streamTokenUsage(path);
-    const expected = calculateCost({
-      input_tokens: 1000,
-      output_tokens: 200,
-      cache_read_tokens: 50,
-      cache_creation_tokens: 10,
+    const expected = calculateCost(TEST_MODEL, {
+      input: 1000, output: 200, cacheRead: 50, cacheWrite5m: 10, cacheWrite1h: 0,
     });
     expect(usage.cost_usd).toBeCloseTo(expected, 12);
   });
@@ -631,6 +660,62 @@ describe("streamTokenUsage — incremental rescan", () => {
     const done = await streamTokenUsage(path);
     expect(done.input_tokens).toBe(1099);
     expect(done.turns).toBe(2);
+  });
+
+  test("a file mixing models prices each at its own rate", async () => {
+    // The whole point of the change: one flat rate across models made every
+    // figure wrong by whatever ratio the real model differed by.
+    const path = write("mixed.jsonl", [
+      assistantLine({ uuid: "a1", model: "claude-opus-5", output: 1_000_000 }),
+      assistantLine({ uuid: "a2", model: "claude-haiku-4-5", output: 1_000_000 }),
+    ].join("\n") + "\n");
+    const usage = await streamTokenUsage(path);
+    // $25 (Opus 5) + $5 (Haiku 4.5) — not 2 x $75 as the flat rate gave.
+    expect(usage.cost_usd).toBeCloseTo(30, 6);
+    expect(usage.unpriced_tokens).toBe(0);
+  });
+
+  test("cache writes are priced by TTL, not lumped together", async () => {
+    const path = write("ttl.jsonl",
+      assistantLine({ model: "claude-opus-5", cacheCreate: 1_000_000, cacheCreate1h: 1_000_000 }) + "\n");
+    const usage = await streamTokenUsage(path);
+    // 1M at 1.25x $5 + 1M at 2.0x $5 = $6.25 + $10.
+    expect(usage.cost_usd).toBeCloseTo(16.25, 6);
+    // The aggregate token count still reports their sum.
+    expect(usage.cache_creation_tokens).toBe(2_000_000);
+  });
+
+  test("an unpriced model contributes no cost and is reported, not hidden", async () => {
+    const path = write("unpriced.jsonl", [
+      assistantLine({ uuid: "a1", model: "claude-opus-5", output: 1_000_000 }),
+      assistantLine({ uuid: "a2", model: "claude-from-the-future", output: 1_000_000 }),
+    ].join("\n") + "\n");
+    const usage = await streamTokenUsage(path);
+    expect(usage.cost_usd).toBeCloseTo(25, 6);          // only the priced half
+    expect(usage.unpriced_tokens).toBe(1_000_000);      // surfaced, not silently dropped
+    expect(usage.unpriced_models).toEqual(["claude-from-the-future"]);
+  });
+
+  test("synthetic entries are free rather than unpriced", async () => {
+    // Claude Code's own bookkeeping entries carry no usage and are never
+    // billed — reporting them as an unpriced gap would be a false alarm.
+    const path = write("synthetic.jsonl",
+      assistantLine({ model: "<synthetic>", output: 0 }) + "\n");
+    const usage = await streamTokenUsage(path);
+    expect(usage.cost_usd).toBe(0);
+    expect(usage.unpriced_tokens).toBe(0);
+    expect(usage.unpriced_models).toEqual([]);
+  });
+
+  test("per-day cost uses that day's own model mix", async () => {
+    const path = write("daymix.jsonl", [
+      assistantLine({ uuid: "a1", model: "claude-opus-5", output: 1_000_000, timestamp: localIso("2024-03-01", 9) }),
+      assistantLine({ uuid: "a2", model: "claude-haiku-4-5", output: 1_000_000, timestamp: localIso("2024-03-02", 9) }),
+    ].join("\n") + "\n");
+    const usage = await streamTokenUsage(path);
+    const byDate = Object.fromEntries(usage.daily.map((d) => [d.date, d.cost_usd]));
+    expect(byDate["2024-03-01"]).toBeCloseTo(25, 6);
+    expect(byDate["2024-03-02"]).toBeCloseTo(5, 6);
   });
 
   test("a UTF-8 character split across a poll boundary is not corrupted", async () => {
@@ -729,6 +814,8 @@ describe("summariseTokenRange", () => {
       total_tokens: total,
       turns: 1,
       cost_usd: 0,
+      unpriced_tokens: 0,
+      unpriced_models: [],
     }));
     const input = daily.reduce((s, d) => s + d.input_tokens, 0);
     return {
@@ -740,6 +827,8 @@ describe("summariseTokenRange", () => {
       cache_creation_tokens: 0,
       turns: daily.length,
       cost_usd: 0,
+      unpriced_tokens: 0,
+      unpriced_models: [],
       file_size_bytes: 0,
       last_modified: "2024-03-05T00:00:00.000Z",
       daily,

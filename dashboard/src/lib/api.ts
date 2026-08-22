@@ -648,12 +648,6 @@ export async function saveFileContent(path: string, content: string): Promise<vo
 
 // -- Token tracking -----------------------------------------------------------
 
-/** Fetch token usage for all running Claude sessions */
-export async function fetchTokens(): Promise<ProjectTokenUsage[]> {
-  const res = await fetch("/api/tokens");
-  return checkedJson(res);
-}
-
 /**
  * Fetch a range-scoped token summary (all time / this week / today).
  *
@@ -793,27 +787,6 @@ export async function fetchCostTimeline(days = 14): Promise<DailyCost[]> {
 }
 
 // -- Token quota --------------------------------------------------------------
-
-/** Fetch current quota status */
-export async function fetchQuotaStatus(): Promise<import("./types").QuotaStatus> {
-  const res = await fetch("/api/quota");
-  return checkedJson(res);
-}
-
-/** Fetch daily token usage */
-export async function fetchDailyTokens(days = 14): Promise<import("./types").DailyTokens[]> {
-  const res = await fetch(`/api/tokens-daily?days=${days}`);
-  return checkedJson(res);
-}
-
-/** Fetch per-session token usage for current window */
-export async function fetchWindowTokens(): Promise<Array<{
-  session_name: string; input_tokens: number; output_tokens: number;
-  total_tokens: number; num_turns: number;
-}>> {
-  const res = await fetch("/api/tokens-window");
-  return checkedJson(res);
-}
 
 // -- Notification history -----------------------------------------------------
 
@@ -1310,12 +1283,6 @@ export async function triggerRoundtable(
 }
 
 // -- SDK cost tracking API ----------------------------------------------------
-
-/** Fetch aggregate SDK costs */
-export async function fetchSdkCosts(): Promise<import("./types").SdkCostAggregate> {
-  const res = await fetch("/api/costs");
-  return checkedJson(res);
-}
 
 /** Fetch daily SDK costs */
 export async function fetchSdkDailyCosts(

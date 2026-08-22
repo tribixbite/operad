@@ -286,6 +286,14 @@ export interface TokenTotals {
   total_tokens: number;
   turns: number;
   cost_usd: number;
+  /**
+   * Tokens from models with no published rate, excluded from `cost_usd`.
+   * Non-zero means the cost shown is incomplete — say so rather than
+   * presenting a total that silently omits them.
+   */
+  unpriced_tokens: number;
+  /** Normalized ids of the models counted in `unpriced_tokens`. */
+  unpriced_models: string[];
 }
 
 /** Usage attributed to a single calendar day (`YYYY-MM-DD`, local time). */

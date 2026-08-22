@@ -37,12 +37,137 @@ function historyPath(): string { return join(claudeDir(), "history.jsonl"); }
 
 // -- Pricing (per million tokens) -------------------------------------------
 
-const PRICING = {
-  input: 15,       // $15/M input tokens
-  output: 75,      // $75/M output tokens
-  cache_read: 1.5, // $1.50/M cache read tokens
-  cache_creation: 18.75, // $18.75/M cache creation tokens
+/**
+ * Published rates in USD per million tokens, by model.
+ *
+ * This was a single flat `{input: 15, output: 75, ...}` applied to every model
+ * — Claude 3 Opus / Opus 4-era rates. Every figure derived from it was wrong by
+ * whatever ratio the actual model differed by: Opus 5 is $5/$25, so all-time
+ * cost read 3x high, while Haiku 4.5 ($1/$5) read 15x high.
+ *
+ * Only models with a published rate appear here. A model that is missing is
+ * reported as UNPRICED rather than being charged someone else's rate — see
+ * {@link priceBuckets}. Guessing is what produced the bug this replaces.
+ */
+interface ModelRates {
+  /** USD per million input tokens. */
+  input: number;
+  /** USD per million output tokens. */
+  output: number;
+}
+
+const MODEL_RATES: Readonly<Record<string, ModelRates>> = {
+  "claude-fable-5": { input: 10, output: 50 },
+  "claude-mythos-5": { input: 10, output: 50 },
+  "claude-opus-5": { input: 5, output: 25 },
+  "claude-opus-4-8": { input: 5, output: 25 },
+  "claude-opus-4-7": { input: 5, output: 25 },
+  "claude-opus-4-6": { input: 5, output: 25 },
+  "claude-sonnet-5": { input: 3, output: 15 },
+  "claude-sonnet-4-6": { input: 3, output: 15 },
+  "claude-haiku-4-5": { input: 1, output: 5 },
+};
+
+/**
+ * Cache rates are multiples of a model's input rate, not separate numbers.
+ *
+ * The 5m/1h split matters more than it looks: on this machine 89% of all
+ * cache-creation tokens were 1-hour writes, which bill at 2x input — so
+ * charging every write at the 5m 1.25x rate under-counted the dominant path by
+ * 60%. Claude Code records the split under `usage.cache_creation`.
+ */
+const CACHE_MULTIPLIER = {
+  read: 0.1,
+  write5m: 1.25,
+  write1h: 2.0,
 } as const;
+
+/** Model id used by Claude Code for entries it generates itself (never billed). */
+const SYNTHETIC_MODEL = "<synthetic>";
+
+/**
+ * Strip a dated snapshot suffix so `claude-haiku-4-5-20251001` prices as
+ * `claude-haiku-4-5`. Snapshots share their alias's rate.
+ */
+export function normalizeModelId(model: string): string {
+  return model.replace(/-\d{8}$/, "");
+}
+
+/** Published rates for a model, or null when it has none. */
+function ratesFor(model: string): ModelRates | null {
+  return MODEL_RATES[normalizeModelId(model)] ?? null;
+}
+
+/** Token counts split the way pricing actually needs them. */
+export interface RateBuckets {
+  input: number;
+  output: number;
+  cacheRead: number;
+  /** 5-minute-TTL cache writes (1.25x input). */
+  cacheWrite5m: number;
+  /** 1-hour-TTL cache writes (2x input). */
+  cacheWrite1h: number;
+}
+
+function emptyBuckets(): RateBuckets {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
+}
+
+function addBuckets(into: RateBuckets, from: RateBuckets): void {
+  into.input += from.input;
+  into.output += from.output;
+  into.cacheRead += from.cacheRead;
+  into.cacheWrite5m += from.cacheWrite5m;
+  into.cacheWrite1h += from.cacheWrite1h;
+}
+
+function bucketTotal(b: RateBuckets): number {
+  return b.input + b.output + b.cacheRead + b.cacheWrite5m + b.cacheWrite1h;
+}
+
+/** Cost of one model's buckets, and whether it could be priced at all. */
+function costOfBuckets(model: string, b: RateBuckets): { cost: number; priced: boolean } {
+  // Synthetic entries are Claude Code's own bookkeeping; they carry no usage
+  // and are never billed, so they are "priced" at exactly zero rather than
+  // being reported as an unpriced gap the user should worry about.
+  if (normalizeModelId(model) === SYNTHETIC_MODEL) return { cost: 0, priced: true };
+  const r = ratesFor(model);
+  if (!r) return { cost: 0, priced: false };
+  const usd =
+    b.input * r.input
+    + b.output * r.output
+    + b.cacheRead * r.input * CACHE_MULTIPLIER.read
+    + b.cacheWrite5m * r.input * CACHE_MULTIPLIER.write5m
+    + b.cacheWrite1h * r.input * CACHE_MULTIPLIER.write1h;
+  return { cost: usd / 1_000_000, priced: true };
+}
+
+/**
+ * Price a per-model bucket map.
+ *
+ * Returns the tokens it could NOT price separately, so a caller can say
+ * "$X, plus N tokens from models with no published rate" instead of quietly
+ * reporting a total that is missing them.
+ */
+export function priceBuckets(byModel: Map<string, RateBuckets>): {
+  cost_usd: number;
+  unpriced_tokens: number;
+  unpriced_models: string[];
+} {
+  let cost = 0;
+  let unpricedTokens = 0;
+  const unpriced: string[] = [];
+  for (const [model, buckets] of byModel) {
+    const { cost: c, priced } = costOfBuckets(model, buckets);
+    if (priced) {
+      cost += c;
+    } else {
+      unpricedTokens += bucketTotal(buckets);
+      unpriced.push(normalizeModelId(model));
+    }
+  }
+  return { cost_usd: cost, unpriced_tokens: unpricedTokens, unpriced_models: unpriced.sort() };
+}
 
 // -- Path mangling -----------------------------------------------------------
 
@@ -292,6 +417,8 @@ interface DayAccumulator {
   cacheRead: number;
   cacheCreation: number;
   turns: number;
+  /** Per-model, per-cache-TTL split — the only thing cost can be derived from. */
+  byModel: Map<string, RateBuckets>;
 }
 
 /**
@@ -316,6 +443,8 @@ interface ScanState {
   turns: number;
   /** date (YYYY-MM-DD, local) → running totals for that day. */
   days: Map<string, DayAccumulator>;
+  /** Per-model, per-cache-TTL split for the whole file — the basis for cost. */
+  byModel: Map<string, RateBuckets>;
   /** Last touch, for LRU eviction. */
   accessTime: number;
 }
@@ -372,6 +501,7 @@ function freshScanState(): ScanState {
     cacheCreation: 0,
     turns: 0,
     days: new Map(),
+    byModel: new Map(),
     accessTime: Date.now(),
   };
 }
@@ -390,18 +520,24 @@ function localDateKey(iso: string | undefined): string | null {
 
 /** Fold a day accumulator into the immutable wire shape. */
 function toDayBucket(date: string, a: DayAccumulator): TokenDayBucket {
-  const usage = {
+  return {
+    date,
     input_tokens: a.input,
     output_tokens: a.output,
     cache_read_tokens: a.cacheRead,
     cache_creation_tokens: a.cacheCreation,
-  };
-  return {
-    date,
-    ...usage,
     total_tokens: a.input + a.output + a.cacheRead + a.cacheCreation,
     turns: a.turns,
-    cost_usd: calculateCost(usage),
+    // Priced from this day's own per-model split, so a day that mixed Opus and
+    // Haiku is not charged at one blended rate.
+    ...(() => {
+      const p = priceBuckets(a.byModel);
+      return {
+        cost_usd: p.cost_usd,
+        unpriced_tokens: p.unpriced_tokens,
+        unpriced_models: p.unpriced_models,
+      };
+    })(),
   };
 }
 
@@ -411,19 +547,13 @@ export function resetTokenCache(): void {
   inflightScans.clear();
 }
 
-/** Calculate USD cost from token counts */
-export function calculateCost(usage: {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-}): number {
-  return (
-    (usage.input_tokens * PRICING.input) / 1_000_000 +
-    (usage.output_tokens * PRICING.output) / 1_000_000 +
-    (usage.cache_read_tokens * PRICING.cache_read) / 1_000_000 +
-    (usage.cache_creation_tokens * PRICING.cache_creation) / 1_000_000
-  );
+/**
+ * USD cost of one model's tokens. Returns 0 for a model with no published
+ * rate — callers that need to distinguish "free" from "unpriced" should use
+ * {@link priceBuckets}, which reports the unpriced tokens separately.
+ */
+export function calculateCost(model: string, buckets: RateBuckets): number {
+  return costOfBuckets(model, buckets).cost;
 }
 
 /**
@@ -455,11 +585,21 @@ function applyLine(state: ScanState, line: string): void {
       timestamp?: string;
       message?: {
         role?: string;
+        model?: string;
         usage?: {
           input_tokens?: number;
           output_tokens?: number;
           cache_read_input_tokens?: number;
           cache_creation_input_tokens?: number;
+          /**
+           * Present on current logs; splits cache writes by TTL. The two bill
+           * at different multiples of the input rate (1.25x vs 2x), so this is
+           * load-bearing for cost, not just detail.
+           */
+          cache_creation?: {
+            ephemeral_5m_input_tokens?: number;
+            ephemeral_1h_input_tokens?: number;
+          };
         };
         stop_reason?: string | null;
       };
@@ -477,6 +617,27 @@ function applyLine(state: ScanState, line: string): void {
     const cacheRead = usage?.cache_read_input_tokens ?? 0;
     const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
 
+    // Prefer the TTL breakdown; `cache_creation_input_tokens` is its sum, so
+    // using both would double-count. Older logs predate the 1h TTL and carry
+    // only the scalar — those are 5-minute writes by definition.
+    const split = usage?.cache_creation;
+    const write5m = split ? (split.ephemeral_5m_input_tokens ?? 0) : cacheCreation;
+    const write1h = split ? (split.ephemeral_1h_input_tokens ?? 0) : 0;
+
+    // An entry with usage but no model cannot be priced against any rate. Bucket
+    // it under a sentinel so its tokens surface as unpriced rather than being
+    // silently attributed to whichever model happened to come last.
+    const model = entry.message?.model ?? "unknown";
+    const perEntry: RateBuckets = {
+      input, output, cacheRead, cacheWrite5m: write5m, cacheWrite1h: write1h,
+    };
+    let modelBuckets = state.byModel.get(model);
+    if (!modelBuckets) {
+      modelBuckets = emptyBuckets();
+      state.byModel.set(model, modelBuckets);
+    }
+    addBuckets(modelBuckets, perEntry);
+
     state.input += input;
     state.output += output;
     state.cacheRead += cacheRead;
@@ -489,9 +650,15 @@ function applyLine(state: ScanState, line: string): void {
     if (!dateKey) return;
     let bucket = state.days.get(dateKey);
     if (!bucket) {
-      bucket = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0 };
+      bucket = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, turns: 0, byModel: new Map() };
       state.days.set(dateKey, bucket);
     }
+    let dayModel = bucket.byModel.get(model);
+    if (!dayModel) {
+      dayModel = emptyBuckets();
+      bucket.byModel.set(model, dayModel);
+    }
+    addBuckets(dayModel, perEntry);
     bucket.input += input;
     bucket.output += output;
     bucket.cacheRead += cacheRead;
@@ -590,6 +757,8 @@ async function scanTokenUsage(jsonlPath: string): Promise<SessionTokenUsage> {
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .map(([date, acc]) => toDayBucket(date, acc));
 
+  const priced = priceBuckets(state.byModel);
+
   return {
     session_id: basename(jsonlPath, ".jsonl"),
     jsonl_path: jsonlPath,
@@ -598,12 +767,9 @@ async function scanTokenUsage(jsonlPath: string): Promise<SessionTokenUsage> {
     cache_read_tokens: state.cacheRead,
     cache_creation_tokens: state.cacheCreation,
     turns: state.turns,
-    cost_usd: calculateCost({
-      input_tokens: state.input,
-      output_tokens: state.output,
-      cache_read_tokens: state.cacheRead,
-      cache_creation_tokens: state.cacheCreation,
-    }),
+    cost_usd: priced.cost_usd,
+    unpriced_tokens: priced.unpriced_tokens,
+    unpriced_models: priced.unpriced_models,
     file_size_bytes: st.size,
     last_modified: new Date(st.mtimeMs).toISOString(),
     daily,
@@ -637,6 +803,8 @@ export async function getProjectTokenUsage(
     cache_creation_tokens: 0,
     turns: 0,
     cost_usd: 0,
+    unpriced_tokens: 0,
+    unpriced_models: [] as string[],
   };
   for (const s of sessions) {
     total.input_tokens += s.input_tokens;
@@ -645,7 +813,12 @@ export async function getProjectTokenUsage(
     total.cache_creation_tokens += s.cache_creation_tokens;
     total.turns += s.turns;
     total.cost_usd += s.cost_usd;
+    total.unpriced_tokens += s.unpriced_tokens;
+    for (const m of s.unpriced_models) {
+      if (!total.unpriced_models.includes(m)) total.unpriced_models.push(m);
+    }
   }
+  total.unpriced_models.sort();
 
   return { name, path: projectPath, sessions, total };
 }
@@ -662,6 +835,8 @@ function emptyTotals(): TokenTotals {
     total_tokens: 0,
     turns: 0,
     cost_usd: 0,
+    unpriced_tokens: 0,
+    unpriced_models: [],
   };
 }
 
@@ -1230,11 +1405,16 @@ export async function getDailyCostTimeline(
             type?: string;
             timestamp?: string;
             message?: {
+              model?: string;
               usage?: {
                 input_tokens?: number;
                 output_tokens?: number;
                 cache_read_input_tokens?: number;
                 cache_creation_input_tokens?: number;
+                cache_creation?: {
+                  ephemeral_5m_input_tokens?: number;
+                  ephemeral_1h_input_tokens?: number;
+                };
               };
               stop_reason?: string | null;
             };
@@ -1249,12 +1429,23 @@ export async function getDailyCostTimeline(
           const usage = raw.message?.usage;
           if (!usage) continue;
 
-          const inputCost = (usage.input_tokens ?? 0) * PRICING.input / 1_000_000;
-          const outputCost = (usage.output_tokens ?? 0) * PRICING.output / 1_000_000;
-          const cacheCost = (
-            (usage.cache_read_input_tokens ?? 0) * PRICING.cache_read +
-            (usage.cache_creation_input_tokens ?? 0) * PRICING.cache_creation
-          ) / 1_000_000;
+          // Priced against this entry's own model, like the main scanner.
+          // An unpriced model contributes 0 rather than being charged an
+          // unrelated model's rate.
+          const model = raw.message?.model ?? "unknown";
+          const cc = usage.cache_creation;
+          const inputCost = calculateCost(model, {
+            ...emptyBuckets(), input: usage.input_tokens ?? 0,
+          });
+          const outputCost = calculateCost(model, {
+            ...emptyBuckets(), output: usage.output_tokens ?? 0,
+          });
+          const cacheCost = calculateCost(model, {
+            ...emptyBuckets(),
+            cacheRead: usage.cache_read_input_tokens ?? 0,
+            cacheWrite5m: cc ? (cc.ephemeral_5m_input_tokens ?? 0) : (usage.cache_creation_input_tokens ?? 0),
+            cacheWrite1h: cc ? (cc.ephemeral_1h_input_tokens ?? 0) : 0,
+          });
 
           let day = dailyMap.get(dateKey);
           if (!day) {
