@@ -23,6 +23,7 @@ import { manglePath, resetTokenCache } from "../claude-session.js";
 import {
   makeFakeContext,
   fakeAgentEngine,
+  makeSession,
   type FakeContext,
 } from "./helpers/fake-context.js";
 import type { TokenRangeSummary, ProjectTokenUsage } from "../types.js";
@@ -220,5 +221,86 @@ describe("GET /api/tokens", () => {
     const second = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
     expect(second[0].total.input_tokens).toBe(first[0].total.input_tokens);
     expect(second[0].total.turns).toBe(first[0].total.turns);
+  });
+});
+
+/**
+ * Several operad sessions routinely share one working directory — a repo opened
+ * under two names, or `mergeRegistrySessions()` folding ad-hoc registry entries
+ * into `config.sessions`, which deduplicates on NAME only. The scan is per
+ * DIRECTORY, so one row per session repeated the same transcripts: the totals
+ * counted them N times, and the repeated `path` values made Svelte throw
+ * `each_key_duplicate` on the dashboard's keyed `{#each}`, taking the whole
+ * overview page down with it.
+ */
+describe("projects are collapsed by path, not listed per session", () => {
+  /**
+   * Register a second live session pointing at the same project directory.
+   *
+   * `initFromConfig` seeds the state entry as `pending`, which already counts
+   * as live — the collector excludes only `stopped` and `failed` — and without
+   * a state entry at all the session is skipped, which would make these
+   * assertions vacuous.
+   */
+  function addLiveSessionOnSamePath(name: string): void {
+    fc.ctx.config.sessions.push(makeSession(name, { path: PROJECT_PATH }));
+    fc.state.initFromConfig(fc.ctx.config.sessions);
+    expect(fc.state.getSession(name)?.status).toBe("pending");
+  }
+
+  test("two live config sessions on one path yield one entry with un-doubled totals", async () => {
+    const before = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+    expect(before).toHaveLength(1);
+
+    addLiveSessionOnSamePath("alpha-2");
+    addLiveSessionOnSamePath("alpha-3");
+
+    const after = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+    expect(after).toHaveLength(1);
+    expect(after[0].total.input_tokens).toBe(before[0].total.input_tokens);
+    expect(after[0].total.turns).toBe(before[0].total.turns);
+    expect(after[0].sessions).toHaveLength(before[0].sessions.length);
+  });
+
+  test("a registry session on a config session's path adds no second entry", async () => {
+    fc.registry.add({ name: "alpha-adhoc", path: PROJECT_PATH, priority: 50, auto_go: false });
+    // The registry loop only considers live sessions, so give it a state entry
+    // — without one `isLive` is false and the loop would be skipped entirely,
+    // making the assertion below vacuous.
+    fc.state.initFromConfig(fc.registry.toSessionConfigs());
+    expect(fc.state.getSession("alpha-adhoc")?.status).toBe("pending");
+
+    const projects = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+    expect(projects).toHaveLength(1);
+  });
+
+  test("the range summary keeps one project row and unrepeated totals", async () => {
+    addLiveSessionOnSamePath("alpha-2");
+    addLiveSessionOnSamePath("alpha-3");
+
+    const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all", "")).data as TokenRangeSummary;
+    expect(s.projects).toHaveLength(1);
+    // Same figure the single-session case reports — not 3x it.
+    expect(s.totals.total_tokens).toBe(6730);
+    expect(s.daily.reduce((n, d) => n + d.total_tokens, 0)).toBe(s.totals.total_tokens);
+
+    // Keys the dashboard's {#each} relies on must be unique.
+    const paths = s.projects.map((p) => p.path);
+    expect(new Set(paths).size).toBe(paths.length);
+    const ids = s.projects.flatMap((p) => p.sessions.map((x) => x.session_id));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test("a project row is labelled with its directory, not an arbitrary session", async () => {
+    // `zz-scratch` sorts last but is the only session left, so a name taken
+    // from the session list would surface a scratch name against the repo.
+    fc.state.transition("alpha", "stopping");
+    fc.state.transition("alpha", "stopped");
+    addLiveSessionOnSamePath("zz-scratch");
+
+    const projects = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+    expect(projects).toHaveLength(1);
+    expect(projects[0].name).toBe("alpha"); // basename of /work/alpha
+    expect(projects[0].path).toBe(PROJECT_PATH);
   });
 });

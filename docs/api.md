@@ -310,6 +310,14 @@ Token usage from Claude JSONL files.
 Response: `ProjectTokenUsage` or `ProjectTokenUsage[]`. Per-session totals
 carry `cost_usd`, `unpriced_tokens` and `unpriced_models` as described above.
 
+The aggregate is **one entry per project directory, not per session**. The
+scan reads a directory's whole JSONL corpus, and several sessions routinely
+share one directory, so a per-session list repeated identical transcripts and
+inflated the totals. `name` is therefore the directory's own name; `path` is
+unique across the array, which is what `/api/token-usage` and the dashboard's
+keyed lists rely on. `GET /api/tokens/:name` is an explicit lookup and still
+reports the session name it was asked about.
+
 #### `GET /api/costs`
 Aggregate costs (legacy compatibility endpoint, now token-centric).
 

@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the Tokens panel could not be opened, and its totals were inflated
+
+- **One project was listed once per session pointing at it.** `/api/tokens`
+  and `/api/token-usage` built their project list by iterating sessions, but
+  the scan behind each row reads the whole JSONL corpus of a *directory*.
+  Several operad sessions routinely share one working directory —
+  `mergeRegistrySessions()` folds ad-hoc registry entries into
+  `config.sessions` deduplicating on NAME only — so a repo worked on under
+  three names produced three identical rows. Only the registry loop
+  deduplicated, and after the merge it is the config loop that sees the
+  duplicates.
+
+  Two consequences, both visible on the author's install: the grand total
+  counted those transcripts three times over (**14.61B tokens / $16,851
+  reported against 9.66B / $9,705 actually used**), and the repeated `path`
+  values made Svelte throw `each_key_duplicate` on the panel's keyed
+  `{#each}` — which aborts the render of the whole overview page, so the
+  Tokens card would not expand and the page stopped responding.
+
+  Rows are now keyed by normalised project path, and labelled with the
+  directory's own name instead of whichever session happened to sort first
+  (which had a scratch session name showing against a repo).
+
 ### Fixed — token costs were 57% too high
 
 - **One hardcoded rate was applied to every model.** `PRICING` in

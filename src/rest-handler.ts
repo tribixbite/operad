@@ -18,7 +18,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { openSync, closeSync } from "node:fs";
-import { join, dirname, sep } from "node:path";
+import { join, dirname, sep, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { AgentEngine } from "./agent-engine.js";
@@ -166,15 +166,35 @@ export class RestHandler {
 
   /**
    * Token usage for every non-stopped Claude project, from both the configured
-   * sessions and the dynamic registry (registry entries whose path is already
-   * covered by a config session are skipped).
+   * sessions and the dynamic registry.
+   *
+   * One entry per project PATH, not per session. Several operad sessions
+   * routinely share one working directory — `mergeRegistrySessions()` folds
+   * ad-hoc registry entries into `config.sessions` deduplicating on NAME only,
+   * so a repo worked on under three names appears three times in that list —
+   * and `getProjectTokenUsage()` scans the directory's entire JSONL corpus no
+   * matter which session asked for it. Emitting one entry per session
+   * therefore repeated identical transcripts N times, with two visible
+   * consequences: the dashboard's grand total counted them N times over
+   * (14.6B tokens reported against 7.6B actually used on this install), and
+   * the repeated `path` values crashed the Tokens panel outright — Svelte
+   * throws `each_key_duplicate` on a keyed `{#each}` whose keys repeat, which
+   * took the whole overview page down with it, so the card could not be
+   * expanded at all.
+   *
+   * Only the registry loop used to deduplicate, and only against paths already
+   * collected; the config loop had no such guard, and after the registry merge
+   * it is the loop that sees the duplicates.
    *
    * Shared by `/api/tokens` and `/api/token-usage` so the two cannot drift.
    * Per-file results are incrementally cached in claude-session.ts, so repeat
    * calls only read bytes appended since the previous scan.
    */
   private async collectActiveProjectUsage(): Promise<ProjectTokenUsage[]> {
-    const results: ProjectTokenUsage[] = [];
+    // Keyed by the NORMALISED path so `/a/b` and `/a/b/` collapse; the value
+    // keeps the path exactly as configured, because the dashboard round-trips
+    // it back to path-addressed routes such as /api/conversation?path=.
+    const byPath = new Map<string, ProjectTokenUsage>();
 
     /** A session counts as live unless it has stopped or failed. */
     const isLive = (sessionName: string): boolean => {
@@ -182,24 +202,35 @@ export class RestHandler {
       return Boolean(state) && state!.status !== "stopped" && state!.status !== "failed";
     };
 
+    /**
+     * Scan a project directory once.
+     *
+     * Labelled with the directory's own name rather than the session's: the
+     * row describes a project, and whichever session sorted first is an
+     * arbitrary pick that displayed scratch names like `reveal-paywall-content`
+     * against a repo called termux-tools.
+     */
+    const addProject = async (projectPath: string): Promise<void> => {
+      const key = resolve(projectPath);
+      if (byPath.has(key)) return;
+      try {
+        byPath.set(key, await getProjectTokenUsage(basename(key), projectPath));
+      } catch { /* best-effort: one unreadable project must not fail the request */ }
+    };
+
     for (const cfg of this.ctx.config.sessions) {
       if (cfg.type !== "claude" || !cfg.path) continue;
       if (!isLive(cfg.name)) continue;
-      try {
-        results.push(await getProjectTokenUsage(cfg.name, cfg.path));
-      } catch { /* best-effort: one unreadable project must not fail the request */ }
+      await addProject(cfg.path);
     }
 
     for (const entry of this.ctx.registry.entries()) {
       if (!entry.path) continue;
       if (!isLive(entry.name)) continue;
-      if (results.some((r) => r.path === entry.path)) continue;
-      try {
-        results.push(await getProjectTokenUsage(entry.name, entry.path));
-      } catch { /* best-effort */ }
+      await addProject(entry.path);
     }
 
-    return results;
+    return [...byPath.values()];
   }
 
   /**
