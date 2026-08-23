@@ -382,6 +382,113 @@ async function runStream(): Promise<void> {
 }
 
 /**
+ * How long `operad upgrade` waits for the watchdog to bring the daemon back.
+ *
+ * Must exceed watchdog.sh's headless poll interval (60s) plus daemon startup,
+ * or an upgrade run at the wrong moment in that cycle reports a failure while
+ * the restart is still pending. The SIGUSR1 nudge normally makes it a couple
+ * of seconds; this is the ceiling for the case where the nudge cannot land.
+ */
+const WATCHDOG_RESTART_TIMEOUT_MS = 90_000;
+
+/**
+ * Command line of a pid, one entry per argument.
+ *
+ * /proc gives exact argument boundaries (NUL-delimited); macOS has no /proc,
+ * so fall back to `ps`, where splitting on whitespace only approximates them —
+ * enough to match a script basename.
+ */
+function processArgs(pid: number): string[] {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean);
+  } catch { /* no /proc, or the process is gone */ }
+  const ps = spawnSync("ps", ["-o", "args=", "-p", String(pid)], {
+    encoding: "utf-8",
+    timeout: 3000,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return (ps.stdout ?? "").trim().split(/\s+/).filter(Boolean);
+}
+
+/**
+ * Is this pid actually a watchdog?
+ *
+ * Matches an argv ELEMENT whose basename is the script, not the pattern
+ * anywhere in the command line: `pgrep -f watchdog.sh` also matches the shell
+ * running that very pgrep, an editor with the file open, or this session's own
+ * tool wrapper — all of which would be reported as a live watchdog and make
+ * upgrade wait out a full poll interval for a restart nobody was going to do.
+ * Mirrors `is_live_watchdog` in watchdog.sh.
+ *
+ * `startup.sh` counts too: Termux:Boot runs the script through a symlink of
+ * that name, which is how it appears in argv.
+ */
+function isWatchdogProcess(pid: number): boolean {
+  return processArgs(pid).some((arg) => {
+    const base = arg.split(/[\\/]/).pop();
+    return base === "watchdog.sh" || base === "startup.sh";
+  });
+}
+
+/**
+ * PIDs of the running watchdog(s).
+ *
+ * Prefers the pidfile watchdog.sh maintains, because it is exact. Falls back
+ * to a process scan for a watchdog started before the pidfile existed, or one
+ * whose $TMPDIR this process cannot see — bun's glibc runner strips TMPDIR and
+ * PREFIX on Termux, so the pidfile path is not always resolvable from here.
+ * Either way the pid is confirmed to be a watchdog before it is returned.
+ */
+function findWatchdogPids(): number[] {
+  const tmp = process.env.TMPDIR
+    || (process.env.PREFIX ? join(process.env.PREFIX, "tmp") : undefined);
+  if (tmp) {
+    try {
+      const pid = Number.parseInt(readFileSync(join(tmp, "operad-watchdog.pid"), "utf-8").trim(), 10);
+      // Signal 0 tests existence and permission without delivering anything.
+      if (Number.isInteger(pid) && pid > 0) {
+        process.kill(pid, 0);
+        if (isWatchdogProcess(pid)) return [pid];
+      }
+    } catch { /* no pidfile, unreadable, or the pid is gone — fall through */ }
+  }
+
+  const scan = spawnSync("pgrep", ["-f", "watchdog\\.sh|startup\\.sh"], {
+    encoding: "utf-8",
+    timeout: 3000,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const pids: number[] = [];
+  for (const line of (scan.stdout ?? "").split("\n")) {
+    const pid = Number.parseInt(line.trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    if (isWatchdogProcess(pid)) pids.push(pid);
+  }
+  return pids;
+}
+
+/**
+ * Ask each watchdog to re-check the daemon now; returns how many were signalled.
+ *
+ * SIGWINCH is the wake signal because its default action is to be IGNORED, so
+ * this is safe to send blind. A watchdog started before the handler existed
+ * keeps running the script bash parsed at launch — an updated watchdog.sh on
+ * disk proves nothing about a long-lived process — and any signal that
+ * defaults to terminate would kill the very process relied on to restart the
+ * daemon. See the matching comment in watchdog.sh.
+ */
+function signalWatchdogs(pids: number[]): number {
+  let sent = 0;
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGWINCH");
+      sent++;
+    } catch { /* exited between the scan and now, or not ours to signal */ }
+  }
+  return sent;
+}
+
+/**
  * Upgrade: rebuild dist, shut down the running daemon, let watchdog auto-restart.
  * If no watchdog is running, restart the daemon directly.
  */
@@ -517,21 +624,43 @@ async function runUpgrade(): Promise<void> {
   console.log(`${GREEN}Daemon stopped${RESET}`);
 
   // Step 5: Check if watchdog is running — if so, it will auto-restart
-  const watchdogCheck = spawnSync("pgrep", ["-f", "watchdog.sh"], {
-    timeout: 3000,
-    stdio: "ignore",
-  });
-  if (watchdogCheck.status === 0) {
-    console.log(`${DIM}Watchdog detected — daemon will auto-restart${RESET}`);
-    // Wait for the watchdog to restart the daemon
-    for (let i = 0; i < 20; i++) {
-      await sleep(1000);
+  const watchdogPids = findWatchdogPids();
+  if (watchdogPids.length > 0) {
+    // Ask the watchdog to re-check now instead of at its next scheduled poll.
+    //
+    // Headless supervision polls once a minute, so without this the restart
+    // began somewhere in the following 60s — and the old 20s wait below
+    // usually expired first, reporting a failure for a restart that had not
+    // been attempted yet.
+    //
+    // Best-effort: a watchdog predating the handler ignores the signal (that
+    // is why it is SIGWINCH), and the wait below covers a full poll interval
+    // either way, so it still succeeds — just slower.
+    signalWatchdogs(watchdogPids);
+    console.log(`${DIM}Watchdog detected — asked it to restart the daemon${RESET}`);
+
+    // Cover a full headless poll interval (60s) plus the daemon's own startup,
+    // so a watchdog that ignored the nudge is waited out rather than declared
+    // broken.
+    const started = Date.now();
+    const deadline = started + WATCHDOG_RESTART_TIMEOUT_MS;
+    let announced = false;
+    while (Date.now() < deadline) {
+      await sleep(500);
       if (await client.isRunning()) {
         console.log(`${GREEN}Daemon restarted by watchdog${RESET}`);
         return;
       }
+      // Past the point where a nudged watchdog would have answered, so this is
+      // one waiting out its poll interval. Say so rather than look hung.
+      if (!announced && Date.now() - started > 15_000) {
+        console.log(`${DIM}Still waiting for the watchdog's next poll (up to a minute)…${RESET}`);
+        announced = true;
+      }
     }
-    console.error(`${YELLOW}Watchdog didn't restart daemon within 20s — try 'operad stream'${RESET}`);
+    console.error(
+      `${YELLOW}Watchdog didn't restart the daemon within ${Math.round(WATCHDOG_RESTART_TIMEOUT_MS / 1000)}s — try 'operad stream'${RESET}`,
+    );
     return;
   }
 

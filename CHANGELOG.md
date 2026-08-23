@@ -27,6 +27,37 @@ All notable changes to this project will be documented in this file.
   directory's own name instead of whichever session happened to sort first
   (which had a scratch session name showing against a repo).
 
+### Fixed — `operad upgrade` reported a restart failure that had not happened
+
+- **The wait was shorter than the watchdog's poll interval.** Upgrade shuts
+  the daemon down and lets the watchdog restart it, then waited 20s — but
+  headless supervision polls once a minute, so an upgrade run at the wrong
+  point in that cycle printed *"Watchdog didn't restart daemon within 20s"*
+  while the restart was still pending, and the daemon came back unattended
+  moments later.
+
+  Upgrade now signals the watchdog to re-check immediately and waits up to 90s
+  — one full poll interval plus startup — so the slow path still succeeds
+  rather than being declared broken.
+
+- **The wake signal is SIGWINCH, whose default action is to be ignored.** The
+  sender cannot know whether the watchdog it found predates the handler (a
+  long-lived one keeps running the script bash parsed at launch, so an updated
+  file on disk proves nothing), and an unhandled SIGUSR1 would have killed the
+  one process able to restart the daemon. Verified both ways on device.
+
+- **The watchdog's poll sleep is now interruptible at all.** It ran
+  `sleep 60` in the foreground, and bash defers a trap until the foreground
+  command finishes — so the script also ignored SIGTERM for up to a minute
+  (measured: 19s to die on this device). Backgrounding the sleep and waiting
+  on it with the `wait` builtin makes both the wake signal and shutdown
+  prompt.
+
+- **`pgrep -f watchdog.sh` matched processes that were not watchdogs** — the
+  shell running that very pgrep, an editor with the file open. Candidate pids
+  are now confirmed by matching an argv *element*, mirroring the check
+  `watchdog.sh` already made of its own siblings.
+
 ### Fixed — token costs were 57% too high
 
 - **One hardcoded rate was applied to every model.** `PRICING` in

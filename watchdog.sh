@@ -290,6 +290,38 @@ ensure_wake_lock() {
   termux-wake-lock > /dev/null 2>&1 || log "WARNING: termux-wake-lock failed"
 }
 
+# PID of the `sleep` currently running inside sleep_reporting_overshoot, so the
+# wake handler below can cut the poll short. Empty when not sleeping.
+SLEEP_PID=""
+
+# Wake early on SIGWINCH — "recheck the daemon now".
+#
+# The headless poll is 60 s, and `operad upgrade` shuts the daemon down and then
+# waits for this loop to bring it back. On an unlucky poll boundary the user
+# watched a dead daemon for most of a minute and was told the restart had
+# failed, when in fact it had not been attempted yet. `operad upgrade` now
+# signals this process the moment the old daemon exits; ending the current sleep
+# runs the daemon_alive check immediately.
+#
+# SIGWINCH specifically, and not SIGUSR1, because its default action is to be
+# IGNORED. The sender cannot know whether the watchdog it found predates this
+# handler — a long-lived boot watchdog keeps running the script bash parsed at
+# start, so even an updated file on disk proves nothing — and an unhandled
+# SIGUSR1 terminates. Sending SIGWINCH to an older watchdog does nothing at
+# all, which degrades to the previous behaviour instead of killing the one
+# process able to restart the daemon.
+#
+# A genuine terminal resize also raises it, which at worst costs one extra
+# daemon_alive check.
+#
+# Nothing else is needed in the handler: returning from it falls through to the
+# top of the loop, which is exactly the desired behaviour.
+wake_now() {
+  [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2> /dev/null
+  return 0
+}
+trap wake_now WINCH
+
 # Sleep, then report how much wall-clock actually passed.
 #
 # The overshoot IS the outage: it is exactly the interval during which a dead
@@ -298,7 +330,15 @@ ensure_wake_lock() {
 sleep_reporting_overshoot() {
   local want="$1" t0 t1 actual
   t0=$(date +%s)
-  sleep "$want"
+  # Backgrounded, then waited on, rather than a plain `sleep "$want"`: bash
+  # defers a trap until the foreground command finishes, so a plain sleep
+  # swallows SIGUSR1 for its full duration and the wake-up above would do
+  # nothing. The `wait` builtin IS interruptible by a trapped signal.
+  # stderr is dropped because bash announces a killed background job.
+  sleep "$want" &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID" 2> /dev/null
+  SLEEP_PID=""
   t1=$(date +%s)
   actual=$((t1 - t0))
   if [ "$actual" -gt $((want * 2)) ]; then
