@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — "all time" was neither all of the usage nor all of the time
+
+Three independent gaps, all in the same direction: the widest range in the
+Tokens panel under-reported what it claimed to cover.
+
+- **Subagent transcripts were never read.** `resolveJsonlFiles` listed only the
+  top level of a project's `~/.claude/projects` directory, but the turns of any
+  subagent a session dispatched live one level down, in
+  `<session-id>/subagents/**` — and workflow runs nest another level, under
+  `subagents/workflows/wf_<id>/`. That is 460 files and 144 MB against 162 MB
+  at the top level on the author's machine: **2.93B tokens and ~$3,500 of real,
+  separately billed spend**, roughly 30% on top of the reported total. Verified
+  against the parent transcripts before counting it — 201 subagent entry uuids,
+  **zero** of them present in the parent — so this was uncounted usage, not
+  double counting.
+
+  Subagent turns now fold into the row of the session that dispatched them: a
+  subagent is part of that session's work, not a session of its own. One gets
+  its own row only when its parent transcript is gone, so its tokens are still
+  counted rather than dropped.
+
+- **Only projects with a running session were counted.** A range labelled "all
+  time" that loses a project the moment its session stops does not mean that.
+  `/api/token-usage` now defaults to every project directory on disk;
+  `?scope=live` restores the old behaviour, and `/api/tokens` keeps `live` as
+  its default because it is defined as the aggregate over running sessions.
+
+  Each project's real path comes from the `cwd` its transcripts record.
+  Un-mangling the directory name cannot work: `manglePath` maps every
+  non-alphanumeric character to `-`, so `git/Unexpected-Keyboard` and
+  `git/Unexpected/Keyboard` are indistinguishable afterwards. A directory whose
+  path cannot be recovered is skipped rather than guessed at.
+
+- **The daily series had no gaps because it had no silent days.** Only days
+  with activity produced a bucket, and the chart lays bars out by index — so a
+  quiet week was not drawn as a gap, it was not drawn at all. On the author's
+  data an Apr 17 → Aug 23 span (129 days, 21 gaps, the longest 11 days) drew as
+  60 evenly-spaced bars that read as 60 consecutive days. The series is now
+  zero-filled across its span, so the x-axis is a real time axis and the "129d"
+  badge counts calendar days. Leading and trailing silence is still trimmed —
+  the range never extends past what was recorded — and `CostChart`'s minimum
+  bar width no longer exceeds its slot, which would smear a dense series into a
+  solid block.
+
+Measured end to end on the author's corpus: **9.66B tokens / $9,705 before,
+12.69B / $13,291 after**, reconciling with a brute-force scan of all 495
+transcripts.
+
 ### Fixed — the Tokens panel could not be opened, and its totals were inflated
 
 - **One project was listed once per session pointing at it.** `/api/tokens`

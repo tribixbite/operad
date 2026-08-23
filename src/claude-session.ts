@@ -183,6 +183,13 @@ interface JsonlFileInfo {
   path: string;     // absolute path
   mtime: number;    // modification timestamp (ms)
   size: number;     // file size in bytes
+  /**
+   * For a subagent transcript, the id of the session that spawned it.
+   *
+   * Undefined for an ordinary top-level transcript. Only populated when the
+   * caller asked for subagents — see {@link resolveJsonlFiles}.
+   */
+  parentId?: string;
 }
 
 /**
@@ -213,33 +220,200 @@ function extractSessionTitle(filePath: string): string | null {
   }
 }
 
-/** List all JSONL files for a project path, sorted by mtime descending */
-export function resolveJsonlFiles(projectPath: string): JsonlFileInfo[] {
+/**
+ * Depth limit for the walk under a session's `subagents/` directory.
+ *
+ * `Dirent.isDirectory()` reports the entry's own type without following
+ * symlinks, so a symlink loop cannot be traversed — this is a backstop against
+ * a genuinely deep tree, not a cycle guard.
+ */
+const SUBAGENT_WALK_MAX_DEPTH = 6;
+
+/**
+ * Collect every transcript under a session's `subagents/` directory.
+ *
+ * The layout is not flat. Plain subagents land directly in `subagents/`, but a
+ * workflow run groups its agents under `subagents/workflows/wf_<id>/` — on the
+ * author's machine that is 143 of 460 files and 0.39B tokens. Reading only the
+ * immediate directory silently dropped every workflow agent, so the whole
+ * subtree is walked and each file attributed to the same parent session.
+ */
+function collectSubagents(
+  dir: string,
+  parentId: string,
+  add: (fullPath: string, name: string, parentId?: string) => void,
+  depth: number,
+): void {
+  if (depth > SUBAGENT_WALK_MAX_DEPTH) return;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return; // no subagents for this session
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectSubagents(full, parentId, add, depth + 1);
+    } else if (entry.name.endsWith(".jsonl")) {
+      add(full, entry.name, parentId);
+    }
+  }
+}
+
+/**
+ * List a project's JSONL files, most recently modified first.
+ *
+ * By default this is the project directory's TOP LEVEL only — one file per
+ * Claude session, which is what session identity, conversation listing and
+ * active-session resolution all want.
+ *
+ * `includeSubagents` additionally walks `<session-id>/subagents/*.jsonl`, the
+ * transcripts of subagents a session dispatched. Those are real, separately
+ * billed turns — 460 files and 2.93B tokens on the author's machine, about 30%
+ * on top of the top-level total — and every token figure in the dashboard
+ * omitted them because this function never descended. They are opt-in rather
+ * than default because a subagent is not a session: surfacing one in the
+ * conversation list or letting it win "most recently modified" would be wrong.
+ */
+export function resolveJsonlFiles(
+  projectPath: string,
+  opts: { includeSubagents?: boolean } = {},
+): JsonlFileInfo[] {
   const mangled = manglePath(projectPath);
   const dir = join(projectsDir(), mangled);
   if (!existsSync(dir)) return [];
 
   const results: JsonlFileInfo[] = [];
+
+  /** Push one `.jsonl` if it is a readable file. */
+  const addFile = (fullPath: string, name: string, parentId?: string): void => {
+    try {
+      const st = statSync(fullPath);
+      if (!st.isFile()) return;
+      results.push({
+        id: name.replace(/\.jsonl$/, ""),
+        path: fullPath,
+        mtime: st.mtimeMs,
+        size: st.size,
+        ...(parentId ? { parentId } : {}),
+      });
+    } catch { /* skip unreadable files */ }
+  };
+
   try {
-    for (const entry of readdirSync(dir)) {
-      if (!entry.endsWith(".jsonl")) continue;
-      const fullPath = join(dir, entry);
-      try {
-        const st = statSync(fullPath);
-        if (!st.isFile()) continue;
-        results.push({
-          id: entry.replace(".jsonl", ""),
-          path: fullPath,
-          mtime: st.mtimeMs,
-          size: st.size,
-        });
-      } catch { /* skip unreadable files */ }
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        addFile(join(dir, entry.name), entry.name);
+        continue;
+      }
+      if (!opts.includeSubagents || !entry.isDirectory()) continue;
+      // A per-session directory holding `subagents/` and `tool-results/`.
+      // Only the former carries token usage; tool results are payloads, not
+      // model turns, and counting them would double-bill the parent's context.
+      collectSubagents(join(dir, entry.name, "subagents"), entry.name, addFile, 0);
     }
   } catch { /* dir unreadable */ }
 
   // Most recent first
   results.sort((a, b) => b.mtime - a.mtime);
   return results;
+}
+
+/**
+ * Read the working directory a transcript was recorded in.
+ *
+ * Every Claude Code entry carries a `cwd`, which is the only lossless way back
+ * from a mangled project directory to a real path: `manglePath` replaces every
+ * non-alphanumeric character with `-`, so `git/Unexpected-Keyboard` and
+ * `git/Unexpected/Keyboard` mangle identically and no un-mangling can tell
+ * them apart. Reads a bounded prefix rather than the whole file — these run to
+ * tens of megabytes and `cwd` is on the first entry.
+ */
+function readTranscriptCwd(jsonlPath: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(jsonlPath, "r");
+    const buf = Buffer.alloc(64 * 1024);
+    const read = readSync(fd, buf, 0, buf.length, 0);
+    // Drop a trailing partial line so JSON.parse is not fed a truncated entry.
+    const text = buf.subarray(0, read).toString("utf-8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as { cwd?: unknown };
+        if (typeof entry.cwd === "string" && entry.cwd) return entry.cwd;
+      } catch { /* partial or non-JSON line */ }
+    }
+  } catch { /* unreadable */ } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+  return null;
+}
+
+/** A project directory found under `~/.claude/projects`. */
+export interface ClaudeProjectDir {
+  /** The mangled directory name, unique per project. */
+  dir: string;
+  /** The real working directory, recovered from a transcript's `cwd`. */
+  path: string;
+}
+
+/**
+ * Every project directory on disk that holds at least one transcript.
+ *
+ * Token totals were previously assembled only from projects with a currently
+ * live session, so "all time" silently shrank whenever a session was stopped —
+ * a range that claims to cover everything must not depend on what happens to be
+ * running. Directories whose real path cannot be recovered are skipped rather
+ * than guessed at: a wrong path would re-mangle to a different directory and
+ * silently report zero.
+ */
+export function listClaudeProjects(): ClaudeProjectDir[] {
+  const root = projectsDir();
+  const out: ClaudeProjectDir[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return out;
+  }
+
+  for (const dir of entries) {
+    const full = join(root, dir);
+    try {
+      if (!statSync(full).isDirectory()) continue;
+    } catch { continue; }
+
+    // Any transcript will do — subagent ones carry the same cwd — so prefer
+    // the cheap top-level listing and only descend when it comes up empty.
+    let files: string[] = [];
+    try {
+      files = readdirSync(full).filter((f) => f.endsWith(".jsonl"));
+    } catch { continue; }
+
+    let path: string | null = null;
+    for (const f of files) {
+      path = readTranscriptCwd(join(full, f));
+      if (path) break;
+    }
+    if (!path) {
+      for (const sub of readdirSync(full, { withFileTypes: true })) {
+        if (!sub.isDirectory()) continue;
+        const subDir = join(full, sub.name, "subagents");
+        try {
+          for (const f of readdirSync(subDir)) {
+            if (!f.endsWith(".jsonl")) continue;
+            path = readTranscriptCwd(join(subDir, f));
+            if (path) break;
+          }
+        } catch { /* no subagents here */ }
+        if (path) break;
+      }
+    }
+    if (path) out.push({ dir, path });
+  }
+  return out;
 }
 
 /**
@@ -777,23 +951,102 @@ async function scanTokenUsage(jsonlPath: string): Promise<SessionTokenUsage> {
 }
 
 /**
+ * Fold `src` into `dst` in place, merging their per-day buckets.
+ *
+ * Used to attribute a subagent's turns to the session that dispatched it.
+ * `jsonl_path` and `session_id` stay the parent's; `last_modified` becomes the
+ * later of the two, so a session whose subagent ran most recently still sorts
+ * as recently active.
+ */
+function mergeSessionUsage(dst: SessionTokenUsage, src: SessionTokenUsage): void {
+  dst.input_tokens += src.input_tokens;
+  dst.output_tokens += src.output_tokens;
+  dst.cache_read_tokens += src.cache_read_tokens;
+  dst.cache_creation_tokens += src.cache_creation_tokens;
+  dst.turns += src.turns;
+  dst.cost_usd += src.cost_usd;
+  dst.unpriced_tokens += src.unpriced_tokens;
+  dst.file_size_bytes += src.file_size_bytes;
+  for (const m of src.unpriced_models) {
+    if (!dst.unpriced_models.includes(m)) dst.unpriced_models.push(m);
+  }
+  dst.unpriced_models.sort();
+  if (src.last_modified > dst.last_modified) dst.last_modified = src.last_modified;
+
+  const byDate = new Map(dst.daily.map((b) => [b.date, b]));
+  for (const bucket of src.daily) {
+    const existing = byDate.get(bucket.date);
+    if (!existing) {
+      const copy = { ...bucket };
+      byDate.set(copy.date, copy);
+      dst.daily.push(copy);
+      continue;
+    }
+    existing.input_tokens += bucket.input_tokens;
+    existing.output_tokens += bucket.output_tokens;
+    existing.cache_read_tokens += bucket.cache_read_tokens;
+    existing.cache_creation_tokens += bucket.cache_creation_tokens;
+    existing.total_tokens += bucket.total_tokens;
+    existing.turns += bucket.turns;
+    existing.cost_usd += bucket.cost_usd;
+    existing.unpriced_tokens += bucket.unpriced_tokens;
+    for (const m of bucket.unpriced_models) {
+      if (!existing.unpriced_models.includes(m)) existing.unpriced_models.push(m);
+    }
+  }
+  dst.daily.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+}
+
+/**
  * Get aggregated token usage for all JSONL files of a project.
+ *
+ * Includes subagent transcripts, folded into the session that dispatched them.
+ * A subagent's turns are billed separately and appear in no parent transcript
+ * (verified: zero uuid overlap), so omitting them under-reported every total —
+ * but a subagent is part of its parent's work, not a session of its own, so it
+ * does not get its own row.
  */
 export async function getProjectTokenUsage(
   name: string,
   projectPath: string,
 ): Promise<ProjectTokenUsage> {
-  const files = resolveJsonlFiles(projectPath);
+  const files = resolveJsonlFiles(projectPath, { includeSubagents: true });
   const sessions: SessionTokenUsage[] = [];
+  const byId = new Map<string, SessionTokenUsage>();
+  /** Subagent usage whose parent transcript has not been read yet. */
+  const orphanedSubagents: Array<{ parentId: string; usage: SessionTokenUsage }> = [];
 
   for (const file of files) {
     try {
       const usage = await streamTokenUsage(file.path);
       // Skip sessions with zero usage
-      if (usage.turns > 0 || usage.output_tokens > 0) {
+      if (usage.turns === 0 && usage.output_tokens === 0) continue;
+
+      if (!file.parentId) {
         sessions.push(usage);
+        byId.set(usage.session_id, usage);
+        continue;
       }
+      const parent = byId.get(file.parentId);
+      // Files are mtime-ordered, not parent-before-child, so a subagent can be
+      // read first. Park it and fold it in once every file has been scanned.
+      if (parent) mergeSessionUsage(parent, usage);
+      else orphanedSubagents.push({ parentId: file.parentId, usage });
     } catch { /* skip unreadable files */ }
+  }
+
+  for (const { parentId, usage } of orphanedSubagents) {
+    const parent = byId.get(parentId);
+    if (parent) {
+      mergeSessionUsage(parent, usage);
+      continue;
+    }
+    // The parent transcript is gone (deleted, or it recorded no usage of its
+    // own). Surfacing the subagent as its own row keeps the tokens counted
+    // rather than silently dropping them.
+    usage.session_id = parentId;
+    sessions.push(usage);
+    byId.set(parentId, usage);
   }
 
   const total = {
@@ -930,11 +1183,48 @@ export function summariseTokenRange(
   }
 
   outProjects.sort((a, b) => b.totals.total_tokens - a.totals.total_tokens);
-  const daily = [...dailyMap.values()].sort((a, b) =>
-    a.date < b.date ? -1 : a.date > b.date ? 1 : 0,
+  const daily = fillDailyGaps(
+    [...dailyMap.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
   );
 
   return { range, since, totals, projects: outProjects, daily };
+}
+
+/**
+ * Insert zero buckets for days inside the series that recorded no usage.
+ *
+ * Only days that had activity produce a bucket, and the chart lays bars out by
+ * index — so a silent day was not drawn as a gap, it was not drawn at all, and
+ * the axis compressed. On the author's data that turned an Apr 17 → Aug 23 span
+ * (129 days, 21 gaps, the longest 11 days) into 60 evenly-spaced bars that read
+ * as 60 consecutive days. Zero-filling makes the x-axis a real time axis.
+ *
+ * Bounds are the series' own first and last day: leading and trailing silence
+ * is still trimmed, so this never invents range beyond what was recorded.
+ */
+function fillDailyGaps(sorted: TokenDayBucket[]): TokenDayBucket[] {
+  if (sorted.length < 2) return sorted;
+
+  const out: TokenDayBucket[] = [];
+  // Parse as UTC and step in whole days: a local-midnight Date would shift by
+  // an hour across a DST boundary and could repeat or skip a calendar day.
+  const dayMs = 24 * 60 * 60 * 1000;
+  const toKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+
+  for (const bucket of sorted) {
+    const prev = out[out.length - 1];
+    if (prev) {
+      for (
+        let t = Date.parse(`${prev.date}T00:00:00Z`) + dayMs;
+        t < Date.parse(`${bucket.date}T00:00:00Z`);
+        t += dayMs
+      ) {
+        out.push({ ...emptyTotals(), date: toKey(t) });
+      }
+    }
+    out.push(bucket);
+  }
+  return out;
 }
 
 // -- Conversation tail reader -------------------------------------------------

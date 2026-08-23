@@ -31,6 +31,7 @@ import { Logger } from "./log.js";
 import { buildOodaContext } from "./cognitive.js";
 import {
   getProjectTokenUsage,
+  listClaudeProjects,
   summariseTokenRange,
   getConversationPage,
   readTimeline,
@@ -190,7 +191,9 @@ export class RestHandler {
    * Per-file results are incrementally cached in claude-session.ts, so repeat
    * calls only read bytes appended since the previous scan.
    */
-  private async collectActiveProjectUsage(): Promise<ProjectTokenUsage[]> {
+  private async collectActiveProjectUsage(
+    scope: "live" | "all" = "live",
+  ): Promise<ProjectTokenUsage[]> {
     // Keyed by the NORMALISED path so `/a/b` and `/a/b/` collapse; the value
     // keeps the path exactly as configured, because the dashboard round-trips
     // it back to path-addressed routes such as /api/conversation?path=.
@@ -230,6 +233,19 @@ export class RestHandler {
       await addProject(entry.path);
     }
 
+    // `all` adds every project directory on disk. Live sessions are collected
+    // first so a project that has one keeps that path verbatim; the rest are
+    // recovered from each transcript's own `cwd`.
+    //
+    // Without this, a range labelled "all time" covered only projects that
+    // happened to have a running session — stopping one made history vanish
+    // from a total that claims to include everything.
+    if (scope === "all") {
+      for (const project of listClaudeProjects()) {
+        await addProject(project.path);
+      }
+    }
+
     return [...byPath.values()];
   }
 
@@ -262,6 +278,17 @@ export class RestHandler {
     // Separate query string from path: /api/command/name?key=val
     const [pathPart, queryPart] = path.split("?", 2);
     const queryParams = new URLSearchParams(queryPart ?? "");
+
+    /**
+     * `?scope=live|all` for the token routes, falling back to the route's own
+     * default. Anything unrecognised falls back too, matching how `?range=`
+     * treats an unknown value — a typo should not silently change which
+     * projects are counted.
+     */
+    const parseScope = (fallback: "live" | "all"): "live" | "all" => {
+      const raw = (queryParams.get("scope") ?? "").toLowerCase();
+      return raw === "live" || raw === "all" ? raw : fallback;
+    };
 
     // Extract path segments: /api/command/name
     const segments = pathPart.replace(/^\/api\//, "").split("/");
@@ -826,7 +853,10 @@ export class RestHandler {
             }
           }
           try {
-            return { status: 200, data: await this.collectActiveProjectUsage() };
+            // Defaults to running sessions — this endpoint is documented as
+            // "aggregate over all running Claude sessions" and something has
+            // to answer that question. `?scope=all` opts into every project.
+            return { status: 200, data: await this.collectActiveProjectUsage(parseScope("live")) };
           } catch (err) {
             return { status: 500, data: { error: `Failed to compute tokens: ${err}` } };
           }
@@ -842,7 +872,10 @@ export class RestHandler {
             rangeParam === "day" || rangeParam === "week" ? rangeParam : "all";
           try {
             const started = Date.now();
-            const projects = await this.collectActiveProjectUsage();
+            // Defaults to every project on disk: the panel labels its widest
+            // range "all time", and a total that quietly excluded any project
+            // without a running session did not mean that.
+            const projects = await this.collectActiveProjectUsage(parseScope("all"));
             const summary = summariseTokenRange(projects, range);
             return {
               status: 200,

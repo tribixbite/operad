@@ -257,7 +257,32 @@ Returns IPC `config` response — the sanitized (no secrets) parsed config. TBD 
 Range-scoped token summary derived from the Claude Code JSONL transcripts.
 Backs the dashboard's Tokens panel.
 
-Query: `?range=all|week|day` (default `all`; anything else falls back to `all`).
+Query:
+- `?range=all|week|day` — default `all`; anything else falls back to `all`.
+- `?scope=all|live` — which projects to include. Default `all`: **every**
+  project directory under `~/.claude/projects`, whether or not it has a running
+  session. `live` restricts it to projects with a non-stopped session, which is
+  what this endpoint used to do unconditionally — a range labelled "all time"
+  that dropped a project the moment its session stopped did not mean that. An
+  unrecognised value falls back to the default.
+
+Each project's real path is recovered from the `cwd` its transcripts record.
+`manglePath` is lossy (`git/a-b` and `git/a/b` mangle identically), so a
+directory whose path cannot be recovered is skipped rather than guessed at.
+
+`sessions` includes the turns of any **subagents** a session dispatched, folded
+into that session's row: subagent transcripts live under
+`<session-id>/subagents/**` (workflow runs nest another level, under
+`subagents/workflows/wf_<id>/`), are billed separately, and appear in no parent
+transcript. A subagent gets its own row only when its parent transcript is gone,
+so its tokens are still counted.
+
+`daily` is **zero-filled** across the covered span — every calendar day between
+the first and last day that recorded usage is present, with silent days
+reporting zeros. Only days with activity used to produce a bucket, which made
+the dashboard's chart compress its gaps and read as N consecutive days. Leading
+and trailing silence is still trimmed, so the series never extends beyond what
+was recorded.
 
 Response (`TokenRangeSummary`):
 
@@ -317,6 +342,10 @@ inflated the totals. `name` is therefore the directory's own name; `path` is
 unique across the array, which is what `/api/token-usage` and the dashboard's
 keyed lists rely on. `GET /api/tokens/:name` is an explicit lookup and still
 reports the session name it was asked about.
+
+Query: `?scope=all|live` — as on `/api/token-usage`, but defaulting to `live`,
+since this endpoint is defined as the aggregate over running sessions. Subagent
+turns are included either way.
 
 #### `GET /api/costs`
 Aggregate costs (legacy compatibility endpoint, now token-centric).

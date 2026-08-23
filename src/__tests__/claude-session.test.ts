@@ -880,7 +880,40 @@ describe("summariseTokenRange", () => {
     const s = summariseTokenRange(projects, "all", NOW);
     expect(s.totals.total_tokens).toBe(562);
     expect(s.since).toBeNull();
-    expect(s.daily.length).toBe(4);
+    // 2024-01-01 through 2024-03-10 inclusive: 4 days with usage, the rest
+    // zero-filled so the series is a real time axis (see below).
+    expect(s.daily.length).toBe(70);
+    expect(s.daily.filter((d) => d.total_tokens > 0)).toHaveLength(4);
+  });
+
+  test("silent days inside the series are zero-filled, edges are not padded", () => {
+    const s = summariseTokenRange(projects, "all", NOW);
+
+    // Bounds are the series' own first and last day — no invented range.
+    expect(s.daily[0].date).toBe("2024-01-01");
+    expect(s.daily[s.daily.length - 1].date).toBe("2024-03-10");
+
+    // Consecutive, one calendar day apart, with no repeats.
+    const dates = s.daily.map((d) => d.date);
+    expect(new Set(dates).size).toBe(dates.length);
+    for (let i = 1; i < dates.length; i++) {
+      const gapDays =
+        (Date.parse(`${dates[i]}T00:00:00Z`) - Date.parse(`${dates[i - 1]}T00:00:00Z`))
+        / 86_400_000;
+      expect(gapDays).toBe(1);
+    }
+
+    // Filling adds days, never tokens.
+    expect(s.daily.reduce((n, d) => n + d.total_tokens, 0)).toBe(s.totals.total_tokens);
+    const filled = s.daily.find((d) => d.date === "2024-01-02")!;
+    expect(filled.total_tokens).toBe(0);
+    expect(filled.turns).toBe(0);
+    expect(filled.cost_usd).toBe(0);
+  });
+
+  test("a single-day range is left alone", () => {
+    const s = summariseTokenRange(projects, "day", NOW);
+    expect(s.daily).toHaveLength(1);
   });
 
   test("projects contributing nothing to the range are dropped", () => {

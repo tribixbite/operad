@@ -81,7 +81,11 @@
   function barGeom(idx: number) {
     const usableW = VIEW_W - PAD_LEFT - PAD_RIGHT;
     const slotW = usableW / days.length;
-    const barW = Math.min(Math.max(slotW * BAR_RATIO, 2), MAX_BAR_W);
+    // The 2px floor keeps a bar visible on a normal-length range, but it must
+    // never exceed the slot: the series is zero-filled now, so an all-time
+    // view can run to hundreds of days, and a floor wider than the slot makes
+    // neighbouring bars overlap and smear into a solid block.
+    const barW = Math.min(Math.max(slotW * BAR_RATIO, Math.min(slotW, 2)), MAX_BAR_W);
     const x = PAD_LEFT + slotW * idx + (slotW - barW) / 2;
     const usableH = CHART_H - PAD_TOP - PAD_BOTTOM;
 

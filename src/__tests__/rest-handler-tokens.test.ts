@@ -142,8 +142,10 @@ describe("GET /api/token-usage", () => {
     expect(s.projects).toHaveLength(1);
     expect(s.projects[0].name).toBe("alpha");
     expect(s.projects[0].sessions).toHaveLength(2);
-    // Three distinct days produced usage.
-    expect(s.daily).toHaveLength(3);
+    // Three distinct days produced usage; the 40-day span between the oldest
+    // and today is zero-filled so the chart's x-axis is a real time axis.
+    expect(s.daily.filter((d) => d.total_tokens > 0)).toHaveLength(3);
+    expect(s.daily).toHaveLength(41);
     // Daily series is ascending and reconciles with the headline total.
     const dates = s.daily.map((d) => d.date);
     expect([...dates].sort()).toEqual(dates);
@@ -158,7 +160,10 @@ describe("GET /api/token-usage", () => {
     expect(s.totals.total_tokens).toBe(1230);
     expect(s.totals.turns).toBe(2);
     expect(s.since).toBe(dayKey(6));
-    expect(s.daily.map((d) => d.date)).toEqual([dayKey(3), dayKey(0)]);
+    // The two silent days between them are filled in, not skipped.
+    expect(s.daily.map((d) => d.date)).toEqual([dayKey(3), dayKey(2), dayKey(1), dayKey(0)]);
+    expect(s.daily.filter((d) => d.total_tokens > 0).map((d) => d.date))
+      .toEqual([dayKey(3), dayKey(0)]);
     // The session that contributed nothing in range is dropped entirely.
     expect(s.projects[0].sessions.map((x) => x.session_id)).toEqual(["sess-one"]);
   });
@@ -289,6 +294,172 @@ describe("projects are collapsed by path, not listed per session", () => {
     expect(new Set(paths).size).toBe(paths.length);
     const ids = s.projects.flatMap((p) => p.sessions.map((x) => x.session_id));
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  /**
+   * A session that dispatches subagents gets a `<session-id>/subagents/`
+   * directory beside its own transcript. Those turns are billed separately and
+   * appear in no parent transcript, but the scan only ever read the project
+   * directory's top level — 460 files and 2.93B tokens uncounted on the
+   * author's machine, ~30% on top of the reported total.
+   */
+  describe("subagent transcripts", () => {
+    /**
+     * Write a subagent transcript under `parent`'s session directory.
+     *
+     * `nested` places it under `subagents/workflows/wf_x/` instead of directly
+     * in `subagents/` — the layout a workflow run produces, and 143 of the
+     * author's 460 subagent files.
+     */
+    function writeSubagent(parent: string, name: string, lines: string[], nested = false): void {
+      const base = join(fc.dir, ".claude", "projects", manglePath(PROJECT_PATH), parent, "subagents");
+      const dir = nested ? join(base, "workflows", "wf_test") : base;
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${name}.jsonl`), lines.join("\n") + "\n", "utf-8");
+    }
+
+    test("subagent tokens are counted, folded into the dispatching session", async () => {
+      const before = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+      const baseline = before[0].sessions.find((s) => s.session_id === "sess-one")!;
+
+      writeSubagent("sess-one", "agent-abc", [
+        assistantLine({ uuid: "s1", date: dayKey(0), hour: 10, input: 7, output: 3 }),
+      ]);
+      resetTokenCache();
+
+      const after = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+      // No new row — a subagent is part of its parent's work, not a session.
+      expect(after[0].sessions).toHaveLength(before[0].sessions.length);
+      const merged = after[0].sessions.find((s) => s.session_id === "sess-one")!;
+      expect(merged.input_tokens).toBe(baseline.input_tokens + 7);
+      expect(merged.output_tokens).toBe(baseline.output_tokens + 3);
+      expect(merged.turns).toBe(baseline.turns + 1);
+      expect(after[0].total.input_tokens).toBe(before[0].total.input_tokens + 7);
+    });
+
+    test("workflow subagents nested under subagents/ are counted too", async () => {
+      writeSubagent("sess-one", "agent-wf", [
+        assistantLine({ uuid: "w1", date: dayKey(0), hour: 13, input: 21, output: 5 }),
+      ], true);
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all", "")).data as TokenRangeSummary;
+      expect(s.totals.total_tokens).toBe(6730 + 26);
+    });
+
+    test("a subagent's day buckets merge into the parent's series", async () => {
+      // A day the parent itself never used, so the bucket can only come from
+      // the subagent.
+      writeSubagent("sess-one", "agent-newday", [
+        assistantLine({ uuid: "s2", date: dayKey(1), hour: 8, input: 11, output: 4 }),
+      ]);
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=week", "")).data as TokenRangeSummary;
+      const bucket = s.daily.find((d) => d.date === dayKey(1))!;
+      expect(bucket.total_tokens).toBe(15);
+      expect(s.daily.reduce((n, d) => n + d.total_tokens, 0)).toBe(s.totals.total_tokens);
+    });
+
+    test("an orphaned subagent is surfaced rather than dropped", async () => {
+      // No `sess-gone.jsonl` at the top level — the parent transcript was
+      // deleted. Its tokens must still be counted.
+      writeSubagent("sess-gone", "agent-orphan", [
+        assistantLine({ uuid: "s3", date: dayKey(0), hour: 12, input: 40, output: 2 }),
+      ]);
+      resetTokenCache();
+
+      const projects = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+      const row = projects[0].sessions.find((s) => s.session_id === "sess-gone");
+      expect(row).toBeDefined();
+      expect(row!.input_tokens).toBe(40);
+    });
+
+    test("tool-results directories are not counted as usage", async () => {
+      // Sibling of `subagents/`; holds tool payloads, not model turns. Counting
+      // it would double-bill content already in the parent's context.
+      const dir = join(fc.dir, ".claude", "projects", manglePath(PROJECT_PATH), "sess-one", "tool-results");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "result.jsonl"),
+        assistantLine({ uuid: "t1", date: dayKey(0), hour: 11, input: 999, output: 999 }) + "\n",
+        "utf-8",
+      );
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all", "")).data as TokenRangeSummary;
+      expect(s.totals.total_tokens).toBe(6730);
+    });
+  });
+
+  /**
+   * "All time" used to mean "all time, for projects that happen to have a
+   * running session" — stopping a session made its whole history vanish from a
+   * total that claims to cover everything.
+   */
+  describe("scope", () => {
+    /** A project directory with no operad session pointing at it. */
+    function writeUnmanagedProject(realPath: string, tokens: number): void {
+      const dir = join(fc.dir, ".claude", "projects", manglePath(realPath));
+      mkdirSync(dir, { recursive: true });
+      const line = JSON.parse(
+        assistantLine({ uuid: "u1", date: dayKey(0), hour: 7, input: tokens, output: 0 }),
+      ) as Record<string, unknown>;
+      // Claude Code records the working directory on every entry; it is the
+      // only lossless way back from a mangled directory name to a real path.
+      line.cwd = realPath;
+      writeFileSync(join(dir, "sess-unmanaged.jsonl"), JSON.stringify(line) + "\n", "utf-8");
+    }
+
+    test("token-usage counts projects with no live session", async () => {
+      writeUnmanagedProject("/work/archived", 4242);
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all", "")).data as TokenRangeSummary;
+      expect(s.projects.map((p) => p.path).sort()).toEqual(["/work/alpha", "/work/archived"]);
+      expect(s.totals.total_tokens).toBe(6730 + 4242);
+    });
+
+    test("scope=live restricts it to running sessions", async () => {
+      writeUnmanagedProject("/work/archived", 4242);
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all&scope=live", "")).data as TokenRangeSummary;
+      expect(s.projects.map((p) => p.path)).toEqual(["/work/alpha"]);
+      expect(s.totals.total_tokens).toBe(6730);
+    });
+
+    test("/api/tokens stays live-only unless asked, and honours scope=all", async () => {
+      writeUnmanagedProject("/work/archived", 4242);
+      resetTokenCache();
+
+      const live = (await h.handleDashboardApi("GET", "/api/tokens", "")).data as ProjectTokenUsage[];
+      expect(live.map((p) => p.path)).toEqual(["/work/alpha"]);
+
+      const all = (await h.handleDashboardApi("GET", "/api/tokens?scope=all", "")).data as ProjectTokenUsage[];
+      expect(all.map((p) => p.path).sort()).toEqual(["/work/alpha", "/work/archived"]);
+    });
+
+    test("an unrecognised scope falls back to the route's default", async () => {
+      writeUnmanagedProject("/work/archived", 4242);
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all&scope=bogus", "")).data as TokenRangeSummary;
+      expect(s.projects).toHaveLength(2);
+    });
+
+    test("a path containing a literal hyphen is recovered exactly", async () => {
+      // `manglePath` maps both `/work/a-b` and `/work/a/b` to `-work-a-b`, so
+      // un-mangling cannot tell them apart — the path has to come from the
+      // transcript's own `cwd`.
+      writeUnmanagedProject("/work/Unexpected-Keyboard", 11);
+      resetTokenCache();
+
+      const s = (await h.handleDashboardApi("GET", "/api/token-usage?range=all", "")).data as TokenRangeSummary;
+      const row = s.projects.find((p) => p.totals.total_tokens === 11)!;
+      expect(row.path).toBe("/work/Unexpected-Keyboard");
+      expect(row.name).toBe("Unexpected-Keyboard");
+    });
   });
 
   test("a project row is labelled with its directory, not an arbitrary session", async () => {
