@@ -559,7 +559,27 @@ export class Daemon {
   }
 
   /** Full boot sequence: ADB fix → dependency-ordered start → cron */
+  private bootInProgress = false;
   async boot(): Promise<void> {
+    // Re-entrancy guard. A slow boot (this one takes up to boot_timeout_s)
+    // overlapping with another `stream` command ran two boot sequences
+    // concurrently — each resolving and starting sessions against shared
+    // state. Under memory pressure the watchdog retries `operad stream`
+    // every few minutes, so overlapping boots were the norm, not the edge
+    // case, and each one started more duplicate sessions.
+    if (this.bootInProgress) {
+      this.log.warn("Boot already in progress — ignoring duplicate stream/boot request");
+      return;
+    }
+    this.bootInProgress = true;
+    try {
+      await this.bootOnce();
+    } finally {
+      this.bootInProgress = false;
+    }
+  }
+
+  private async bootOnce(): Promise<void> {
     trace("boot:start");
     this.log.info("Boot sequence starting");
     this.wake.evaluate("boot_start");

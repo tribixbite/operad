@@ -407,10 +407,16 @@ fi
 # coreutils is installed, and a missing command exits 127 — which daemon_alive
 # would read as "daemon is dead" on every single poll and keep restarting a
 # daemon that was never down.
+# 30s, not 5: `tmx status` pays bun's startup cost before it ever touches the
+# socket, and under memory pressure that alone can exceed 5s. A too-tight
+# timeout reported a perfectly alive daemon as dead, so this loop ran
+# `operad stream` — and a full boot sequence — over and over on a device that
+# was already struggling. Wrongly deciding "alive" costs one delayed restart;
+# wrongly deciding "dead" costs a boot storm.
 if command -v timeout > /dev/null 2>&1; then
-  TIMEOUT_CMD="timeout 5"
+  TIMEOUT_CMD="timeout 30"
 elif command -v gtimeout > /dev/null 2>&1; then
-  TIMEOUT_CMD="gtimeout 5"
+  TIMEOUT_CMD="gtimeout 30"
 else
   TIMEOUT_CMD=""
   log "No timeout(1) available — status checks will run unbounded"

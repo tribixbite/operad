@@ -122,10 +122,20 @@ export function resolveBootSessions(
   const namedSessions = findNamedSessions(historyPath, 7);
   const { auto_start, visible } = config.boot;
 
-  // Build path→config lookup (one entry per path for primary matching)
+  // Build path→config lookup (one entry per path for primary matching).
+  //
+  // Named instances (session_id set) are excluded: they are Phase 2's
+  // domain, and repurposing one as the primary meant clearing its
+  // session_id below — which destroyed the very marker Phase 2's dedup
+  // relies on. After each boot the last config entry for a path was the
+  // named session the previous boot had just registered, so every boot
+  // wiped it and re-registered the "missing" named session under a fresh
+  // -N suffix. On one device that minted 51 duplicates of one session,
+  // each boot starting another `claude --resume` of the same conversation
+  // until memory ran out.
   const configByPath = new Map<string, SessionConfig>();
   for (const s of config.sessions) {
-    if (s.path) configByPath.set(resolve(s.path), s);
+    if (s.path && !s.session_id) configByPath.set(resolve(s.path), s);
   }
 
   // Track ranked claude sessions for partitioning
@@ -141,8 +151,9 @@ export function resolveBootSessions(
 
     if (existing) {
       if (existing.type === "claude" && existing.enabled) {
-        // Primary instance uses cc (--continue), no session_id
-        existing.session_id = undefined;
+        // Primary instance uses cc (--continue). configByPath only holds
+        // entries without a session_id, so nothing needs clearing here —
+        // and named instances are never hijacked into primaries.
         recentClaude.push({ config: existing, rank: rank++ });
       }
     } else {
@@ -173,6 +184,11 @@ export function resolveBootSessions(
   for (const named of namedSessions) {
     if (rank >= visible) break;
     if (registeredIds.has(named.session_id)) continue;
+    // Registry backstop: config.sessions can lose a merged entry (name
+    // conflict with the TOML, in-memory mutation), but registry.json
+    // persists across boots. Never mint a second name for a session_id
+    // the registry already tracks.
+    if (registry.findBySessionId(named.session_id)) continue;
 
     const resolvedPath = resolve(named.path);
     // Sanitize title to valid session name

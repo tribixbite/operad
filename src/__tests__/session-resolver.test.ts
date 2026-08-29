@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { rmSync, mkdtempSync, mkdirSync } from "node:fs";
+import { rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import {
   resolveSessionName,
   resolveSessionPath,
@@ -431,6 +431,58 @@ describe("resolveBootSessions — auto_start/visible partition", () => {
     // session_id is either cleared (path in history) or unchanged (path not in history)
     // Either way it should NOT be set to a NEW value — only cleared or left.
     expect(updated?.session_id === undefined || updated?.session_id === "stale-id").toBe(true);
+  });
+});
+
+describe("resolveBootSessions — named-session dedup across repeated boots", () => {
+  // Regression test for the duplicate-session runaway observed on-device:
+  // every boot re-registered the same renamed Claude session under a fresh
+  // -N suffix (binary-patch-http-3 … -53), each resuming the same session_id,
+  // until dozens of live instances exhausted memory.
+  //
+  // Mechanism: Phase 1 picked the LAST config entry per path as the primary
+  // and cleared its session_id — but after a boot, the last entry for the
+  // path is the named session the previous boot just registered. The wipe
+  // destroyed the marker Phase 2's dedup relies on, so the named session
+  // looked unregistered every single boot.
+  test("repeated boots do not mint new suffixed sessions for the same session_id", () => {
+    const projPath = join(tmpDir, "binary-patch-http");
+    mkdirSync(projPath, { recursive: true });
+    const uuid = "6a3bcf47-240f-4f35-8f44-68dabb55ef7d";
+
+    // Fixture history.jsonl: the project is recent, with one active session.
+    const historyPath = join(tmpDir, "history.jsonl");
+    const now = Date.now();
+    writeFileSync(
+      historyPath,
+      JSON.stringify({ display: "fix the patcher", timestamp: now, project: projPath, sessionId: uuid }) + "\n",
+    );
+
+    // Fixture session JSONL with a custom-title entry (user ran /rename),
+    // in the projects dir layout findNamedSessions expects.
+    const projectDirName = projPath.replace(/[^a-zA-Z0-9]/g, "-");
+    const sessDir = join(tmpDir, "projects", projectDirName);
+    mkdirSync(sessDir, { recursive: true });
+    writeFileSync(
+      join(sessDir, `${uuid}.jsonl`),
+      JSON.stringify({ type: "custom-title", customTitle: "binary patch http" }) + "\n",
+    );
+
+    const cfg = makeConfig([], { auto_start: 6, visible: 10 });
+    const reg = new Registry(join(tmpDir, "boot-reg-mint.json"));
+    const state = new StateManager(join(tmpDir, "boot-state-mint.json"), silentLog());
+
+    // Three boot cycles — as happens when the watchdog retries `operad stream`.
+    for (let i = 0; i < 3; i++) {
+      resolveBootSessions(cfg, reg, state, silentLog(), historyPath);
+    }
+
+    // Exactly ONE registry entry and ONE config session may hold this
+    // session_id, no matter how many times boot resolution runs.
+    const regHolders = reg.entries().filter((e) => e.session_id === uuid);
+    expect(regHolders.length).toBe(1);
+    const cfgHolders = cfg.sessions.filter((s) => s.session_id === uuid);
+    expect(cfgHolders.length).toBe(1);
   });
 });
 

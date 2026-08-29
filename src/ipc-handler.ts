@@ -51,8 +51,15 @@ export class IpcHandler {
 
       case "stream":
       case "boot": // backwards compat alias
-        // Run boot async and respond immediately
-        this.ctx.boot().catch((err) => this.ctx.log.error(`Boot failed: ${err}`));
+        // Run boot async and respond immediately. Deferred a tick: boot()'s
+        // preamble runs synchronously until its first await and includes
+        // spawnSync work (wake lock, ADB fix — up to 50s), so calling it
+        // inline blocked the event loop before this response was written.
+        // Under load the CLI's wait expired, `operad stream` exited 1, and
+        // the watchdog retried the whole boot in a loop.
+        setImmediate(() => {
+          this.ctx.boot().catch((err) => this.ctx.log.error(`Boot failed: ${err}`));
+        });
         return { ok: true, data: "Stream sequence started" };
 
       case "shutdown":

@@ -5,7 +5,6 @@
     "": {
       "name": "operadic",
       "dependencies": {
-        "@anthropic-ai/claude-agent-sdk": "0.2.104",
         "ws": "^8.18.0",
       },
       "devDependencies": {
@@ -16,8 +15,15 @@
         "typescript": "^5.7.0",
       },
       "optionalDependencies": {
+        "@anthropic-ai/claude-agent-sdk": "0.2.104",
         "@esbuild/android-arm64": "^0.24.0",
       },
+      "peerDependencies": {
+        "claude-chrome-android": "*",
+      },
+      "optionalPeers": [
+        "claude-chrome-android",
+      ],
     },
   },
   "packages": {
