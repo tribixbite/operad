@@ -140,7 +140,7 @@ does nothing about lmkd killing the daemon directly under memory pressure,
 which on Android is the *normal* way it dies. That is `watchdog.sh`'s job.
 
 ```
-watchdog.sh  ── every 60 s ──▶  operad status
+watchdog.sh  ── every 60 s, or at once on SIGWINCH ──▶  operad status
                                      │
                         ┌────────────┴────────────┐
                     responds                  no response
@@ -170,7 +170,47 @@ an instance started before the guard existed is invisible to a pidfile — which
 is exactly how two ended up running here for weeks, both polling and both
 restarting the daemon.
 
-### Three ways the watchdog silently stops working
+Both the shell guard and the TypeScript side match an argv **element** whose
+basename is `watchdog.sh` or `startup.sh`, never the pattern anywhere in the
+command line. A plain `pgrep -f watchdog.sh` also matches the shell running
+that very pgrep, an editor with the file open, or a tool wrapper that mentions
+the path — all of which would be reported as a live watchdog.
+
+### Waking it early
+
+A 60-second poll is fine for noticing a death nobody asked for. It is the wrong
+latency for a restart someone is waiting on — `operad upgrade` shuts the daemon
+down deliberately and then waits for the watchdog to bring it back.
+
+`watchdog.sh` therefore traps **SIGWINCH** and ends its current sleep, so the
+next `operad status` check runs immediately. Measured on this device: the poll
+drops from 60 s to ~1 s.
+
+SIGWINCH specifically, because its default action is **ignore**. The sender
+cannot know whether the watchdog it found predates the handler — a long-lived
+boot watchdog keeps executing the script bash parsed at launch, so an updated
+`watchdog.sh` on disk proves nothing about the running process — and any signal
+that defaults to *terminate* would kill the one process able to restart the
+daemon. Verified both ways: an old-style script survives SIGWINCH and dies on
+SIGUSR1. A genuine terminal resize also raises it, which at worst costs one
+extra status check.
+
+The nudge is best-effort. `operad upgrade` sends it and then waits up to 90 s —
+one full poll interval plus daemon startup — so a watchdog that ignored it
+still succeeds, just slower. It previously waited 20 s, which is shorter than
+the poll, and so reported *"Watchdog didn't restart daemon within 20s"* for
+restarts that had not been attempted yet and landed unattended moments later.
+
+> A signal only helps if the target can receive it. A watchdog spawned from a
+> process with a blocked signal mask inherits that mask and will not see
+> SIGWINCH. Check with `rg -i SigBlk /proc/<pid>/status`: a healthy one here
+> reads `0000000080010000`. Every process spawned by Claude Code's Bash tool
+> carries `fffffe00dffbfeff` (nearly everything blocked), and a tmux **server**
+> started from such a session passes that mask to everything it forks — so a
+> watchdog started via `tmux new-session` on this box is deaf to the nudge and
+> falls back to its poll.
+
+### Four ways the watchdog silently stops working
 
 Each of these has happened on real hardware. The common shape: **the watchdog
 process is still alive, so everything looks fine, but it is not supervising.**
@@ -236,6 +276,25 @@ Now:
 
 Acquire-only, always: `termux-wake-unlock` gets processes killed.
 
+**4. It cannot be signalled, including to shut down.** bash defers a trapped
+signal until the current **foreground** command finishes. The poll was a plain
+`sleep 60`, so for up to a minute the process ignored every signal sent to it —
+`trap ... WINCH` never fired, and neither did the `TERM` handler. Measured here:
+`kill <watchdog>` returned 0 and the process kept running for **19 seconds**
+before dying, which reads as a wedged supervisor.
+
+The fix is to background the sleep and wait on it — the `wait` builtin *is*
+interruptible, returning 128+n and then running the trap:
+
+```sh
+sleep "$want" &
+SLEEP_PID=$!
+wait "$SLEEP_PID" 2> /dev/null
+```
+
+This is what makes both the SIGWINCH wake and prompt shutdown work; before it,
+the wake signal would have been correct in principle and inert in practice.
+
 ## Recovery primitives
 
 - **Watchdog respawn.** `watchdog.sh` polls `operad status` every 60 s and runs
@@ -243,9 +302,16 @@ Acquire-only, always: `termux-wake-unlock` gets processes killed.
   (5 s → 5 min) so a failure retrying cannot fix costs one line every five
   minutes rather than every five seconds, and the log rotates at 5 MB.
 
-  This is **not** unconditionally functional — see the three failure modes
-  above. It requires an invokable binary and an awake CPU. An earlier version
-  of this page listed it as "always functional", which was wrong.
+  This is **not** unconditionally functional — see the four failure modes
+  above. It requires an invokable binary, an awake CPU, and a poll that can be
+  interrupted. An earlier version of this page listed it as "always
+  functional", which was wrong.
+- **Deliberate restart.** `operad upgrade` rebuilds, stops the daemon, and lets
+  the watchdog restart it on the new bundle — running tmux sessions stay up
+  throughout, because the tmux server is not what restarted. It signals the
+  watchdog to re-check immediately rather than waiting out the poll
+  ([Waking it early](#waking-it-early)). With no watchdog running it restarts
+  the daemon directly instead.
 - **Suspend self-reporting.** The watchdog measures wall-clock across each poll
   and logs the overshoot, which is exactly the interval in which a dead daemon
   would have gone unnoticed. It also logs state changes plus a half-hourly
@@ -275,8 +341,17 @@ cat /proc/$(pidof -s com.termux)/cgroup | rg apps
 cat /proc/$(pgrep -f 'tmx.js daemon')/cgroup | rg apps   # must NOT match above
 
 # 4. Exactly one watchdog, and can it invoke the binary?
-pgrep -af 'watchdog.sh'
+#    Confirm each candidate by its argv, not by the -f pattern: `pgrep -f
+#    watchdog.sh` also matches the shell running that pgrep.
+for p in $(pgrep -f 'watchdog\.sh|startup\.sh'); do
+  tr '\0' '\n' < /proc/$p/cmdline | awk -v p=$p '{n=$0; sub(/.*\//,"",n)}
+    n=="watchdog.sh" || n=="startup.sh" {print p; exit}'
+done
 rg "Supervising via|code=12[67]" "$WDLOG" | tail -3
+
+# 5. Can it receive the wake signal? (blocked-mask watchdogs fall back to
+#    the 60s poll — see "Waking it early")
+rg -i SigBlk /proc/$(cat "${TMPDIR:-$PREFIX/tmp}/operad-watchdog.pid")/status
 ```
 
 Two Termux notes on the above: `dumpsys` needs its absolute path, because
