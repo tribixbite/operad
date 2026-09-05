@@ -151,6 +151,8 @@ tmx boot
 - **Symlink resolution**: Use `realpathSync(__filename)` to resolve repo root from symlinked `~/.local/bin/tmx`.
 - **Nested CC detection**: Daemon strips `CLAUDECODE`, `CLAUDE_CODE_*`, `ENABLE_CLAUDE_CODE_*`, `CLAUDE_TMPDIR` from env.
 - **SSE connection limit**: Close EventSource on `beforeunload`/`pagehide` to avoid exhausting 6-per-origin limit.
+- **Subagent transcripts are opt-in**: `resolveJsonlFiles(path, { includeSubagents })` — only `getProjectTokenUsage` passes it. Session identity, conversation listing and `resolveActiveJsonl` must stay top-level-only, or a subagent file wins "most recently modified". Don't make the walk unconditional.
+- **Token totals come from `daily` buckets**, not session scalars: `summariseTokenRange` folds `session.daily` only, so anything without a usable timestamp is invisible to `/api/token-usage` while still counting in `/api/tokens`.
 
 ## Commit Style
 
