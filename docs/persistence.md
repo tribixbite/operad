@@ -14,7 +14,9 @@ about surviving the other:
 The first is structural: get it right once at install time and it holds. The
 second is a live control loop, and a control loop can fail *silently* — which
 is the harder problem, and the one most of the second half of this page is
-about.
+about. It can also be killed outright by the same pressure that killed what it
+was watching, in which case nothing is left running to notice
+([When the watchdog goes too](#when-the-watchdog-goes-too)).
 
 > **Each section states what has actually been observed on real hardware.**
 > Every "this happened" here is measured, not hypothesised; the numbers come
@@ -41,6 +43,15 @@ Two facts about this:
 2. **When `ActivityManager` reaps an app**, it iterates that app's
    `cgroup.procs` file and `kill -9`s every PID listed. Reparenting to init
    (PPid=1) does not move a process out of the cgroup.
+3. **But the cgroup outlives the app process that created it.** That sweep is
+   what an app *kill command* does — a force-stop, a package kill — not what a
+   routine cached-process or lmkd kill does. `com.termux.boot` exists only to
+   run its `BootReceiver` and goes empty immediately afterwards: measured here,
+   it exec'd the watchdog at 19:50:58 and was itself killed six seconds later
+   (`reason=13 (OTHER KILLS BY SYSTEM) subreason=3 (TOO MANY EMPTY PROCS)`).
+   The daemon it had started ran for another **7 d 17 h**. So the spawn-root
+   APK does not need to stay alive — which is the only reason booting from a
+   receiver works at all.
 
 Detached children with PPid=1 still appear in the launch cgroup of the app
 that spawned them. So if `com.termux` spawns the daemon, the daemon dies with
@@ -97,6 +108,13 @@ a Termux terminal tab does an `attach` to the existing tmux server.
   After that point only the next BOOT_COMPLETED broadcast can re-create the
   process tree in the right cgroup; `operad stream` from a terminal cannot.
 
+  And that broadcast cannot be faked without root — it is a protected
+  broadcast, so `am broadcast -a android.intent.action.BOOT_COMPLETED` fails
+  with `SecurityException: Permission Denial … uid=2000`. A tree rebuilt from a
+  terminal therefore runs in `com.termux`'s cgroup, exposed to **both** failure
+  domains, until the next reboot. Worth knowing before deciding whether a
+  restart is "fixed".
+
 If you find sessions are no longer surviving Termux crashes, check:
 
 ```sh
@@ -126,12 +144,28 @@ boot, via `fixAdb`:
 5. **OOM score adjustment** writing `-200` to `/proc/<termux_pid>/oom_score_adj`.
    On Android 14+ the adb shell uid no longer has permission to write another
    app's `oom_score_adj`; this command silently fails on those builds. Use
-   `operad doctor` to verify whether the value actually took.
+   `operad doctor` to verify whether the value actually took. Measured on
+   Android 17 / One UI 9 (SDK 37, `S938U1UEUCDZIF`): still rejected — the value
+   reads back as `200`, so **this layer is inert on current builds**.
 6. **Set-inactive false** via `cmd activity set-inactive <pkg> false`.
+
+`operad doctor` reads all six back from the device. It resolves an ADB serial
+and passes `-s` explicitly: a bare `adb shell` fails with "more than one
+device/emulator" as soon as a second target is attached, and the gate in front
+of these checks used to fail the same way and report *"ADB not connected"* —
+skipping every one of them while eight devices were connected and the local one
+was reachable over loopback. It also confirms the target is *this* device by
+comparing `/proc/sys/kernel/random/boot_id`, and skips rather than report
+another handset's protection state as ours.
 
 These reduce the *probability* of `com.termux` being killed under memory
 pressure. They do not prevent it. When the app does eventually die, the
 spawn-root cgroup is what determines whether the daemon goes with it.
+
+All six target `com.termux` itself. Nothing applies them to the daemon, the
+watchdog or the tmux server: those are not app processes, so
+`ActivityManager` does not manage their `oom_score_adj` at all — each inherits
+one at fork and keeps it for life.
 
 ## The supervision loop
 
@@ -295,6 +329,69 @@ wait "$SLEEP_PID" 2> /dev/null
 This is what makes both the SIGWINCH wake and prompt shutdown work; before it,
 the wake signal would have been correct in principle and inert in practice.
 
+### When the watchdog goes too
+
+The four modes above share a shape: the watchdog is alive and not supervising.
+The fifth is the opposite, and the supervision loop has no answer to it — the
+watchdog is **killed by the same memory pressure that killed the daemon**.
+
+Measured here on 2026-11-03:
+
+```
+dumpsys activity exit-info com.termux
+  timestamp=2026-11-03 12:35:56.943 pid=23832 process=com.termux
+  reason=3 (LOW_MEMORY) subreason=0 (UNKNOWN) state=empty rss=32MB
+```
+
+lmkd killed 13 app processes in that one second and 33 within 20 s;
+`com.termux.api` went 391 ms before `com.termux`. The daemon, the watchdog and
+the **tmux server** all stopped in the same window: the watchdog's last
+half-hourly heartbeat was 12:12:19, the one due around 12:42 never arrived, and
+the next line in the log is a fresh startup at 14:00:39. That is **85 minutes
+unsupervised** — and because the tmux server died too, the restart recreated
+every session instead of re-adopting it, which is the one cost the design
+exists to avoid.
+
+Three things about it are worth keeping:
+
+- **Correct cgroup placement did not help.** `com.termux.boot` has no exit
+  record for that day, so the spawn-root cgroup was intact. The tree was in it
+  — started by Termux:Boot a week earlier, log line *"direct exec unavailable
+  — no exec shim in this process"* — and died anyway. Domain 1's defence is
+  not a defence against domain 2.
+- **A low `oom_score_adj` was not protection either.** The daemon, watchdog and
+  tmux server all read `0`, the *least* killable tier, inherited at fork and
+  never updated, while `com.termux` itself read `200`. Under a critical sweep
+  that margin ran out.
+- **Nothing attests which killer it was.** `exit-info` records app processes
+  only, so a dead daemon leaves no entry; the candidates are lmkd's last-resort
+  tier and the kernel OOM killer. The operational conclusion is the same
+  either way: the supervisor is exactly as killable as the thing it supervises,
+  and the only things that can replace a dead watchdog are the next
+  BOOT_COMPLETED and the next `operad stream` — which in this scenario means a
+  human, because the daemon that would otherwise spawn one is dead as well.
+
+The usable signal is the **rate**, not the event. `dumpsys activity exit-info`
+persists across reboots — back to February 2025 on this device — so the trend
+is readable at any time. (It is a bounded ring *per package*, so counts for
+older days drift downward as new deaths evict them. Read it for shape, not for
+exact history.)
+
+```sh
+/system/bin/dumpsys activity exit-info > "${TMPDIR:-$PREFIX/tmp}/exit.txt"
+awk '/timestamp=/{d=substr($0,index($0,"timestamp=")+10,10)}
+     /reason=3 \(LOW_MEMORY\)/{c[d]++} END{for(k in c) print k,c[k]}' \
+  "${TMPDIR:-$PREFIX/tmp}/exit.txt" | sort | tail -14
+```
+
+Daily LOW_MEMORY kills on this device: **1–30** throughout 2025, ~25/day in
+early October 2026, ~140/day by the end of that month, then 207 → 291 →
+**1263** on the day the daemon died. It survived a week of *bad* days and died
+on the one that was 9× worse. No change inside operad moves that number; the
+lever is how many heavyweights run at once — here two Gradle daemons at 1.5 GB
+combined plus seven Claude sessions at ~370 MB each, against 11.4 GB of usable
+RAM and a device whose swap was already 4 GB deep.
+
 ## Recovery primitives
 
 - **Watchdog respawn.** `watchdog.sh` polls `operad status` every 60 s and runs
@@ -305,7 +402,9 @@ the wake signal would have been correct in principle and inert in practice.
   This is **not** unconditionally functional — see the four failure modes
   above. It requires an invokable binary, an awake CPU, and a poll that can be
   interrupted. An earlier version of this page listed it as "always
-  functional", which was wrong.
+  functional", which was wrong. It also requires the watchdog to still exist,
+  which under memory pressure is not given
+  ([When the watchdog goes too](#when-the-watchdog-goes-too)).
 - **Deliberate restart.** `operad upgrade` rebuilds, stops the daemon, and lets
   the watchdog restart it on the new bundle — running tmux sessions stay up
   throughout, because the tmux server is not what restarted. It signals the
@@ -352,6 +451,12 @@ rg "Supervising via|code=12[67]" "$WDLOG" | tail -3
 # 5. Can it receive the wake signal? (blocked-mask watchdogs fall back to
 #    the 60s poll — see "Waking it early")
 rg -i SigBlk /proc/$(cat "${TMPDIR:-$PREFIX/tmp}/operad-watchdog.pid")/status
+
+# 6. Has the whole tree been killed and rebuilt at some point? Every
+#    "Supervising via" line is a NEW watchdog. One carrying "no exec shim in
+#    this process" came from Termux:Boot (right cgroup); one without it came
+#    from a terminal (wrong cgroup — see "When the watchdog goes too").
+rg -n 'Supervising via' "$WDLOG" | tail -5
 ```
 
 Two Termux notes on the above: `dumpsys` needs its absolute path, because
