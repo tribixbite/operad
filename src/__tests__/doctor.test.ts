@@ -7,6 +7,7 @@ import {
   parseRuntimeTypes,
   classifyConfigContent,
   detectWsl,
+  decideAdbProbeTarget,
   type CheckResult,
   type CheckStatus,
 } from "../doctor.js";
@@ -923,5 +924,144 @@ describe("detectWsl — kernel release parsing", () => {
 
   test("detection is case-insensitive", () => {
     expect(detectWsl("4.4.0-MICROSOFT").isWsl).toBe(true);
+  });
+});
+
+// ── decideAdbProbeTarget — which device may the protection probes trust? ──
+//
+// Regression cover for two separate ways the Android protection checks went
+// wrong on a real device: a multi-device `adb` host made every bare
+// `adb shell` fail (reported as "ADB not connected"), and a single attached
+// device is not necessarily the one operad is running on.
+
+describe("decideAdbProbeTarget — ADB probe targeting", () => {
+  /** A remoteBootId reader that fails the test if it is ever consulted. */
+  const neverRead = (serial: string): string | null => {
+    throw new Error(`remoteBootId should not have been called for ${serial}`);
+  };
+
+  const LOCAL_BOOT_ID = "6f1b0a8c-6a1e-4f0c-9b64-2f9c1d7a3e55";
+  const OTHER_BOOT_ID = "11111111-2222-3333-4444-555555555555";
+
+  test("no online devices → skip with the not-connected message", () => {
+    const r = decideAdbProbeTarget({
+      online: [],
+      localIp: "192.168.0.10",
+      localBootId: LOCAL_BOOT_ID,
+      remoteBootId: neverRead,
+    });
+    expect(r.kind).toBe("skip");
+    if (r.kind === "skip") {
+      expect(r.message).toContain("ADB not connected");
+      expect(r.fix).toBeDefined();
+    }
+  });
+
+  test("loopback serial is trusted without reading any boot_id", () => {
+    const r = decideAdbProbeTarget({
+      online: ["127.0.0.1:5555"],
+      localIp: null,
+      localBootId: null,
+      remoteBootId: neverRead,
+    });
+    expect(r).toEqual({ kind: "target", serial: "127.0.0.1:5555" });
+  });
+
+  test("localhost serial is trusted too", () => {
+    const r = decideAdbProbeTarget({
+      online: ["localhost:5555"],
+      localIp: null,
+      localBootId: null,
+      remoteBootId: neverRead,
+    });
+    expect(r).toEqual({ kind: "target", serial: "localhost:5555" });
+  });
+
+  // The regression that made doctor skip all six checks: eight attached
+  // devices, the local one among them. Bare `adb shell` cannot work here.
+  test("picks the loopback device out of a crowded adb host", () => {
+    const r = decideAdbProbeTarget({
+      online: [
+        "192.168.0.173:5555",
+        "192.168.0.203:5555",
+        "127.0.0.1:5555",
+        "emulator-5554",
+        "192.168.1.130:5555",
+      ],
+      localIp: "192.168.0.216",
+      localBootId: LOCAL_BOOT_ID,
+      remoteBootId: neverRead,
+    });
+    expect(r).toEqual({ kind: "target", serial: "127.0.0.1:5555" });
+  });
+
+  test("a single remote device with a matching boot_id is this device", () => {
+    const r = decideAdbProbeTarget({
+      online: ["192.168.0.216:5555"],
+      localIp: null,
+      localBootId: LOCAL_BOOT_ID,
+      remoteBootId: () => LOCAL_BOOT_ID,
+    });
+    expect(r).toEqual({ kind: "target", serial: "192.168.0.216:5555" });
+  });
+
+  test("boot_id comparison ignores case", () => {
+    const r = decideAdbProbeTarget({
+      online: ["192.168.0.216:5555"],
+      localIp: null,
+      localBootId: LOCAL_BOOT_ID.toUpperCase(),
+      remoteBootId: () => LOCAL_BOOT_ID,
+    });
+    expect(r.kind).toBe("target");
+  });
+
+  test("a mismatched boot_id is somebody else's phone — skip, and say so", () => {
+    const r = decideAdbProbeTarget({
+      online: ["192.168.0.173:5555"],
+      localIp: null,
+      localBootId: LOCAL_BOOT_ID,
+      remoteBootId: () => OTHER_BOOT_ID,
+    });
+    expect(r.kind).toBe("skip");
+    if (r.kind === "skip") {
+      expect(r.message).toContain("192.168.0.173:5555");
+      expect(r.message).toContain("different device");
+    }
+  });
+
+  // An emulator is reached through this device's adb server but runs its own
+  // kernel and its own userspace — its protection state is not ours.
+  test("an emulator serial is not accepted as self", () => {
+    const r = decideAdbProbeTarget({
+      online: ["emulator-5554"],
+      localIp: null,
+      localBootId: LOCAL_BOOT_ID,
+      remoteBootId: () => OTHER_BOOT_ID,
+    });
+    expect(r.kind).toBe("skip");
+  });
+
+  test("falls back to the local-IP match when boot_id is unreadable", () => {
+    const r = decideAdbProbeTarget({
+      online: ["192.168.0.216:5555"],
+      localIp: "192.168.0.216",
+      localBootId: LOCAL_BOOT_ID,
+      remoteBootId: () => null,
+    });
+    expect(r).toEqual({ kind: "target", serial: "192.168.0.216:5555" });
+  });
+
+  test("fails closed when nothing establishes identity", () => {
+    const r = decideAdbProbeTarget({
+      online: ["192.168.0.173:5555"],
+      localIp: null,
+      localBootId: null,
+      remoteBootId: () => null,
+    });
+    expect(r.kind).toBe("skip");
+    if (r.kind === "skip") {
+      expect(r.message).toContain("could not confirm");
+      expect(r.message).toContain("192.168.0.173:5555");
+    }
   });
 });

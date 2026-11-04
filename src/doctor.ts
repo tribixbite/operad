@@ -4,6 +4,7 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import * as net from "net";
 import { detectPlatform, type PlatformId } from "./platform/platform.js";
+import { parseAdbDevicesOutput, resolveSerialFromList } from "./android-engine.js";
 import { validateConfigFile } from "./config.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
@@ -967,8 +968,98 @@ function checkBootHook(): CheckResult {
   }
 }
 
+/** `UsageStatsManager.STANDBY_BUCKET_EXEMPTED` — never app-standby restricted. */
+const STANDBY_BUCKET_EXEMPTED = 5;
+/** `UsageStatsManager.STANDBY_BUCKET_ACTIVE` — what `applyPhantomFix` asks for. */
+const STANDBY_BUCKET_ACTIVE = 10;
+
+/** Where doctor's Android protection probes may run, or why they cannot. */
+export type AdbProbeTarget =
+  | { kind: "target"; serial: string }
+  | { kind: "skip"; message: string; fix?: string };
+
+/** Serial forms that can only ever be this device's own ADB server. */
+function isLoopbackSerial(serial: string): boolean {
+  return serial.startsWith("127.0.0.1:") || serial.startsWith("localhost:");
+}
+
 /**
- * Read the live state of the 7 ADB-driven Android process protections that
+ * Decide which ADB device the protection probes are allowed to talk to.
+ *
+ * Two independent hazards, both measured on the author's device:
+ *
+ * 1. **More than one device attached.** Every probe used to shell out as bare
+ *    `adb shell …`, which fails with "more than one device/emulator" the
+ *    moment a second target is connected. The gate in front of them was
+ *    `adb get-state`, which fails the same way — so doctor reported
+ *    *"ADB not connected"* and skipped all of them while eight devices were
+ *    attached and the local one was reachable over loopback.
+ * 2. **The reachable device is somebody else's phone.** Reporting another
+ *    handset's `oom_score_adj` as this device's is worse than reporting
+ *    nothing, so identity is established explicitly and this fails **closed**
+ *    when it cannot be. `AndroidEngine.isLocalAdbDevice` learned the same
+ *    lesson for the write path; this is the read path.
+ *
+ * Unlike that method, an `emulator-*` serial is not accepted as self here: it
+ * is reached through this device's ADB server but runs its own kernel and its
+ * own (probably Termux-less) userspace, so its protection state says nothing
+ * about this one. `remoteBootId` is injected so the decision is unit-testable
+ * without ADB.
+ */
+export function decideAdbProbeTarget(opts: {
+  online: string[];
+  localIp: string | null;
+  localBootId: string | null;
+  remoteBootId: (serial: string) => string | null;
+}): AdbProbeTarget {
+  const { online, localIp, localBootId, remoteBootId } = opts;
+  if (online.length === 0) {
+    return {
+      kind: "skip",
+      message: "ADB not connected — cannot verify protection state",
+      fix: "Connect ADB (wireless debugging or USB) and re-run; operad's applyPhantomFix runs on boot via fixAdb",
+    };
+  }
+
+  const serial = resolveSerialFromList(online, localIp);
+  if (serial === null) {
+    return {
+      kind: "skip",
+      message: "ADB not connected — cannot verify protection state",
+      fix: "Connect ADB (wireless debugging or USB) and re-run; operad's applyPhantomFix runs on boot via fixAdb",
+    };
+  }
+  if (isLoopbackSerial(serial)) return { kind: "target", serial };
+
+  // Exact identity: the kernel's per-boot UUID differs between machines.
+  if (localBootId !== null) {
+    const remote = remoteBootId(serial);
+    if (remote !== null) {
+      if (remote.toLowerCase() === localBootId.toLowerCase()) {
+        return { kind: "target", serial };
+      }
+      return {
+        kind: "skip",
+        message: `ADB target ${serial} is a different device (boot_id mismatch) — not reporting its protection state as this device's`,
+        fix: "Attach this device over loopback so doctor can probe it: adb tcpip 5555 && adb connect 127.0.0.1:5555",
+      };
+    }
+  }
+
+  // Weaker fallback: the serial's host part is one of our own addresses.
+  if (localIp !== null && serial.startsWith(`${localIp}:`)) {
+    return { kind: "target", serial };
+  }
+
+  return {
+    kind: "skip",
+    message: `could not confirm ADB target ${serial} is this device — skipping protection checks`,
+    fix: "Attach this device over loopback so doctor can probe it: adb tcpip 5555 && adb connect 127.0.0.1:5555",
+  };
+}
+
+/**
+ * Read the live state of the 6 ADB-driven Android process protections that
  * `applyPhantomFix` is supposed to apply. Reports actual vs. expected per
  * layer so the user knows which ones are silently no-op on this device.
  *
@@ -976,28 +1067,71 @@ function checkBootHook(): CheckResult {
  * /proc/<termux_pid>/oom_score_adj from `adb shell` requires the calling uid
  * to own the target process, which is no longer granted to the shell uid on
  * Android 14+. Operad logs this at warn but only via the daemon log; doctor
- * surfaces it interactively.
+ * surfaces it interactively. Measured on Android 17 / One UI 9 (SDK 37): still
+ * rejected, so that layer reads back at its default instead of -200.
  */
 function checkAndroidProtections(): CheckResult[] {
   const results: CheckResult[] = [];
-  const adbCheck = spawnSync("adb", ["get-state"], { encoding: "utf8", timeout: 5000 });
-  const adbReady = !adbCheck.error && adbCheck.status === 0 && /device/.test(adbCheck.stdout);
-  if (!adbReady) {
+  const platform = detectPlatform();
+  const adbBin = platform.resolveAdbPath() ?? "adb";
+
+  const readLocalBootId = (): string | null => {
+    try {
+      const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      return id === "" ? null : id;
+    } catch {
+      return null;
+    }
+  };
+
+  const devices = spawnSync(adbBin, ["devices"], { encoding: "utf8", timeout: 5000 });
+  const { online } = parseAdbDevicesOutput(
+    devices.error || devices.status !== 0 ? "" : (devices.stdout ?? ""),
+  );
+
+  const target = decideAdbProbeTarget({
+    online,
+    localIp: platform.resolveLocalIp(),
+    localBootId: readLocalBootId(),
+    remoteBootId: (serial) => {
+      const r = spawnSync(
+        adbBin,
+        ["-s", serial, "shell", "cat", "/proc/sys/kernel/random/boot_id"],
+        { encoding: "utf8", timeout: 5000 },
+      );
+      if (r.error || r.status !== 0) return null;
+      const id = (r.stdout ?? "").replace(/\r/g, "").trim();
+      return /^[0-9a-f-]{36}$/i.test(id) ? id : null;
+    },
+  });
+
+  if (target.kind === "skip") {
     results.push({
       name: "android-protections",
       status: "warn",
-      message: "ADB not connected — cannot verify protection state",
-      fix: "Connect ADB (wireless debugging or USB) and re-run; operad's applyPhantomFix runs on boot via fixAdb",
+      message: target.message,
+      ...(target.fix === undefined ? {} : { fix: target.fix }),
     });
     return results;
   }
 
-  // 1. Phantom process limit
-  {
-    const r = spawnSync("adb", ["shell", "device_config", "get", "activity_manager", "max_phantom_processes"], {
+  /** Run one probe against the resolved device. Never bare `adb shell`. */
+  const adbShell = (...cmd: string[]): string => {
+    const r = spawnSync(adbBin, ["-s", target.serial, "shell", ...cmd], {
       encoding: "utf8", timeout: 5000,
     });
-    const value = (r.stdout ?? "").trim();
+    return (r.stdout ?? "").replace(/\r/g, "").trim();
+  };
+
+  results.push({
+    name: "adb-target",
+    status: "ok",
+    message: `probing ${target.serial} (confirmed this device)`,
+  });
+
+  // 1. Phantom process limit
+  {
+    const value = adbShell("device_config", "get", "activity_manager", "max_phantom_processes");
     if (value === "2147483647") {
       results.push({ name: "phantom-limit", status: "ok", message: `max_phantom_processes=${value}` });
     } else {
@@ -1012,12 +1146,8 @@ function checkAndroidProtections(): CheckResult[] {
 
   // 2. Doze whitelist
   {
-    const r = spawnSync("adb", ["shell", "cmd", "deviceidle", "whitelist"], {
-      encoding: "utf8", timeout: 5000,
-    });
-    const whitelisted = (r.stdout ?? "").includes(",com.termux,") ||
-      /,com\.termux,/.test(r.stdout ?? "") ||
-      /\bcom\.termux\b,\d+/.test(r.stdout ?? "");
+    const out = adbShell("cmd", "deviceidle", "whitelist");
+    const whitelisted = /(^|,)com\.termux(,|$)/m.test(out);
     if (whitelisted) {
       results.push({ name: "doze-whitelist", status: "ok", message: "com.termux is doze-whitelisted" });
     } else {
@@ -1034,10 +1164,7 @@ function checkAndroidProtections(): CheckResult[] {
   // sh doesn't always pipe cleanly across the wire — call pidof directly and
   // pick the first whitespace-separated token client-side.
   {
-    const pidR = spawnSync("adb", ["shell", "pidof", "com.termux"], {
-      encoding: "utf8", timeout: 5000,
-    });
-    const pid = (pidR.stdout ?? "").trim().split(/\s+/)[0];
+    const pid = adbShell("pidof", "com.termux").split(/\s+/)[0];
     if (!/^\d+$/.test(pid)) {
       results.push({
         name: "oom-score-adj",
@@ -1045,10 +1172,7 @@ function checkAndroidProtections(): CheckResult[] {
         message: "com.termux not running — cannot read oom_score_adj",
       });
     } else {
-      const adjR = spawnSync("adb", ["shell", "cat", `/proc/${pid}/oom_score_adj`], {
-        encoding: "utf8", timeout: 5000,
-      });
-      const adj = parseInt((adjR.stdout ?? "").trim(), 10);
+      const adj = parseInt(adbShell("cat", `/proc/${pid}/oom_score_adj`), 10);
       if (Number.isFinite(adj) && adj <= -100) {
         results.push({ name: "oom-score-adj", status: "ok", message: `com.termux/${pid} oom_score_adj=${adj}` });
       } else {
@@ -1067,10 +1191,7 @@ function checkAndroidProtections(): CheckResult[] {
 
   // 4. RUN_ANY_IN_BACKGROUND appop
   {
-    const r = spawnSync("adb", ["shell", "cmd", "appops", "get", "com.termux", "RUN_ANY_IN_BACKGROUND"], {
-      encoding: "utf8", timeout: 5000,
-    });
-    const out = (r.stdout ?? "").trim();
+    const out = adbShell("cmd", "appops", "get", "com.termux", "RUN_ANY_IN_BACKGROUND");
     if (/allow/i.test(out)) {
       results.push({ name: "run-in-bg", status: "ok", message: "com.termux RUN_ANY_IN_BACKGROUND=allow" });
     } else {
@@ -1079,6 +1200,44 @@ function checkAndroidProtections(): CheckResult[] {
         status: "warn",
         message: `com.termux RUN_ANY_IN_BACKGROUND=${out || "unknown"}`,
         fix: "adb shell cmd appops set com.termux RUN_ANY_IN_BACKGROUND allow",
+      });
+    }
+  }
+
+  // 5. App standby bucket. Lower is better: EXEMPTED=5, ACTIVE=10,
+  //    WORKING_SET=20, FREQUENT=30, RARE=40, RESTRICTED=45, NEVER=50.
+  //    operad asks for ACTIVE; a device that keeps com.termux EXEMPTED is
+  //    doing better than requested, so anything ≤ 10 passes.
+  {
+    const out = adbShell("am", "get-standby-bucket", "com.termux");
+    const bucket = parseInt(out, 10);
+    if (Number.isFinite(bucket) && bucket <= STANDBY_BUCKET_ACTIVE) {
+      results.push({
+        name: "standby-bucket",
+        status: "ok",
+        message: `com.termux standby bucket=${bucket}${bucket === STANDBY_BUCKET_EXEMPTED ? " (EXEMPTED)" : " (ACTIVE)"}`,
+      });
+    } else {
+      results.push({
+        name: "standby-bucket",
+        status: "warn",
+        message: `com.termux standby bucket=${Number.isFinite(bucket) ? bucket : out || "unreadable"} (expected ≤ ${STANDBY_BUCKET_ACTIVE})`,
+        fix: "adb shell am set-standby-bucket com.termux active",
+      });
+    }
+  }
+
+  // 6. App-inactive flag (`am set-inactive <pkg> false`).
+  {
+    const out = adbShell("am", "get-inactive", "com.termux");
+    if (/Idle=false/i.test(out)) {
+      results.push({ name: "app-inactive", status: "ok", message: "com.termux Idle=false" });
+    } else {
+      results.push({
+        name: "app-inactive",
+        status: "warn",
+        message: `com.termux ${out || "get-inactive unreadable"} (expected Idle=false)`,
+        fix: "adb shell am set-inactive com.termux false",
       });
     }
   }

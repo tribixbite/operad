@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `operad doctor` skipped every Android protection check
+
+The six ADB-driven process protections are the layer `docs/persistence.md`
+tells you to verify with `operad doctor`, and doctor was reporting
+*"ADB not connected — cannot verify protection state"* on a device with ADB
+connected. Its gate was `adb get-state` and each probe was a bare
+`adb shell …`; both fail with "more than one device/emulator" as soon as a
+second target is attached. Eight were attached here, the local one among them.
+
+Doctor now resolves a serial and passes `-s` explicitly, reusing
+`parseAdbDevicesOutput` / `resolveSerialFromList` from the engine that already
+does this for the write path, and confirms the target is *this* device by
+comparing `/proc/sys/kernel/random/boot_id` before trusting what it reads. It
+fails closed: an unidentifiable device is skipped with its serial named, rather
+than have another handset's protection state reported as this one's.
+
+Two layers that were never probed — the app standby bucket and the
+app-inactive flag — are now read back as well, so all six are covered. On the
+author's device this surfaces what hand-checking had already found:
+`oom_score_adj` reads `200`, not `-200`, because Android 14+ does not let the
+shell uid write another app's score. That layer is inert and now says so.
+
 ### Fixed — "all time" was neither all of the usage nor all of the time
 
 Three independent gaps, all in the same direction: the widest range in the
