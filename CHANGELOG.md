@@ -4,6 +4,149 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — opening a historical prompt showed the latest conversation
+
+Tapping a prompt in the library opened the project's most recent conversation
+at its newest message, whatever prompt you had picked. Three separate causes,
+each of which could produce that on its own:
+
+- **The prompt's conversation often could not be named.**
+  `~/.claude/history.jsonl` — the library's source — carries a `sessionId` on
+  newer entries only; 3,803 of 12,315 lines on the author's machine have none.
+  With nothing to ask for, the viewer asked for "this project" and got today's
+  session. A new `GET /api/prompt-locate` resolves the prompt against the
+  transcripts actually on disk (by text, then timestamp proximity), so the
+  right conversation is found with or without a recorded id — and even when
+  the recorded id is stale, which it often is after Claude Code's retention
+  sweep. Scanning is bounded by each transcript's time span, so proving a
+  prompt is *not* in a project's ten surviving transcripts costs 2 ms rather
+  than 4.2 s.
+
+- **A requested conversation that was gone was replaced in silence.**
+  `getConversationPage` fell back to the newest transcript when the asked-for
+  `session_id` was not on disk, and said nothing. A prompt whose transcript
+  the retention sweep had deleted was indistinguishable from one that opened
+  correctly. The page now carries `requested_session_missing`, and the viewer
+  says so above the messages.
+
+- **Paging back could not reach an old prompt anyway.**
+  `readConversationTail` buffered `limit * 10` lines from the end of the file
+  and then looked for the `before` cursor inside that window. Once paging went
+  deeper than that — three to nine pages — every further request came back
+  empty *while still reporting `has_more: true`*, so the "load older" button
+  stayed live and permanently stuck, and the viewer's anchor search (capped at
+  8 pages) silently gave up and scrolled to the bottom. The reader is now
+  lazy: it keeps reading until it has found the cursor and filled the page, and
+  `has_more` is answered by finding an older entry rather than inferred from
+  how many lines happened to be buffered. 600 entries page back in 30 pages
+  where it previously stalled. A stale cursor now returns an empty page with
+  `has_more: false` — the honest answer.
+
+`GET /api/conversation` gains `around=<uuid>`, which returns the window
+containing that entry instead of the tail, so the position is reached in one
+request however deep the prompt is. Also fixed in the same reader: each 64 KB
+chunk was decoded independently, which replaced one multi-byte character per
+chunk boundary with U+FFFD; lines are now split on the `\n` byte and only
+complete lines are decoded.
+
+### Fixed — operad reopened sessions you had exited
+
+Exiting a session was the surest way to have it started again. Within the
+daemon's run, the tmux session disappearing read as a fault, so auto-restart
+brought it back; on the next boot, discovery ranks projects by their recency
+in Claude Code's history, and a project you just quit is by definition the
+most recent thing in it. `operad close` did not help — it removed the registry
+entry and then *deleted* the autostart override, which was the only piece of
+state that could have said no, and the next boot re-derived the session from
+history and started it.
+
+A deliberate exit is now identified and honoured. Agent sessions are created
+with tmux's `remain-on-exit on`, so a shell that exits leaves a dead pane
+behind to be inspected instead of taking the session down with it; the health
+check reports `user_exited` for that shape, and the daemon then stops
+supervising the session, clears its ⭐ pin, and records the close against the
+project path in `state.manual_closes`. Boot resolution skips a closed project
+until it is used again — history activity newer than the close, or an explicit
+`open` / `start` / pin, all cancel it. `close` and the ⭐ toggle write the same
+record, so the dashboard and the CLI agree.
+
+What this cannot separate is Android's low-memory killer taking just the
+pane's shell: tmux 3.5a under Termux leaves `pane_dead_status` and
+`pane_dead_signal` empty, so that looks exactly like an exit. The OOM failure
+that actually happens on this platform takes the whole tmux server, which is
+handled on its own path (every session marked failed, restored on the next
+boot) and is untouched. `boot.respect_manual_exit = false` restores the old
+always-reopen behaviour. A missing tmux session is still treated as a fault,
+not an exit, because sessions created before this change disappear on a clean
+exit too.
+
+### Fixed — a Codex or Antigravity session came back as Claude Code
+
+`Registry.toSessionConfigs()` stamped every entry `type: "claude"`. The
+registry is the only durable record of a session the daemon did not get from
+TOML, so a session running any other agent survived a restart in name only:
+same name, same directory, Claude Code in the pane, and the previous
+conversation unreachable from it.
+
+Registry entries now carry their runtime (and a service entry's command), and
+unknown values are dropped on load rather than reaching a runtime lookup or a
+shell. Three further pieces:
+
+- **An `agy` (Antigravity) adapter**, resuming with `--continue` or
+  `--conversation <id>`. Conversation ids are not UUIDs, so the id is validated
+  against a conservative character set before being interpolated into the
+  command a shell will parse.
+- **`operad open --runtime <id>`** (and `POST /api/open?runtime=`), persisted
+  with the session.
+- **Detection of the agent actually in the pane.** Running `agy` or `codex` in
+  a session operad opened for Claude Code is a normal thing to do, and the
+  switch is now noticed from the pane's process tree — one `ps` snapshot per
+  poll for the whole machine — and recorded after two consecutive
+  observations, so a restart brings back what was there. A type declared in
+  TOML is left alone; only registry-backed sessions are reconciled.
+
+### Fixed — the cost chart read $0.00 for every current model
+
+`MODEL_RATES` had no entry for any model in the Claude 5.5 generation, and an
+unpriced model contributes zero by design — so a machine running the current
+default reported its entire cost history as $0.00 while still counting turns.
+On the author's device three days of real usage went from `$0.00` to
+`$181.24 / $27.54 / $61.68`.
+
+A wrong rate is worse than a missing one, because nothing flags it: Sonnet 5
+was carried at Sonnet 4.6's $3/$15 when it is $2/$10, a 50% overstatement on
+every Sonnet 5 turn ever scanned. Rates are now cross-checked against the
+published table rather than recalled, and models whose published cache-read
+rate is not the usual 10% of input (Opus 5.5 at $0.20, Fable 5.1 at $0.25)
+carry it explicitly — at Claude Code's cache-read-dominated token mix that one
+term moves the total more than any other.
+
+### Fixed — transcript scans loaded whole files into memory
+
+Three readers held an entire transcript as a string plus a second copy as a
+line array. Transcripts here reach tens of megabytes (2.8 GB across 459 files),
+and the device's low-memory killer is already taking processes:
+
+- `findNamedSessions` did it at **boot**, for every session active in the last
+  seven days, to recover a handful of short titles.
+- `readTimeline` did it per request, to return at most `limit * 3` of the
+  newest entries.
+- `getDailyCostTimeline` did it for every transcript in the window — under a
+  comment that said "stream-parse the JSONL file".
+
+All three now walk lines lazily through one shared reader and stop when they
+have what they need. Peak heap across the three is ~50 MB.
+
+### Changed
+
+- `state.manual_closes` is pruned at boot — entries older than 90 days, or
+  whose project directory no longer exists, are dropped, so the record cannot
+  grow one line per project ever closed.
+- `GET /api/conversation`'s `limit` is clamped to 1–200.
+- `prompts.ts` declared `history.jsonl`'s `timestamp` as a string; it is epoch
+  milliseconds. The declaration was a lie that `new Date()` happened to
+  tolerate.
+
 ### Fixed — `operad doctor` skipped every Android protection check
 
 The six ADB-driven process protections are the layer `docs/persistence.md`

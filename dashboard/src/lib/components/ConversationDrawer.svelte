@@ -23,10 +23,19 @@
     projectPath?: string | null;
     /** Optional epoch-ms of a prompt to anchor/scroll to in the viewer. */
     anchorTimestamp?: number | null;
+    /**
+     * Exact entry uuid to open at, resolved by `/api/prompt-locate`. When
+     * set the viewer loads the window containing it rather than the tail,
+     * which is the only way to reach a prompt thousands of entries back.
+     */
+    anchorUuid?: string | null;
+    /** Explanation to show when the prompt's transcript could not be found. */
+    anchorNotice?: string | null;
   }
   let {
     sessionName, onclose, initialSessionId = null,
     projectPath = null, anchorTimestamp = null,
+    anchorUuid = null, anchorNotice = null,
   }: Props = $props();
 
   /** A live operad session backs this drawer (enables the SDK Live tab). */
@@ -404,7 +413,10 @@
         </div>
       {:else}
         <!-- Historical conversation viewer (existing) -->
-        <ConversationViewer {sessionName} {initialSessionId} {projectPath} {anchorTimestamp} />
+        <ConversationViewer
+          {sessionName} {initialSessionId} {projectPath}
+          {anchorTimestamp} {anchorUuid} {anchorNotice}
+        />
       {/if}
     </div>
   </div>

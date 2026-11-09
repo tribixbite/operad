@@ -115,10 +115,17 @@ function parseAllPrompts(historyPath: string = HISTORY_PATH): Array<Omit<PromptE
     if (!line.trim()) continue;
     try {
       const raw = JSON.parse(line) as {
-        type?: string;
         display?: string;
-        timestamp?: string;
+        // Claude Code writes this as epoch MILLISECONDS, not a string. The
+        // declared type said string, which `new Date()` happens to accept
+        // either way — but it hid what the field is, and any code that
+        // treated it as an ISO string (comparing, slicing, re-parsing after
+        // a round-trip) would have been wrong about it.
+        timestamp?: number | string;
         project?: string;
+        // Present on newer entries only: 8,512 of 12,315 lines on the
+        // author's machine. Code that assumes it is always there resolves
+        // older prompts to "the project's newest conversation".
         sessionId?: string;
       };
       if (!raw.display) continue;
@@ -126,7 +133,8 @@ function parseAllPrompts(historyPath: string = HISTORY_PATH): Array<Omit<PromptE
       const display = raw.display.trim();
       if (!display) continue;
 
-      const ts = raw.timestamp ? new Date(raw.timestamp).getTime() : 0;
+      const parsedTs = raw.timestamp !== undefined ? new Date(raw.timestamp).getTime() : NaN;
+      const ts = Number.isFinite(parsedTs) ? parsedTs : 0;
       entries.push({
         id: promptId(display, ts),
         display,

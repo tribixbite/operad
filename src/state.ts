@@ -384,6 +384,65 @@ export class StateManager {
     }
   }
 
+  // -- Manual closes ----------------------------------------------------------
+
+  /** All recorded manual closes (project path → ISO time of the close). */
+  getManualCloses(): Record<string, string> {
+    return this.state.manual_closes ?? {};
+  }
+
+  /**
+   * Record that the user deliberately closed a project's session, so boot
+   * recency stops resurrecting it. Keyed by project path rather than session
+   * name because that's what boot discovery iterates — a closed project can
+   * come back under a different derived name.
+   */
+  recordManualClose(projectPath: string, when = new Date()): void {
+    if (!projectPath) return;
+    if (!this.state.manual_closes) this.state.manual_closes = {};
+    this.state.manual_closes[projectPath] = when.toISOString();
+    this.persist();
+  }
+
+  /**
+   * Forget a manual close — the user has explicitly asked for this project
+   * again (opened, started or pinned it), which overrides the earlier exit.
+   */
+  clearManualClose(projectPath: string): void {
+    if (!projectPath) return;
+    if (this.state.manual_closes && projectPath in this.state.manual_closes) {
+      delete this.state.manual_closes[projectPath];
+      this.persist();
+    }
+  }
+
+  /**
+   * Drop manual closes for projects whose directory no longer exists, or
+   * that were closed longer ago than `maxAgeDays`.
+   *
+   * Without this the record only ever grows: every project ever closed keeps
+   * a line in state.json forever, including ones whose directory has been
+   * deleted. The age cap also means a project you quit a year ago and have
+   * not touched since stops being special — boot recency would not reach
+   * back that far anyway. Returns how many entries were dropped.
+   */
+  pruneManualCloses(maxAgeDays = 90, exists: (path: string) => boolean = existsSync): number {
+    const closes = this.state.manual_closes;
+    if (!closes) return 0;
+    const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+    let dropped = 0;
+    for (const [path, at] of Object.entries(closes)) {
+      const ms = Date.parse(at);
+      const stale = Number.isNaN(ms) || ms < cutoff;
+      if (stale || !exists(path)) {
+        delete closes[path];
+        dropped++;
+      }
+    }
+    if (dropped > 0) this.persist();
+    return dropped;
+  }
+
   /** Flush state to disk immediately (public wrapper for persist) */
   flush(): void {
     this.persist();

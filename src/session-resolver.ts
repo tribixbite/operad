@@ -122,6 +122,26 @@ export function resolveBootSessions(
   const namedSessions = findNamedSessions(historyPath, 7);
   const { auto_start, visible } = config.boot;
 
+  /**
+   * True when the user closed this project and hasn't gone back to it.
+   *
+   * Recency on its own cannot express that: a project you just exited is the
+   * most recent thing in Claude's history, so quitting a session was the
+   * surest way to get it auto-started on the next boot. A close therefore
+   * outranks recency until the project shows activity NEWER than the close,
+   * which means the user picked it up again.
+   */
+  const manualCloses = config.boot.respect_manual_exit ? state.getManualCloses() : {};
+  const isManuallyClosed = (projectPath: string, lastActive: string): boolean => {
+    const closedAt = manualCloses[resolve(projectPath)];
+    if (!closedAt) return false;
+    const closedMs = Date.parse(closedAt);
+    if (Number.isNaN(closedMs)) return false;
+    const activeMs = Date.parse(lastActive);
+    return Number.isNaN(activeMs) || activeMs <= closedMs;
+  };
+  const skippedAsClosed: string[] = [];
+
   // Build path→config lookup (one entry per path for primary matching).
   //
   // Named instances (session_id set) are excluded: they are Phase 2's
@@ -147,6 +167,10 @@ export function resolveBootSessions(
     if (rank >= visible) break;
 
     const resolvedPath = resolve(proj.path);
+    if (isManuallyClosed(resolvedPath, proj.last_active)) {
+      skippedAsClosed.push(deriveName(proj.path));
+      continue;
+    }
     const existing = configByPath.get(resolvedPath);
 
     if (existing) {
@@ -191,6 +215,10 @@ export function resolveBootSessions(
     if (registry.findBySessionId(named.session_id)) continue;
 
     const resolvedPath = resolve(named.path);
+    if (isManuallyClosed(resolvedPath, named.last_active)) {
+      skippedAsClosed.push(named.title);
+      continue;
+    }
     // Sanitize title to valid session name
     const titleName = named.title.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-");
     if (!titleName || !isValidName(titleName)) continue;
@@ -246,5 +274,6 @@ export function resolveBootSessions(
   state.initFromConfig(config.sessions);
 
   log.info(`Boot recency: auto-start=[${[...autoStartNames].join(",")}] ` +
-    `visible=[${[...visibleNames].join(",")}]`);
+    `visible=[${[...visibleNames].join(",")}]` +
+    (skippedAsClosed.length > 0 ? ` closed-by-user=[${skippedAsClosed.join(",")}]` : ""));
 }

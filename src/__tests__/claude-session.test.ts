@@ -28,6 +28,9 @@ import {
   summariseTokenRange,
   rangeStartKey,
   readConversationTail,
+  readConversationWindow,
+  locateConversationEntry,
+  getConversationPage,
   readTimeline,
   type BindableSession,
   type ConversationCandidate,
@@ -205,6 +208,53 @@ describe("calculateCost", () => {
     expect(calculateCost(m, { ...zero, cacheRead: 1_000_000 })).toBeCloseTo(0.5, 8);   // 0.1x
     expect(calculateCost(m, { ...zero, cacheWrite5m: 1_000_000 })).toBeCloseTo(6.25, 8); // 1.25x
     expect(calculateCost(m, { ...zero, cacheWrite1h: 1_000_000 })).toBeCloseTo(10, 8);   // 2.0x
+  });
+
+  test("every current model has a rate — a missing one silently costs nothing", () => {
+    // The whole Claude 5.5 generation was absent from the table, so a machine
+    // running the current default (Opus 5.5) reported its entire cost history
+    // as $0.00 while still counting turns. Zero is indistinguishable from
+    // "cheap", which is why this is asserted per id rather than in aggregate.
+    const current = [
+      "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+      "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+      "claude-opus-4-6", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+      "claude-haiku-5-5", "claude-haiku-4-5",
+    ];
+    for (const model of current) {
+      expect(calculateCost(model, { ...zero, input: 1_000_000 })).toBeGreaterThan(0);
+      expect(calculateCost(model, { ...zero, output: 1_000_000 })).toBeGreaterThan(0);
+    }
+  });
+
+  test("the current generation's published rates", () => {
+    expect(calculateCost("claude-opus-5-5", { ...zero, input: 1_000_000 })).toBeCloseTo(4, 8);
+    expect(calculateCost("claude-opus-5-5", { ...zero, output: 1_000_000 })).toBeCloseTo(20, 8);
+    expect(calculateCost("claude-sonnet-5-5", { ...zero, input: 1_000_000 })).toBeCloseTo(2, 8);
+    expect(calculateCost("claude-sonnet-5-5", { ...zero, output: 1_000_000 })).toBeCloseTo(10, 8);
+    expect(calculateCost("claude-haiku-5-5", { ...zero, input: 1_000_000 })).toBeCloseTo(0.1, 8);
+    expect(calculateCost("claude-fable-5-1", { ...zero, output: 1_000_000 })).toBeCloseTo(50, 8);
+  });
+
+  test("Sonnet 5 is not priced as Sonnet 4.6", () => {
+    // It was carried at 4.6's $3/$15 when it is $2/$10 — a 50% overstatement
+    // on every Sonnet 5 turn, and nothing about a wrong-but-plausible rate
+    // flags itself the way a missing one eventually does.
+    expect(calculateCost("claude-sonnet-5", { ...zero, input: 1_000_000 })).toBeCloseTo(2, 8);
+    expect(calculateCost("claude-sonnet-4-6", { ...zero, input: 1_000_000 })).toBeCloseTo(3, 8);
+  });
+
+  test("a model with a published cache-read rate uses it, not 10% of input", () => {
+    // Opus 5.5 reads cache at $0.20/MTok — 5% of its $4 input rate, not the
+    // 10% default. At Claude Code's cache-read-dominated token mix that one
+    // term moves the total more than any other.
+    expect(calculateCost("claude-opus-5-5", { ...zero, cacheRead: 1_000_000 })).toBeCloseTo(0.20, 8);
+    expect(calculateCost("claude-fable-5-1", { ...zero, cacheRead: 1_000_000 })).toBeCloseTo(0.25, 8);
+    // Sonnet 5.5's $0.20 happens to equal the 10% default — assert the value,
+    // not the coincidence.
+    expect(calculateCost("claude-sonnet-5-5", { ...zero, cacheRead: 1_000_000 })).toBeCloseTo(0.20, 8);
+    // A model with no override still gets 10% of input.
+    expect(calculateCost("claude-opus-5", { ...zero, cacheRead: 1_000_000 })).toBeCloseTo(0.5, 8);
   });
 
   test("a 1h cache write costs 1.6x a 5m one", () => {
@@ -1345,5 +1395,241 @@ describe("manglePath — directory naming", () => {
     for (let i = 0; i < 5; i++) {
       expect(manglePath("/a/b/c")).toBe("-a-b-c");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deep pagination, anchored windows, and prompt location
+//
+// These cover the path behind "opening a historical prompt just shows the
+// latest conversation": a cursor beyond the reader's buffered window used to
+// return an empty page that still claimed `has_more`, so the dashboard could
+// not page back far enough to reach an old prompt, and a requested session id
+// that no longer existed on disk was silently replaced by the newest one.
+// ---------------------------------------------------------------------------
+
+/** Build a transcript of `count` alternating user/assistant entries. */
+function buildTranscript(name: string, count: number, startMs = Date.parse("2026-01-01T00:00:00.000Z")): {
+  path: string;
+  uuids: string[];
+} {
+  const uuids: string[] = [];
+  const lines: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const uuid = `e${String(i).padStart(4, "0")}`;
+    uuids.push(uuid);
+    const ts = new Date(startMs + i * 60_000).toISOString();
+    lines.push(
+      i % 2 === 0
+        ? JSON.stringify({
+            type: "user", uuid, timestamp: ts,
+            message: { role: "user", content: `prompt ${i}` },
+          })
+        : JSON.stringify({
+            type: "assistant", uuid, timestamp: ts,
+            message: { role: "assistant", model: "claude-opus-4", stop_reason: "end_turn",
+              content: [{ type: "text", text: `reply ${i}` }] },
+          }),
+    );
+  }
+  return { path: write(name, lines.join("\n") + "\n"), uuids };
+}
+
+describe("readConversationTail — deep pagination", () => {
+  test("pages all the way back through a long conversation", () => {
+    // 600 entries is well past the old reader's `limit * 10` line budget,
+    // which is where paging used to start returning empty pages.
+    const { path, uuids } = buildTranscript("long.jsonl", 600);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 40; page++) {
+      const { entries, hasMore } = readConversationTail(path, 20, cursor);
+      if (entries.length === 0) break;
+      seen.unshift(...entries.map((e) => e.uuid));
+      cursor = entries[0].uuid;
+      if (!hasMore) break;
+    }
+
+    expect(seen).toHaveLength(600);
+    expect(seen[0]).toBe(uuids[0]);
+    expect(seen[599]).toBe(uuids[599]);
+  });
+
+  test("reports hasMore false on the oldest page", () => {
+    const { path } = buildTranscript("short.jsonl", 25);
+    const first = readConversationTail(path, 20);
+    expect(first.hasMore).toBe(true);
+    const second = readConversationTail(path, 20, first.entries[0].uuid);
+    expect(second.entries).toHaveLength(5);
+    expect(second.hasMore).toBe(false);
+  });
+
+  test("an unknown cursor yields an empty page that does NOT claim more", () => {
+    const { path } = buildTranscript("stale.jsonl", 40);
+    const { entries, hasMore } = readConversationTail(path, 20, "not-a-real-uuid");
+    expect(entries).toHaveLength(0);
+    // Claiming `has_more` here left the dashboard's "load older" button live
+    // and permanently unable to advance.
+    expect(hasMore).toBe(false);
+  });
+
+  test("decodes multi-byte text spanning a chunk boundary", () => {
+    // One entry far larger than the 64 KB read chunk, so the reader has to
+    // stitch chunks together. Splitting per-chunk on a character boundary
+    // corrupts one character per chunk.
+    const padding = "é".repeat(80_000);
+    const line = JSON.stringify({
+      type: "user", uuid: "big", timestamp: "2026-01-01T00:00:00.000Z",
+      message: { role: "user", content: `start ${padding} end` },
+    });
+    const path = write("wide.jsonl", line + "\n");
+    const { entries } = readConversationTail(path, 5);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].content).not.toContain("�");
+    expect(entries[0].content.endsWith("end")).toBe(true);
+  });
+});
+
+describe("readConversationWindow — anchored reads", () => {
+  test("returns the window containing a deep entry", () => {
+    const { path, uuids } = buildTranscript("anchor.jsonl", 500);
+    const anchor = uuids[100];
+    const { entries, found, hasMore } = readConversationWindow(path, anchor, 20);
+    expect(found).toBe(true);
+    expect(entries.map((e) => e.uuid)).toContain(anchor);
+    expect(entries).toHaveLength(20);
+    // Older entries remain, and the anchor is near the end with a little
+    // context after it so the reply is visible.
+    expect(hasMore).toBe(true);
+    const idx = entries.findIndex((e) => e.uuid === anchor);
+    expect(idx).toBeGreaterThan(0);
+    expect(entries.length - idx - 1).toBeLessThanOrEqual(4);
+  });
+
+  test("hasMore is false when the anchor is at the start", () => {
+    const { path, uuids } = buildTranscript("anchor-start.jsonl", 40);
+    const { entries, hasMore, found } = readConversationWindow(path, uuids[0], 20);
+    expect(found).toBe(true);
+    expect(hasMore).toBe(false);
+    expect(entries[0].uuid).toBe(uuids[0]);
+  });
+
+  test("reports not-found rather than substituting a window", () => {
+    const { path } = buildTranscript("anchor-missing.jsonl", 40);
+    const { entries, found } = readConversationWindow(path, "nope", 20);
+    expect(found).toBe(false);
+    expect(entries).toHaveLength(0);
+  });
+});
+
+describe("locateConversationEntry / getConversationPage", () => {
+  /** Point $HOME at the temp dir so the project dir resolves under it. */
+  function withTempHome<T>(fn: (projectPath: string) => T): T {
+    const realHome = process.env.HOME;
+    const projectPath = join(tmpDir, "proj");
+    mkdirSync(join(tmpDir, ".claude", "projects", manglePath(projectPath)), { recursive: true });
+    process.env.HOME = tmpDir;
+    try {
+      return fn(projectPath);
+    } finally {
+      if (realHome === undefined) delete process.env.HOME;
+      else process.env.HOME = realHome;
+    }
+  }
+
+  /** Write a transcript into the fake project dir. */
+  function seed(projectPath: string, sessionId: string, lines: string[]): void {
+    const dir = join(tmpDir, ".claude", "projects", manglePath(projectPath));
+    writeFileSync(join(dir, `${sessionId}.jsonl`), lines.join("\n") + "\n", "utf-8");
+  }
+
+  const userLine = (uuid: string, ts: string, content: string) =>
+    JSON.stringify({ type: "user", uuid, timestamp: ts, message: { role: "user", content } });
+
+  test("finds the prompt's own conversation, not the newest one", () => {
+    withTempHome((projectPath) => {
+      seed(projectPath, "11111111-1111-4111-8111-111111111111", [
+        userLine("old-1", "2026-01-01T10:00:00.000Z", "the prompt I am looking for"),
+      ]);
+      seed(projectPath, "22222222-2222-4222-8222-222222222222", [
+        userLine("new-1", "2026-06-01T10:00:00.000Z", "something else entirely"),
+      ]);
+
+      const found = locateConversationEntry(projectPath, {
+        text: "the prompt I am looking for",
+        timestamp: Date.parse("2026-01-01T10:00:00.000Z"),
+      });
+      expect(found?.session_id).toBe("11111111-1111-4111-8111-111111111111");
+      expect(found?.uuid).toBe("old-1");
+    });
+  });
+
+  test("recovers when the recorded session id no longer exists", () => {
+    withTempHome((projectPath) => {
+      seed(projectPath, "33333333-3333-4333-8333-333333333333", [
+        userLine("real", "2026-02-02T08:00:00.000Z", "a prompt whose session id went stale"),
+      ]);
+      const found = locateConversationEntry(projectPath, {
+        text: "a prompt whose session id went stale",
+        timestamp: Date.parse("2026-02-02T08:00:00.000Z"),
+        sessionId: "99999999-9999-4999-8999-999999999999",
+      });
+      expect(found?.session_id).toBe("33333333-3333-4333-8333-333333333333");
+      expect(found?.uuid).toBe("real");
+    });
+  });
+
+  test("returns null when no transcript holds the prompt", () => {
+    withTempHome((projectPath) => {
+      seed(projectPath, "44444444-4444-4444-8444-444444444444", [
+        userLine("x", "2026-03-03T08:00:00.000Z", "unrelated"),
+      ]);
+      const found = locateConversationEntry(projectPath, {
+        text: "a prompt from a transcript that was deleted",
+        timestamp: Date.parse("2024-01-01T00:00:00.000Z"),
+      });
+      expect(found).toBeNull();
+    });
+  });
+
+  test("getConversationPage flags a requested session that is not on disk", () => {
+    withTempHome((projectPath) => {
+      seed(projectPath, "55555555-5555-4555-8555-555555555555", [
+        userLine("only", "2026-04-04T08:00:00.000Z", "hello"),
+      ]);
+      const page = getConversationPage(projectPath, "00000000-0000-4000-8000-000000000000", 10);
+      // The newest conversation is still served — there is nothing else to
+      // show — but the caller must be able to tell it apart from a correct
+      // open, or a deleted transcript looks exactly like a working one.
+      expect(page.requested_session_missing).toBe(true);
+      expect(page.session_id).toBe("55555555-5555-4555-8555-555555555555");
+    });
+  });
+
+  test("getConversationPage returns the anchored window when asked", () => {
+    withTempHome((projectPath) => {
+      const sessionId = "66666666-6666-4666-8666-666666666666";
+      const lines: string[] = [];
+      for (let i = 0; i < 200; i++) {
+        lines.push(userLine(`p${i}`, new Date(Date.parse("2026-05-05T00:00:00.000Z") + i * 60_000).toISOString(), `prompt ${i}`));
+      }
+      seed(projectPath, sessionId, lines);
+
+      const page = getConversationPage(projectPath, sessionId, 20, undefined, "p30");
+      expect(page.anchor_uuid).toBe("p30");
+      expect(page.entries.map((e) => e.uuid)).toContain("p30");
+      expect(page.anchor_missing).toBeUndefined();
+    });
+  });
+
+  test("getConversationPage reports an anchor it could not find", () => {
+    withTempHome((projectPath) => {
+      const sessionId = "77777777-7777-4777-8777-777777777777";
+      seed(projectPath, sessionId, [userLine("a", "2026-06-06T08:00:00.000Z", "hi")]);
+      const page = getConversationPage(projectPath, sessionId, 20, undefined, "missing-uuid");
+      expect(page.anchor_missing).toBe(true);
+      expect(page.entries).toHaveLength(1); // fell back to the tail
+    });
   });
 });

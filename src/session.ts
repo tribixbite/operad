@@ -215,6 +215,97 @@ export function sessionExists(name: string): boolean {
   return result.status === 0;
 }
 
+/**
+ * Why a session's panes are no longer running anything.
+ *
+ *  - `alive`      — at least one pane still has a live process.
+ *  - `exited`     — every pane is dead and none was killed by a signal: the
+ *                   shell was exited. That is a person typing `exit`, not a
+ *                   failure, and must not be answered with a restart.
+ *  - `killed`     — a pane died on a signal (SIGKILL from Android's lmkd is
+ *                   the case that matters here) or with a non-zero status.
+ *                   This is exactly what auto-restart exists for.
+ *  - `missing`    — no such tmux session.
+ *  - `unknown`    — tmux could not be asked (server down, timeout).
+ */
+export type PaneLiveness =
+  | { state: "alive" }
+  | { state: "exited"; status: number }
+  | { state: "killed"; status?: number; signal?: number }
+  | { state: "missing" }
+  | { state: "unknown" };
+
+/**
+ * Inspect a session's panes to tell a deliberate exit from a crash.
+ *
+ * Only meaningful for sessions created with `remain-on-exit on` (see
+ * `createSession`): without it tmux destroys the session the instant its
+ * last pane's process exits, and the exit status dies with it — leaving
+ * "session is gone" as the only signal, which a clean exit and an
+ * OOM-killed shell produce identically.
+ */
+export function paneLiveness(name: string): PaneLiveness {
+  const output = tmux(
+    "list-panes", "-s", "-t", formatTmuxTarget(name),
+    "-F", PANE_LIVENESS_FORMAT,
+  );
+  if (output === null) {
+    // Distinguish "no such session" from "tmux unreachable" so the caller
+    // doesn't treat a dead tmux server as every session having been closed.
+    return sessionExists(name) ? { state: "unknown" } : { state: "missing" };
+  }
+  return classifyPaneLiveness(output);
+}
+
+/**
+ * tmux format for `paneLiveness`.
+ *
+ * Pipe-separated, not space-separated: `pane_dead_status` and
+ * `pane_dead_signal` are EMPTY on some builds (tmux 3.5a under Termux is
+ * one), and with spaces an empty middle field collapses into its neighbours
+ * — a pane killed by signal 9 arrives as "1  9" and reads as "exited with
+ * status 9", which is both wrong and the opposite decision.
+ */
+const PANE_LIVENESS_FORMAT = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";
+
+/**
+ * Classify `list-panes -F PANE_LIVENESS_FORMAT` output. Split out from the
+ * tmux call so the decision is testable.
+ *
+ * Any live pane means the session is alive. Otherwise a reported signal, or
+ * a non-zero status, is a crash; everything else is an exit. Note that the
+ * status fields come back empty on some builds, so "exited" is the honest
+ * reading of "dead, and nothing says it was killed" — not a claim that a
+ * status was seen and was zero.
+ */
+export function classifyPaneLiveness(output: string): PaneLiveness {
+  const rows = output.split("\n").map((l) => l.replace(/\r/g, "").trim()).filter(Boolean);
+  if (rows.length === 0) return { state: "missing" };
+
+  let cleanStatus = 0;
+  for (const row of rows) {
+    const [dead = "", statusRaw = "", signalRaw = ""] = row.split("|");
+    if (dead.trim() !== "1") return { state: "alive" };
+    const status = Number(statusRaw);
+    const signal = Number(signalRaw);
+    // `pane_dead_signal` is a name on some builds ("KILL") and a number on
+    // others; either way a non-empty value means it was killed.
+    if (signalRaw !== "") {
+      return {
+        state: "killed",
+        ...(Number.isFinite(signal) && signal > 0 ? { signal } : {}),
+        ...(statusRaw !== "" && Number.isFinite(status) ? { status } : {}),
+      };
+    }
+    if (statusRaw !== "" && Number.isFinite(status) && status !== 0) {
+      return { state: "killed", status };
+    }
+    if (statusRaw !== "" && Number.isFinite(status)) cleanStatus = status;
+  }
+
+  return { state: "exited", status: cleanStatus };
+}
+
 /** Capture the current pane content for a session */
 export function capturePane(sessionName: string, _lines = 5): string {
   // Note: tmux 3.5a doesn't support -l flag for capture-pane
@@ -325,6 +416,20 @@ export function createSession(config: SessionConfig, log: Logger): boolean {
   // Ensure tmux propagates session name as terminal tab title (global option)
   tmux("set-option", "-g", "set-titles", "on");
   tmux("set-option", "-g", "set-titles-string", "#S");
+
+  // Keep the pane (and so its exit status) around after its shell exits, for
+  // agent sessions only — services keep the old fire-and-forget behaviour.
+  //
+  // Without this, tmux tears the session down the moment the shell ends and
+  // operad sees only "the session is gone", which a person typing `exit` and
+  // Android's low-memory killer produce identically. Restarting both meant
+  // reopening sessions the user had just closed; restarting neither would
+  // give up the OOM resilience that is the point of the supervisor. The
+  // status is the only thing that tells them apart. Session-scoped, so a
+  // user's own tmux sessions are untouched.
+  if (getRuntime(type)) {
+    tmux("set-option", "-t", formatTmuxTarget(name), "remain-on-exit", "on");
+  }
 
   // Start the appropriate process inside the session.
   //

@@ -326,17 +326,44 @@ describe("cmdSetAutostart — autostart pins", () => {
     expect(h.state.getAutostartOverrides().beta).toBe(true);
   });
 
-  test("closing a session clears its autostart override", async () => {
+  test("closing a session persists the un-pin instead of deleting it", async () => {
     const path = makeProjectPath("gamma");
     h = makeHarness([makeSession("gamma", path, { enabled: true })]);
     h.state.forceStatus("gamma", "stopped");
 
-    await h.cmds.cmdSetAutostart("gamma", false);
-    expect(h.state.getAutostartOverrides().gamma).toBe(false);
-
     await h.cmds.cmdClose("gamma");
-    // Override gone — a future same-named session won't inherit the pin.
-    expect("gamma" in h.state.getAutostartOverrides()).toBe(false);
+
+    // Deleting the override is what made `close` self-defeating: the next
+    // boot re-derived the same session from Claude's history (a project you
+    // just closed is the MOST recent one) and started it, with the one piece
+    // of state that could have said "no" having just been removed.
+    expect(h.state.getAutostartOverrides().gamma).toBe(false);
+    expect(h.state.getManualCloses()[path]).toBeString();
+  });
+
+  test("closing records the project so boot recency stops resurrecting it", async () => {
+    const path = makeProjectPath("delta");
+    h = makeHarness([makeSession("delta", path, { enabled: true })]);
+    h.state.forceStatus("delta", "stopped");
+
+    await h.cmds.cmdClose("delta");
+    const closedAt = h.state.getManualCloses()[path];
+    expect(closedAt).toBeString();
+    expect(Number.isNaN(Date.parse(closedAt))).toBe(false);
+  });
+
+  test("pinning a closed project cancels the close", async () => {
+    const path = makeProjectPath("epsilon");
+    h = makeHarness([makeSession("epsilon", path, { enabled: true })]);
+    h.state.forceStatus("epsilon", "stopped");
+
+    await h.cmds.cmdSetAutostart("epsilon", false);
+    expect(h.state.getManualCloses()[path]).toBeString();
+
+    await h.cmds.cmdSetAutostart("epsilon", true);
+    // A pin is the strongest "yes" there is — honouring it while boot
+    // discovery still skipped the project would make the ⭐ a no-op.
+    expect(path in h.state.getManualCloses()).toBe(false);
   });
 });
 

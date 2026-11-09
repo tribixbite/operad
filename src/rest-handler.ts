@@ -25,17 +25,21 @@ import type { AgentEngine } from "./agent-engine.js";
 import type { ToolEngine } from "./tool-engine.js";
 import type {
   Switchboard, SessionConfig, ProjectTokenUsage, TokenRange, TokenRangeSummary,
+  SessionType,
 } from "./types.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
 import { buildOodaContext } from "./cognitive.js";
+import { getRuntime } from "./runtimes/index.js";
 import {
   getProjectTokenUsage,
   listClaudeProjects,
   summariseTokenRange,
   getConversationPage,
+  locateConversationEntry,
   readTimeline,
   resolveActiveJsonl,
+  resolveJsonlFiles,
   getDailyCostTimeline,
 } from "./claude-session.js";
 import {
@@ -695,7 +699,21 @@ export class RestHandler {
             }
             return false;
           })();
-          resp = await this.ctx.cmdOpen(name, undefined, false, 50, forceNew);
+          // ?runtime=agy|codex|opencode|claude — which agent to launch.
+          // Validated here rather than passed through: it selects a runtime
+          // adapter, and an unknown value would silently fall back to Claude.
+          const runtimeParam = (() => {
+            let raw = queryParams.get("runtime");
+            if (!raw && body) {
+              try {
+                raw = (JSON.parse(body) as { runtime?: string }).runtime ?? null;
+              } catch { /* ignore non-JSON body */ }
+            }
+            if (!raw) return undefined;
+            const candidate = raw.toLowerCase() as SessionType;
+            return getRuntime(candidate) ? candidate : undefined;
+          })();
+          resp = await this.ctx.cmdOpen(name, undefined, false, 50, forceNew, runtimeParam);
           break;
         }
         case "close":
@@ -909,13 +927,65 @@ export class RestHandler {
             };
           }
           const beforeUuid = queryParams.get("before") ?? undefined;
-          const convLimit = parseInt(queryParams.get("limit") ?? "20", 10);
+          const rawLimit = parseInt(queryParams.get("limit") ?? "20", 10);
+          const convLimit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(rawLimit, 1), 200)
+            : 20;
           const sessionIdParam = queryParams.get("session_id") ?? undefined;
+          // `around=<uuid>` returns the window containing that entry instead
+          // of the newest page — how a historical prompt opens at its own
+          // position rather than at the end of the conversation.
+          const aroundUuid = queryParams.get("around") ?? undefined;
           try {
-            const page = getConversationPage(convPath, sessionIdParam, convLimit, beforeUuid);
+            const page = getConversationPage(
+              convPath, sessionIdParam, convLimit, beforeUuid, aroundUuid,
+            );
             return { status: 200, data: page };
           } catch (err) {
             return { status: 500, data: { error: `Failed to read conversation: ${err}` } };
+          }
+        }
+        case "prompt-locate": {
+          // GET /api/prompt-locate?path=<project>&ts=<epoch-ms>&text=<prompt>
+          //     [&session_id=<uuid>]
+          //
+          // Resolve which conversation (and which entry in it) a prompt from
+          // the library belongs to. history.jsonl only carries a sessionId on
+          // newer entries, and even that can point at a transcript the
+          // retention sweep has since deleted — so the answer has to come
+          // from what is actually on disk.
+          const locPath = queryParams.get("path");
+          if (!locPath) return { status: 400, data: { error: "path required" } };
+          const tsRaw = queryParams.get("ts");
+          const tsNum = tsRaw ? Number(tsRaw) : undefined;
+          const locTs = tsNum !== undefined && Number.isFinite(tsNum) && tsNum > 0
+            ? tsNum
+            : undefined;
+          const locText = queryParams.get("text") ?? undefined;
+          const locSession = queryParams.get("session_id") ?? undefined;
+          if (locTs === undefined && !locSession) {
+            return { status: 400, data: { error: "ts or session_id required" } };
+          }
+          try {
+            const found = locateConversationEntry(locPath, {
+              text: locText,
+              timestamp: locTs,
+              sessionId: locSession,
+            });
+            if (!found) {
+              return {
+                status: 200,
+                data: {
+                  located: false,
+                  reason: resolveJsonlFiles(locPath).length === 0
+                    ? "no-transcripts"
+                    : "not-found",
+                },
+              };
+            }
+            return { status: 200, data: { located: true, ...found } };
+          } catch (err) {
+            return { status: 500, data: { error: `Failed to locate prompt: ${err}` } };
           }
         }
         case "timeline": {

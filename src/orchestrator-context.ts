@@ -1,4 +1,4 @@
-import type { TmxConfig, Switchboard, IpcResponse } from "./types.js";
+import type { TmxConfig, Switchboard, IpcResponse, SessionType } from "./types.js";
 import type { StateManager } from "./state.js";
 import type { MemoryDb } from "./memory-db.js";
 import type { AgentConfig } from "./agents.js";
@@ -192,7 +192,7 @@ export interface CmdDelegates {
   cmdGo: (name: string) => Promise<IpcResponse>;
   cmdSend: (name: string, text: string) => IpcResponse;
   cmdTabs: (names?: string[]) => IpcResponse;
-  cmdOpen: (path: string, name?: string, autoGo?: boolean, priority?: number, forceNew?: boolean) => Promise<IpcResponse>;
+  cmdOpen: (path: string, name?: string, autoGo?: boolean, priority?: number, forceNew?: boolean, runtime?: SessionType) => Promise<IpcResponse>;
   cmdClose: (name: string) => Promise<IpcResponse>;
   cmdSetAutostart: (name: string, enabled: boolean) => Promise<IpcResponse>;
   cmdDedupe: (dryRun?: boolean) => Promise<IpcResponse>;

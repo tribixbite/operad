@@ -33,7 +33,7 @@ import { runHealthSweep } from "./health.js";
 import { computeQuotaStatus } from "./memory-db.js";
 import { computeShutdownOrder } from "./deps.js";
 import { resolveOpenTarget as resolveOpenTargetFn } from "./session-resolver.js";
-import type { SessionConfig } from "./types.js";
+import type { SessionConfig, SessionType } from "./types.js";
 
 /** Format uptime as a human-readable string (e.g., "2h 15m") */
 function formatUptime(start: Date): string {
@@ -186,6 +186,10 @@ export class SessionCommands {
           session: resolved,
         });
       }
+      // An explicit start overrides an earlier exit: the user has asked for
+      // this project again, so stop excluding it from auto-boot.
+      const startPath = sessionConfig?.path ?? this.ctx.resolveSessionPath(resolved);
+      if (startPath) this.ctx.state.clearManualClose(resolve(startPath));
       const success = await this.ctx.startSession(resolved);
       return {
         ok: success,
@@ -441,6 +445,11 @@ export class SessionCommands {
     autoGo = false,
     priority = 50,
     forceNew = false,
+    // Which agent to run. Defaults to Claude Code; `operad open <path>
+    // --runtime agy` (or the REST `?runtime=`) opens the session as that
+    // tool instead, and the choice is persisted in the registry so a
+    // restart or the next boot brings back the same tool.
+    runtime: SessionType = "claude",
   ): Promise<IpcResponse> {
     let resolvedPath: string;
 
@@ -461,6 +470,10 @@ export class SessionCommands {
       }
       resolvedPath = matched;
     }
+
+    // Opening a project is an explicit request for it — it cancels any
+    // earlier exit, so auto-boot picks it up again from here on.
+    this.ctx.state.clearManualClose(resolvedPath);
 
     const baseName = name ?? deriveName(path);
     if (!isValidName(baseName)) {
@@ -560,12 +573,15 @@ export class SessionCommands {
       sessionName = nextSuffix(baseName, existingNames);
     }
 
-    // Add to registry
+    // Add to registry. The runtime goes in with it: the registry is the only
+    // durable record of a dynamically opened session, and an entry without a
+    // type is restored as Claude Code whatever it was.
     const entry = this.ctx.registry.add({
       name: sessionName,
       path: resolvedPath,
       priority,
       auto_go: autoGo,
+      type: runtime,
     });
     if (!entry) {
       return { ok: false, error: `Failed to register session '${sessionName}'` };
@@ -574,7 +590,7 @@ export class SessionCommands {
     // Create SessionConfig and merge into live config
     const sessionConfig: SessionConfig = {
       name: sessionName,
-      type: "claude",
+      type: runtime,
       path: entry.path,
       command: undefined,
       auto_go: autoGo,
@@ -741,6 +757,10 @@ export class SessionCommands {
     const resolved = this.ctx.resolveName(name);
     if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
 
+    // Capture the path BEFORE the config entry is dropped — afterwards there
+    // is nothing left to resolve it from.
+    const closedPath = this.ctx.resolveSessionPath(resolved);
+
     // Stop the session if it's running
     await this.ctx.stopSessionByName(resolved);
 
@@ -758,11 +778,21 @@ export class SessionCommands {
     // Remove session state so it vanishes from dashboard immediately
     this.ctx.state.removeSession(resolved);
 
-    // Drop any persisted autostart pin so a future same-named session
-    // doesn't inherit a stale ⭐ choice.
-    this.ctx.state.clearAutostartOverride(resolved);
+    // Record the close so boot recency stops resurrecting the project, and
+    // persist the un-pin rather than deleting it.
+    //
+    // Clearing the override here is what made `close` self-defeating: the
+    // registry entry went, but the next boot re-derived the very same session
+    // from Claude's history (the project is recent BECAUSE you were just in
+    // it), re-registered it, and started it — with the one piece of state
+    // that could have said "no" having just been deleted.
+    this.ctx.state.setAutostartOverride(resolved, false);
+    if (closedPath) this.ctx.state.recordManualClose(resolve(closedPath));
 
-    this.ctx.log.info(`Closed session '${resolved}'`, { session: resolved });
+    this.ctx.log.info(
+      `Closed session '${resolved}'${closedPath ? ` (${closedPath} excluded from auto-boot)` : ""}`,
+      { session: resolved },
+    );
     return { ok: true, data: `Closed '${resolved}'` };
   }
 
@@ -807,6 +837,15 @@ export class SessionCommands {
     }
 
     this.ctx.state.setAutostartOverride(resolved, enabled);
+    // Pinning is the strongest "yes" there is — it must clear a recorded
+    // exit, or the pin would be honoured while boot discovery still skipped
+    // the project. Un-pinning records one, so the ⭐ toggle and an exit mean
+    // the same thing.
+    const pinPath = cfg?.path ?? this.ctx.resolveSessionPath(resolved);
+    if (pinPath) {
+      if (enabled) this.ctx.state.clearManualClose(resolve(pinPath));
+      else this.ctx.state.recordManualClose(resolve(pinPath));
+    }
     this.ctx.log.info(
       `${enabled ? "Pinned" : "Unpinned"} session '${resolved}' for autostart`,
       { session: resolved },

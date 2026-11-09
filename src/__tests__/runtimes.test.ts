@@ -16,6 +16,12 @@ import { getRuntime, listRuntimes } from "../runtimes/index.js";
 import { claudeRuntime } from "../runtimes/claude.js";
 import { opencodeRuntime } from "../runtimes/opencode.js";
 import { codexRuntime } from "../runtimes/codex.js";
+import { agyRuntime, isValidAgyConversationId } from "../runtimes/agy.js";
+import {
+  detectRuntimeFromArgs,
+  detectRuntimeForPane,
+  parseProcessSnapshot,
+} from "../runtimes/detect.js";
 
 /**
  * Create a throwaway Claude conversation JSONL so the claude adapter's
@@ -65,6 +71,7 @@ describe("runtime registry", () => {
     expect(getRuntime("claude")?.id).toBe("claude");
     expect(getRuntime("opencode")?.id).toBe("opencode");
     expect(getRuntime("codex")?.id).toBe("codex");
+    expect(getRuntime("agy")?.id).toBe("agy");
   });
 
   test("getRuntime returns null for non-agent types", () => {
@@ -74,7 +81,7 @@ describe("runtime registry", () => {
 
   test("listRuntimes enumerates exactly the registered agent runtimes", () => {
     const ids = listRuntimes().map((r) => r.id).sort();
-    expect(ids).toEqual(["claude", "codex", "opencode"]);
+    expect(ids).toEqual(["agy", "claude", "codex", "opencode"]);
   });
 });
 
@@ -220,5 +227,127 @@ describe("codex adapter", () => {
 
   test("readyTimeoutMs is bumped to cover first-run OAuth pause", () => {
     expect(codexRuntime.readyTimeoutMs).toBeGreaterThan(60_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agy (Antigravity) adapter
+// ---------------------------------------------------------------------------
+
+describe("agy adapter", () => {
+  test("resumes the project's most recent conversation by default", () => {
+    expect(agyRuntime.startupCommand(makeConfig({ type: "agy" }))).toBe("agy --continue");
+  });
+
+  test("resumes a specific conversation when one is recorded", () => {
+    const cmd = agyRuntime.startupCommand(makeConfig({ type: "agy", session_id: "conv_01ABCdef-9" }));
+    expect(cmd).toBe("agy --conversation conv_01ABCdef-9");
+  });
+
+  test("ignores an id that could break out of the command", () => {
+    // The value is interpolated into a string a shell will parse, so a
+    // hand-edited registry must not be able to append a second command.
+    for (const bad of ["x; rm -rf /", "a b", "`id`", "$(id)", "'x'", "", "x".repeat(200)]) {
+      expect(isValidAgyConversationId(bad)).toBe(false);
+      expect(agyRuntime.startupCommand(makeConfig({ type: "agy", session_id: bad })))
+        .toBe("agy --continue");
+    }
+  });
+
+  test("accepts the id shapes Antigravity actually emits", () => {
+    for (const ok of ["abc123", "conv_01JAB-CD", "A-B_C", "0"]) {
+      expect(isValidAgyConversationId(ok)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime detection — which agent is actually in the pane
+// ---------------------------------------------------------------------------
+
+describe("detectRuntimeFromArgs", () => {
+  test("recognises each agent's command line", () => {
+    expect(detectRuntimeFromArgs("claude")).toBe("claude");
+    expect(detectRuntimeFromArgs("/data/data/com.termux/files/usr/bin/claude --continue")).toBe("claude");
+    expect(detectRuntimeFromArgs("codex")).toBe("codex");
+    expect(detectRuntimeFromArgs("opencode")).toBe("opencode");
+    expect(detectRuntimeFromArgs("agy --continue")).toBe("agy");
+  });
+
+  test("recognises the Antigravity launcher by its real command line", () => {
+    // The launcher execs node on a path that CONTAINS the word "claude"
+    // (`claude-channel/dist/antigravity-cli.js` on the author's machine), so
+    // order of the signatures decides this one.
+    const args = "/usr/bin/node /home/u/git/termux-tools/claude-channel/dist/antigravity-cli.js run stable";
+    expect(detectRuntimeFromArgs(args)).toBe("agy");
+  });
+
+  test("does not mistake a claude-prefixed path for Claude Code", () => {
+    expect(detectRuntimeFromArgs("/usr/bin/node /home/u/git/claude-channel/dist/other.js")).toBeNull();
+    expect(detectRuntimeFromArgs("vim claude.md")).toBeNull();
+  });
+
+  test("returns null for shells, builds and the daemon itself", () => {
+    expect(detectRuntimeFromArgs("-bash")).toBeNull();
+    expect(detectRuntimeFromArgs("node /home/u/git/operad/dist/tmx.js daemon")).toBeNull();
+    expect(detectRuntimeFromArgs("")).toBeNull();
+  });
+});
+
+describe("parseProcessSnapshot / detectRuntimeForPane", () => {
+  const PS = [
+    "  PID  PPID ARGS",
+    "  100     1 tmux: server",
+    "  200   100 -bash",
+    "  300   200 /usr/bin/node /opt/claude-channel/dist/antigravity-cli.js run stable",
+    "  400   300 rg --files",
+    "  500     1 claude",
+  ].join("\n");
+
+  test("builds the parent→children graph and skips the header", () => {
+    const snap = parseProcessSnapshot(PS);
+    expect(snap.argsByPid.get(200)).toBe("-bash");
+    expect(snap.childrenByPid.get(200)).toEqual([300]);
+    expect(snap.argsByPid.has(NaN)).toBe(false);
+  });
+
+  test("finds the agent running under a pane's shell", () => {
+    expect(detectRuntimeForPane(200, parseProcessSnapshot(PS))).toBe("agy");
+  });
+
+  test("ignores agents outside the pane's own tree", () => {
+    // PID 500 is a bare `claude` reparented to init — not this pane's.
+    const snap = parseProcessSnapshot(PS);
+    expect(detectRuntimeForPane(999, snap)).toBeNull();
+  });
+
+  test("returns null while the pane sits at a bare shell", () => {
+    const snap = parseProcessSnapshot([
+      "  PID  PPID ARGS",
+      "  200   100 -bash",
+    ].join("\n"));
+    expect(detectRuntimeForPane(200, snap)).toBeNull();
+  });
+
+  test("prefers the shallowest agent so a subagent can't win", () => {
+    const snap = parseProcessSnapshot([
+      "  PID  PPID ARGS",
+      "  200   100 -bash",
+      "  300   200 codex",
+      "  400   300 claude -p summarise",
+    ].join("\n"));
+    expect(detectRuntimeForPane(200, snap)).toBe("codex");
+  });
+
+  test("survives a cycle in the reported parent links", () => {
+    // ps output is a snapshot of a moving target; a self-parenting or
+    // looping row must not hang the walk.
+    const snap = parseProcessSnapshot([
+      "  PID  PPID ARGS",
+      "  200   100 -bash",
+      "  300   200 sh -c loop",
+      "  200   300 -bash",
+    ].join("\n"));
+    expect(detectRuntimeForPane(200, snap)).toBeNull();
   });
 });

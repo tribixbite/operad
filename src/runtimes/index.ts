@@ -20,11 +20,13 @@ import type { SessionType } from "../types.js";
 import { claudeRuntime } from "./claude.js";
 import { opencodeRuntime } from "./opencode.js";
 import { codexRuntime } from "./codex.js";
+import { agyRuntime } from "./agy.js";
 
 const REGISTRY: Partial<Record<SessionType, SessionRuntime>> = {
   claude: claudeRuntime,
   opencode: opencodeRuntime,
   codex: codexRuntime,
+  agy: agyRuntime,
 };
 
 /** Resolve a runtime adapter by SessionType. Returns null for non-agent types. */

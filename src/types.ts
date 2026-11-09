@@ -48,6 +48,7 @@ export type SessionType =
   | "claude"
   | "opencode"
   | "codex"
+  | "agy"
   | "daemon"
   | "service";
 
@@ -149,6 +150,15 @@ export interface BootConfig {
   auto_start: number;
   /** Show up to N recent sessions on dashboard with play button (default 10) */
   visible: number;
+  /**
+   * Honour a deliberate exit (default true).
+   *
+   * When an agent session's shell exits, stop supervising it rather than
+   * restarting it, clear its ⭐ pin, and keep boot recency from reopening
+   * the project until it is used again. Set false to get the old behaviour
+   * where any session that goes away is brought back.
+   */
+  respect_manual_exit: boolean;
 }
 
 /** Battery monitoring configuration block */
@@ -437,6 +447,20 @@ export interface TmxState {
    * override (use the resolved default).
    */
   autostart_overrides?: Record<string, boolean>;
+  /**
+   * Projects the user has deliberately closed, keyed by absolute project
+   * path, valued with the ISO time of the close.
+   *
+   * Boot discovery ranks projects purely by their recency in Claude Code's
+   * `history.jsonl`, which has no notion of "and then I quit this one". So
+   * exiting a session put it straight back on the next boot's auto-start
+   * list — and auto-restart brought it back within the same run — with
+   * nothing the user could do short of editing config. A close is now
+   * recorded here and outranks recency until the project is used again
+   * (history activity NEWER than the close means the user came back to it,
+   * so it auto-starts again).
+   */
+  manual_closes?: Record<string, string>;
 }
 
 /** Battery snapshot stored in state */
@@ -475,7 +499,7 @@ export type IpcCommand =
   | { cmd: "tabs"; names?: string[] }
   | { cmd: "config" }
   | { cmd: "memory" }
-  | { cmd: "open"; path: string; name?: string; auto_go?: boolean; priority?: number; force_new?: boolean }
+  | { cmd: "open"; path: string; name?: string; auto_go?: boolean; priority?: number; force_new?: boolean; runtime?: SessionType }
   | { cmd: "dedupe"; dry_run?: boolean }
   | { cmd: "close"; name: string }
   | { cmd: "autostart"; name: string; enabled: boolean }
@@ -539,6 +563,12 @@ export interface HealthResult {
   message: string;
   /** Duration of check in milliseconds */
   duration_ms: number;
+  /**
+   * Set when the session's tmux panes ended without being killed — the
+   * shell was exited. Distinguishes "the user closed this" from "it broke",
+   * which auto-restart has to answer differently.
+   */
+  user_exited?: boolean;
 }
 
 // -- Token tracking -----------------------------------------------------------
@@ -697,6 +727,17 @@ export interface ConversationPage {
   session_id: string;
   /** Available JSONL sessions for the session picker */
   session_list: Array<{ id: string; last_modified: string; title?: string }>;
+  /**
+   * Set when the caller asked for a `session_id` that is not on disk. The
+   * page then holds the project's newest conversation instead, which is a
+   * different conversation from the one requested — callers must say so
+   * rather than present it as the one asked for.
+   */
+  requested_session_missing?: boolean;
+  /** Echoed when the page is the window around this entry. */
+  anchor_uuid?: string;
+  /** Set when an `around` anchor was requested but not found in the file. */
+  anchor_missing?: boolean;
 }
 
 // -- Session timeline ---------------------------------------------------------

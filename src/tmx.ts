@@ -13,11 +13,15 @@ import { Daemon } from "./daemon.js";
 import { loadConfig, findConfigPath, validateConfigFile } from "./config.js";
 import { Logger } from "./log.js";
 import { parseReposConf, generateToml, findReposConf } from "./migrate.js";
-import type { IpcCommand, HealthResult } from "./types.js";
+import type { IpcCommand, HealthResult, SessionType } from "./types.js";
 import type { DaemonStatusData, SessionDetailData, ConfigSessionRow, MemoryData } from "./display-types.js";
 import { parseRecentProjects } from "./registry.js";
 import type { RecentProject } from "./registry.js";
 import { detectPlatform } from "./platform/platform.js";
+import { listRuntimes } from "./runtimes/index.js";
+
+/** Agent runtime ids accepted by `operad open --runtime`. */
+const RUNTIME_IDS: SessionType[] = listRuntimes().map((r) => r.id);
 
 // -- ANSI helpers -------------------------------------------------------------
 
@@ -1576,9 +1580,19 @@ async function runIpcCommand(): Promise<void> {
     case "tabs":
       cmd = { cmd: "tabs", names: subArgs.length ? subArgs : undefined };
       break;
-    case "open":
+    case "open": {
       if (!subArgs[0]) {
-        console.error(`Usage: operad open <path> [--name <n>] [--auto-go] [--priority N] [--new]`);
+        console.error(
+          `Usage: operad open <path> [--name <n>] [--auto-go] [--priority N] [--new] ` +
+          `[--runtime ${RUNTIME_IDS.join("|")}]`,
+        );
+        process.exit(1);
+      }
+      // --runtime picks the agent to launch (default Claude Code) and is
+      // persisted with the session, so a restart brings back the same tool.
+      const runtimeFlag = getFlag(subArgs, "--runtime");
+      if (runtimeFlag && !RUNTIME_IDS.includes(runtimeFlag as SessionType)) {
+        console.error(`Unknown runtime '${runtimeFlag}' — expected one of: ${RUNTIME_IDS.join(", ")}`);
         process.exit(1);
       }
       cmd = {
@@ -1590,8 +1604,10 @@ async function runIpcCommand(): Promise<void> {
         // Without --new, an existing session for the same path is reused/started
         // instead of creating a `<name>-2` duplicate. --new forces multi-instance.
         force_new: subArgs.includes("--new"),
+        runtime: runtimeFlag ? (runtimeFlag as SessionType) : undefined,
       };
       break;
+    }
     case "close":
       if (!subArgs[0]) {
         console.error(`Usage: operad close <name>`);

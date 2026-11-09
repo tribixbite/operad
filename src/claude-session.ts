@@ -54,17 +54,51 @@ interface ModelRates {
   input: number;
   /** USD per million output tokens. */
   output: number;
+  /**
+   * USD per million cache-read tokens, when it is NOT the usual 10% of the
+   * input rate. Published separately for some models and worth carrying: at
+   * Claude Code's cache-read-dominated token mix, the difference between
+   * 10% and 5% of input moves the total by more than any other term.
+   */
+  cacheRead?: number;
 }
 
+/**
+ * Rates as published for the Claude API (2026-11). Cross-checked against the
+ * model table in the `claude-api` skill rather than recalled.
+ *
+ * Two things this table has been wrong about before, both of which read as
+ * plausible numbers rather than as errors:
+ *
+ *  - A MISSING model prices at zero. Every id in the Claude 5.5 generation
+ *    was absent, so a machine running Opus 5.5 — the current default — had
+ *    its entire cost history reported as $0.00 while still counting turns.
+ *  - A WRONG rate is worse than a missing one, because nothing flags it.
+ *    Sonnet 5 was carried at Sonnet 4.6's $3/$15 when it is $2/$10, a 50%
+ *    overstatement on every Sonnet 5 turn ever scanned.
+ *
+ * So: only ids with a rate confirmed from the published table appear here,
+ * and a model that is absent is reported as UNPRICED rather than charged
+ * someone else's rate — see {@link priceBuckets}.
+ */
 const MODEL_RATES: Readonly<Record<string, ModelRates>> = {
+  "claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25 },
+  "claude-mythos-5-1": { input: 10, output: 50, cacheRead: 0.25 },
   "claude-fable-5": { input: 10, output: 50 },
   "claude-mythos-5": { input: 10, output: 50 },
+  "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.20 },
   "claude-opus-5": { input: 5, output: 25 },
   "claude-opus-4-8": { input: 5, output: 25 },
   "claude-opus-4-7": { input: 5, output: 25 },
   "claude-opus-4-6": { input: 5, output: 25 },
-  "claude-sonnet-5": { input: 3, output: 15 },
+  "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.20 },
+  "claude-sonnet-5": { input: 2, output: 10 },
   "claude-sonnet-4-6": { input: 3, output: 15 },
+  // Haiku 5.5's published rate is for prompts up to 100K tokens; beyond that
+  // it is $0.50/$2.50. operad scans per-entry token counts and has no record
+  // of each request's prompt size, so the base rate is used and long-prompt
+  // Haiku traffic is under-counted rather than guessed at.
+  "claude-haiku-5-5": { input: 0.1, output: 0.5 },
   "claude-haiku-4-5": { input: 1, output: 5 },
 };
 
@@ -75,6 +109,9 @@ const MODEL_RATES: Readonly<Record<string, ModelRates>> = {
  * cache-creation tokens were 1-hour writes, which bill at 2x input — so
  * charging every write at the 5m 1.25x rate under-counted the dominant path by
  * 60%. Claude Code records the split under `usage.cache_creation`.
+ *
+ * `read` is the default only: a model whose published cache-read rate is not
+ * 10% of its input rate carries it explicitly in {@link ModelRates}.
  */
 const CACHE_MULTIPLIER = {
   read: 0.1,
@@ -133,10 +170,11 @@ function costOfBuckets(model: string, b: RateBuckets): { cost: number; priced: b
   if (normalizeModelId(model) === SYNTHETIC_MODEL) return { cost: 0, priced: true };
   const r = ratesFor(model);
   if (!r) return { cost: 0, priced: false };
+  const cacheReadRate = r.cacheRead ?? r.input * CACHE_MULTIPLIER.read;
   const usd =
     b.input * r.input
     + b.output * r.output
-    + b.cacheRead * r.input * CACHE_MULTIPLIER.read
+    + b.cacheRead * cacheReadRate
     + b.cacheWrite5m * r.input * CACHE_MULTIPLIER.write5m
     + b.cacheWrite1h * r.input * CACHE_MULTIPLIER.write1h;
   return { cost: usd / 1_000_000, priced: true };
@@ -1296,10 +1334,259 @@ function parseAssistantBlocks(content: unknown[]): { blocks: ConversationBlock[]
   return { blocks, text: textParts.join("\n") };
 }
 
+/** One parsed, displayable JSONL line plus the fields pagination needs. */
+interface RawConversationEntry {
+  uuid: string;
+  type: string;
+  timestamp: string;
+  entry: ConversationEntry;
+}
+
+/**
+ * Parse one JSONL line into a displayable conversation entry.
+ *
+ * Returns null for everything the viewer does not render — file-history
+ * snapshots, progress records, summaries, malformed JSON, and user entries
+ * whose content is empty. Shared by every reader below so the tail, the
+ * anchored window and the prompt locator all agree on what counts as an
+ * entry (they previously could not: only the tail knew the rules).
+ */
+function parseConversationLine(line: string): RawConversationEntry | null {
+  // Quick prefix filter — skip non-conversation entries without parsing.
+  if (line.includes('"type":"file-history-snapshot"') || line.includes('"type": "file-history-snapshot"')) return null;
+  if (line.includes('"type":"progress"') || line.includes('"type": "progress"')) return null;
+
+  try {
+    const raw = JSON.parse(line) as {
+      type?: string;
+      uuid?: string;
+      timestamp?: string;
+      message?: {
+        role?: string;
+        content?: unknown;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+        model?: string;
+        stop_reason?: string | null;
+      };
+    };
+
+    if (!raw.uuid || !raw.type) return null;
+
+    if (raw.type === "user" && raw.message) {
+      const content = extractUserContent(raw.message);
+
+      // A tool_result continuation: no human text, just tool responses.
+      if (!content && Array.isArray(raw.message.content)) {
+        const toolResults = (raw.message.content as Array<{ type?: string; content?: unknown; tool_use_id?: string }>)
+          .filter(b => b.type === "tool_result");
+        if (toolResults.length > 0) {
+          const { blocks } = parseAssistantBlocks(raw.message.content as unknown[]);
+          return {
+            uuid: raw.uuid,
+            type: "tool_result",
+            timestamp: raw.timestamp ?? "",
+            entry: {
+              uuid: raw.uuid,
+              type: "tool_result",
+              timestamp: raw.timestamp ?? "",
+              content: "",
+              blocks,
+            },
+          };
+        }
+      }
+      // Skip truly empty entries with no meaningful content
+      if (!content) return null;
+      return {
+        uuid: raw.uuid,
+        type: "user",
+        timestamp: raw.timestamp ?? "",
+        entry: {
+          uuid: raw.uuid,
+          type: "user",
+          timestamp: raw.timestamp ?? "",
+          content,
+        },
+      };
+    }
+
+    if (raw.type === "assistant" && raw.message) {
+      const contentArr = Array.isArray(raw.message.content) ? raw.message.content : [];
+      const { blocks, text } = parseAssistantBlocks(contentArr);
+      const usage = raw.message.usage;
+
+      return {
+        uuid: raw.uuid,
+        type: "assistant",
+        timestamp: raw.timestamp ?? "",
+        entry: {
+          uuid: raw.uuid,
+          type: "assistant",
+          timestamp: raw.timestamp ?? "",
+          content: text,
+          blocks,
+          usage: usage ? {
+            input: usage.input_tokens ?? 0,
+            output: usage.output_tokens ?? 0,
+            cache_read: usage.cache_read_input_tokens ?? 0,
+            cache_create: usage.cache_creation_input_tokens ?? 0,
+          } : undefined,
+          model: raw.message.model,
+        },
+      };
+    }
+  } catch { /* skip malformed lines */ }
+
+  return null;
+}
+
+/** Chunk size for both line readers. */
+const LINE_CHUNK_SIZE = 65536;
+
+/**
+ * Yield a file's non-empty lines newest-first, lazily.
+ *
+ * Splits on the `\n` BYTE and only decodes complete lines. Decoding each
+ * 64 KB chunk independently — what the previous inline reader did — cuts
+ * multi-byte UTF-8 sequences at the boundary and replaces them with U+FFFD,
+ * silently corrupting one character every chunk.
+ *
+ * Laziness is the point: the caller stops when it has what it needs, so a
+ * deep `beforeUuid` cursor keeps reading instead of giving up after a fixed
+ * window (the old reader collected `limit * 10` lines and then searched them
+ * for the cursor — once paging reached beyond that, every further page came
+ * back empty with `has_more: true`, so the viewer could not page back more
+ * than a few hundred entries no matter how long the conversation was).
+ */
+function* readLinesBackward(fd: number, size: number): Generator<string> {
+  let offset = size;
+  // Bytes of a line whose start lies in a chunk we have not read yet.
+  // Explicitly typed: `subarray()` widens to Buffer<ArrayBufferLike>, which
+  // the Buffer<ArrayBuffer> inferred from `alloc()` would reject.
+  let carry: Buffer = Buffer.alloc(0);
+
+  while (offset > 0) {
+    const readSize = Math.min(LINE_CHUNK_SIZE, offset);
+    offset -= readSize;
+    const buf = Buffer.alloc(readSize);
+    readSync(fd, buf, 0, readSize, offset);
+    const combined = carry.length > 0 ? Buffer.concat([buf, carry]) : buf;
+
+    const segments: Buffer[] = [];
+    let start = 0;
+    for (let i = 0; i < combined.length; i++) {
+      if (combined[i] === 0x0a) {
+        segments.push(combined.subarray(start, i));
+        start = i + 1;
+      }
+    }
+    segments.push(combined.subarray(start));
+
+    // The first segment is only a complete line once we're at the file start.
+    carry = offset > 0 ? (segments.shift() ?? Buffer.alloc(0)) : Buffer.alloc(0);
+
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const line = segments[i].toString("utf-8").trim();
+      if (line) yield line;
+    }
+  }
+
+  if (carry.length > 0) {
+    const line = carry.toString("utf-8").trim();
+    if (line) yield line;
+  }
+}
+
+/**
+ * Yield a file's non-empty lines oldest-first, lazily. Byte-level split for
+ * the same reason as `readLinesBackward`.
+ */
+function* readLinesForward(fd: number, size: number): Generator<string> {
+  let offset = 0;
+  // Bytes of a line whose end lies in a chunk we have not read yet.
+  let carry: Buffer = Buffer.alloc(0);
+
+  while (offset < size) {
+    const readSize = Math.min(LINE_CHUNK_SIZE, size - offset);
+    const buf = Buffer.alloc(readSize);
+    readSync(fd, buf, 0, readSize, offset);
+    offset += readSize;
+    const combined = carry.length > 0 ? Buffer.concat([carry, buf]) : buf;
+
+    let start = 0;
+    for (let i = 0; i < combined.length; i++) {
+      if (combined[i] === 0x0a) {
+        const line = combined.subarray(start, i).toString("utf-8").trim();
+        start = i + 1;
+        if (line) yield line;
+      }
+    }
+    carry = combined.subarray(start);
+  }
+
+  if (carry.length > 0) {
+    const line = carry.toString("utf-8").trim();
+    if (line) yield line;
+  }
+}
+
+/**
+ * Visit a JSONL file's non-empty lines without loading it into memory.
+ *
+ * `reverse` walks newest-first. `visit` returning `false` stops the walk, so
+ * a caller that wants the last N of something reads only the tail.
+ *
+ * Transcripts here run to tens of megabytes (2.8 GB across 459 files on the
+ * author's machine), and `readFileSync(...).split("\n")` costs the file
+ * twice over in V8 strings. On a phone whose low-memory killer is already
+ * taking processes, a boot-time scan that does that for every recently
+ * active session is a self-inflicted memory spike.
+ */
+export function forEachJsonlLine(
+  path: string,
+  visit: (line: string) => boolean | void,
+  opts: { reverse?: boolean } = {},
+): void {
+  if (!existsSync(path)) return;
+  let st;
+  try {
+    st = statSync(path);
+  } catch {
+    return;
+  }
+  if (!st.isFile() || st.size === 0) return;
+
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const lines = opts.reverse
+      ? readLinesBackward(fd, st.size)
+      : readLinesForward(fd, st.size);
+    for (const line of lines) {
+      if (visit(line) === false) return;
+    }
+  } catch { /* unreadable — treat as empty */ } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
 /**
  * Read conversation entries from the tail of a JSONL file.
- * Reads backwards in 64KB chunks for efficiency on large files.
- * Coalesces streaming assistant entries (stop_reason: null → keep only final).
+ *
+ * Reads backwards lazily and stops as soon as it has `limit` entries past
+ * `beforeUuid`. `hasMore` means "at least one older entry exists", and is
+ * answered by actually finding one rather than by guessing from how many
+ * lines happened to be buffered.
+ *
+ * A `beforeUuid` that isn't in the file (a stale cursor, or a cursor from a
+ * different conversation) yields an empty page with `hasMore: false` — the
+ * honest answer. It used to return empty with `hasMore: true`, which left
+ * the dashboard's "load older" button live but permanently unable to advance.
  */
 export function readConversationTail(
   jsonlPath: string,
@@ -1311,166 +1598,27 @@ export function readConversationTail(
   const st = statSync(jsonlPath);
   if (st.size === 0) return { entries: [], hasMore: false };
 
-  // Read file in reverse 64KB chunks to find entries near the tail
-  const CHUNK_SIZE = 65536;
   const fd = openSync(jsonlPath, "r");
   const entries: ConversationEntry[] = [];
-  let reachedBeforeUuid = !beforeUuid; // If no cursor, start from end
+  let reachedBeforeUuid = !beforeUuid; // If no cursor, start from the end
   let hasMore = false;
 
   try {
-    let offset = st.size;
-    let remainder = "";
-    const linesToParse: string[] = [];
+    for (const line of readLinesBackward(fd, st.size)) {
+      const raw = parseConversationLine(line);
+      if (!raw) continue;
 
-    // Collect enough lines by reading backwards
-    while (offset > 0 && linesToParse.length < limit * 10) {
-      const readSize = Math.min(CHUNK_SIZE, offset);
-      offset -= readSize;
-      const buf = Buffer.alloc(readSize);
-      readSync(fd, buf, 0, readSize, offset);
-      const chunk = buf.toString("utf-8") + remainder;
-      const lines = chunk.split("\n");
-
-      // First element may be partial (unless we're at file start)
-      remainder = offset > 0 ? (lines.shift() ?? "") : "";
-
-      // Add lines in reverse order (most recent first)
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i].trim();
-        if (line) linesToParse.push(line);
-      }
-
-      if (linesToParse.length >= limit * 10) break;
-    }
-
-    // If there's still a remainder from the very beginning of the file
-    if (remainder.trim()) {
-      linesToParse.push(remainder.trim());
-    }
-
-    // Parse lines (already in reverse chronological order) and collect entries
-    // We need to coalesce streaming assistant messages and track UUIDs
-    const rawEntries: Array<{
-      uuid: string;
-      type: string;
-      timestamp: string;
-      entry: ConversationEntry;
-    }> = [];
-
-    for (const line of linesToParse) {
-      // Quick prefix filter — skip non-conversation entries
-      if (line.includes('"type":"file-history-snapshot"') || line.includes('"type": "file-history-snapshot"')) continue;
-      if (line.includes('"type":"progress"') || line.includes('"type": "progress"')) continue;
-
-      try {
-        const raw = JSON.parse(line) as {
-          type?: string;
-          uuid?: string;
-          timestamp?: string;
-          message?: {
-            role?: string;
-            content?: unknown;
-            usage?: {
-              input_tokens?: number;
-              output_tokens?: number;
-              cache_read_input_tokens?: number;
-              cache_creation_input_tokens?: number;
-            };
-            model?: string;
-            stop_reason?: string | null;
-          };
-        };
-
-        if (!raw.uuid || !raw.type) continue;
-
-        if (raw.type === "user" && raw.message) {
-          const content = extractUserContent(raw.message);
-
-          // Check if this is a tool_result continuation (no human text, just tool responses)
-          if (!content && Array.isArray(raw.message.content)) {
-            const toolResults = (raw.message.content as Array<{ type?: string; content?: unknown; tool_use_id?: string }>)
-              .filter(b => b.type === "tool_result");
-            if (toolResults.length > 0) {
-              // Parse as tool_result entries
-              const { blocks } = parseAssistantBlocks(raw.message.content as unknown[]);
-              rawEntries.push({
-                uuid: raw.uuid,
-                type: "tool_result",
-                timestamp: raw.timestamp ?? "",
-                entry: {
-                  uuid: raw.uuid,
-                  type: "tool_result",
-                  timestamp: raw.timestamp ?? "",
-                  content: "",
-                  blocks,
-                },
-              });
-              continue;
-            }
-          }
-          // Skip truly empty entries with no meaningful content
-          if (!content) continue;
-          rawEntries.push({
-            uuid: raw.uuid,
-            type: "user",
-            timestamp: raw.timestamp ?? "",
-            entry: {
-              uuid: raw.uuid,
-              type: "user",
-              timestamp: raw.timestamp ?? "",
-              content,
-            },
-          });
-        } else if (raw.type === "assistant" && raw.message) {
-          const contentArr = Array.isArray(raw.message.content) ? raw.message.content : [];
-          const { blocks, text } = parseAssistantBlocks(contentArr);
-          const usage = raw.message.usage;
-
-          rawEntries.push({
-            uuid: raw.uuid,
-            type: "assistant",
-            timestamp: raw.timestamp ?? "",
-            entry: {
-              uuid: raw.uuid,
-              type: "assistant",
-              timestamp: raw.timestamp ?? "",
-              content: text,
-              blocks,
-              usage: usage ? {
-                input: usage.input_tokens ?? 0,
-                output: usage.output_tokens ?? 0,
-                cache_read: usage.cache_read_input_tokens ?? 0,
-                cache_create: usage.cache_creation_input_tokens ?? 0,
-              } : undefined,
-              model: raw.message.model,
-            },
-          });
-        }
-      } catch { /* skip malformed lines */ }
-    }
-
-    // Claude Code writes one JSONL line per API call — no streaming partials.
-    // rawEntries are in reverse chronological order (newest first).
-    // Apply beforeUuid cursor and limit.
-    for (const raw of rawEntries) {
       if (!reachedBeforeUuid) {
-        if (raw.uuid === beforeUuid) {
-          reachedBeforeUuid = true;
-        }
+        if (raw.uuid === beforeUuid) reachedBeforeUuid = true;
         continue;
       }
 
-      entries.push(raw.entry);
       if (entries.length >= limit) {
+        // One more entry exists beyond this page — that's all `hasMore` claims.
         hasMore = true;
         break;
       }
-    }
-
-    // Check if there are more entries beyond what we collected
-    if (!hasMore && entries.length < rawEntries.length - (beforeUuid ? 1 : 0)) {
-      hasMore = true;
+      entries.push(raw.entry);
     }
   } finally {
     closeSync(fd);
@@ -1481,14 +1629,207 @@ export function readConversationTail(
   return { entries, hasMore };
 }
 
+/** How many entries after the anchor an anchored window keeps. */
+const ANCHOR_TRAILING_ENTRIES = 4;
+
+/**
+ * Read the window of a conversation around one entry.
+ *
+ * The dashboard's "open the conversation this prompt came from" flow needs
+ * the page that CONTAINS a given entry, not the newest page. Paging back to
+ * it from the tail is hopeless for an old prompt — a long conversation holds
+ * thousands of entries — so this scans forward once, keeping only a ring
+ * buffer of the most recent `limit` entries, and returns the window ending
+ * just after the anchor.
+ *
+ * `found` is false when the uuid isn't in this file; callers then fall back
+ * rather than silently presenting an unrelated page as the requested one.
+ */
+export function readConversationWindow(
+  jsonlPath: string,
+  anchorUuid: string,
+  limit = 20,
+): { entries: ConversationEntry[]; hasMore: boolean; found: boolean } {
+  if (!existsSync(jsonlPath)) return { entries: [], hasMore: false, found: false };
+
+  const st = statSync(jsonlPath);
+  if (st.size === 0) return { entries: [], hasMore: false, found: false };
+
+  const trailing = Math.min(ANCHOR_TRAILING_ENTRIES, Math.max(0, limit - 1));
+  const leading = Math.max(1, limit - trailing);
+
+  const fd = openSync(jsonlPath, "r");
+  const ring: ConversationEntry[] = [];
+  let hasMore = false;
+  let found = false;
+  let afterAnchor = 0;
+
+  try {
+    for (const line of readLinesForward(fd, st.size)) {
+      const raw = parseConversationLine(line);
+      if (!raw) continue;
+
+      if (!found) {
+        ring.push(raw.entry);
+        // Keep only the `leading` most recent entries; anything evicted is an
+        // older entry the caller can still page back to.
+        if (ring.length > leading) {
+          ring.shift();
+          hasMore = true;
+        }
+        if (raw.uuid === anchorUuid) found = true;
+        continue;
+      }
+
+      if (afterAnchor >= trailing) break;
+      ring.push(raw.entry);
+      afterAnchor++;
+    }
+  } finally {
+    closeSync(fd);
+  }
+
+  if (!found) return { entries: [], hasMore: false, found: false };
+  return { entries: ring, hasMore, found: true };
+}
+
+/** Where a prompt's text actually lives in a project's transcripts. */
+export interface ConversationLocation {
+  /** Claude session id (the JSONL file's basename). */
+  session_id: string;
+  /** The matching entry's uuid — the anchor to scroll to. */
+  uuid: string;
+  /** The matching entry's ISO timestamp. */
+  timestamp: string;
+}
+
+/** Default half-width of the timestamp window a prompt is matched within. */
+const LOCATE_WINDOW_MS = 120_000;
+
+/** Collapse whitespace so a transcript's reflowed text still compares equal. */
+function normaliseForMatch(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Find which conversation a prompt came from, and which entry it is.
+ *
+ * `~/.claude/history.jsonl` — the prompt library's source — records the text,
+ * the timestamp and the project, and a `sessionId` on newer entries only
+ * (3,803 of 12,315 lines on the author's machine have none). Without a
+ * session id there is nothing to open but "the project's newest
+ * conversation", which is why clicking an old prompt landed on today's
+ * session. This recovers the real one by searching the project's transcripts
+ * for the user turn that matches.
+ *
+ * Scanning is bounded: a transcript can only hold the prompt if it was still
+ * being written at/after that moment, so files whose mtime predates the
+ * prompt are skipped without being opened.
+ */
+export function locateConversationEntry(
+  projectPath: string,
+  opts: { text?: string; timestamp?: number; sessionId?: string; windowMs?: number },
+): ConversationLocation | null {
+  const { text, timestamp, sessionId } = opts;
+  const windowMs = opts.windowMs ?? LOCATE_WINDOW_MS;
+  if (timestamp === undefined && !sessionId) return null;
+
+  const files = resolveJsonlFiles(projectPath);
+  if (files.length === 0) return null;
+
+  // Try the recorded session first — it's almost always the answer — then the
+  // other transcripts whose lifetime could span the prompt's timestamp. Both
+  // ends matter: a transcript last written before the prompt cannot contain
+  // it, and neither can one that only STARTED afterwards. Without the second
+  // test, locating a year-old prompt scanned every surviving transcript in
+  // the project end to end (4.2 s for ten files) to prove a negative.
+  const preferred = sessionId ? files.filter(f => f.id === sessionId) : [];
+  const rest = files.filter(f => {
+    if (sessionId && f.id === sessionId) return false;
+    if (timestamp === undefined) return false;
+    if (f.mtime < timestamp - windowMs) return false;
+    const start = readConversationStartTime(f.path);
+    return start === null || start <= timestamp + windowMs;
+  });
+  const candidates = [...preferred, ...rest];
+  if (candidates.length === 0) return null;
+
+  const wantedText = text ? normaliseForMatch(text) : null;
+  let best: { loc: ConversationLocation; score: number } | null = null;
+
+  for (const file of candidates) {
+    let fd: number | undefined;
+    try {
+      const st = statSync(file.path);
+      if (st.size === 0) continue;
+      fd = openSync(file.path, "r");
+      for (const line of readLinesForward(fd, st.size)) {
+        if (!line.includes('"type":"user"') && !line.includes('"type": "user"')) continue;
+        const raw = parseConversationLine(line);
+        if (!raw || raw.type !== "user") continue;
+
+        const entryTs = raw.timestamp ? new Date(raw.timestamp).getTime() : NaN;
+        const dt = timestamp !== undefined && Number.isFinite(entryTs)
+          ? Math.abs(entryTs - timestamp)
+          : Number.POSITIVE_INFINITY;
+        if (timestamp !== undefined && dt > windowMs) continue;
+
+        // Slash commands are expanded in the transcript (`/model` becomes a
+        // <command-name> block), so an exact match can't be required — but a
+        // text match still outranks every timestamp-only candidate.
+        let textMatch = false;
+        if (wantedText) {
+          const have = normaliseForMatch(raw.entry.content);
+          if (have === wantedText) {
+            textMatch = true;
+          } else if (wantedText.length >= 12 && (have.includes(wantedText) || wantedText.includes(have))) {
+            textMatch = true;
+          } else if (wantedText.length >= 2 && dt <= 10_000 && have.includes(wantedText)) {
+            // A short prompt ("/exit") is too generic to match on text alone,
+            // but containment within seconds of the recorded time is the same
+            // turn — and settling it here avoids scanning the rest of the file.
+            textMatch = true;
+          }
+        }
+        if (!textMatch && timestamp === undefined) continue;
+
+        const score = (textMatch ? 0 : 1e9) + (Number.isFinite(dt) ? dt : 1e8);
+        if (!best || score < best.score) {
+          best = {
+            score,
+            loc: { session_id: file.id, uuid: raw.uuid, timestamp: raw.timestamp },
+          };
+        }
+        // Matching text within seconds of the recorded time IS the turn —
+        // stop rather than read the rest of a multi-megabyte transcript.
+        if (textMatch && dt <= 10_000) return best.loc;
+      }
+    } catch { /* unreadable transcript — try the next */ } finally {
+      if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+    }
+  }
+
+  return best?.loc ?? null;
+}
+
 /**
  * Get a paginated conversation page for a session.
+ *
+ * `aroundUuid` returns the window containing that entry instead of the tail —
+ * how the prompt library opens the conversation a historical prompt came from.
+ *
+ * When a requested `sessionId` is not on disk the newest conversation is still
+ * served (there is nothing else to show), but the page says so via
+ * `requested_session_missing`. It used to substitute silently, so a prompt
+ * whose transcript Claude Code's retention sweep had deleted looked exactly
+ * like one that opened correctly — the caller had no way to tell the user.
  */
 export function getConversationPage(
   projectPath: string,
   sessionId?: string,
   limit = 20,
   beforeUuid?: string,
+  aroundUuid?: string,
 ): ConversationPage {
   const files = resolveJsonlFiles(projectPath);
   const sessionList = files.map(f => {
@@ -1505,6 +1846,7 @@ export function getConversationPage(
   if (sessionId) {
     jsonlFile = files.find(f => f.id === sessionId) ?? null;
   }
+  const requestedMissing = !!sessionId && jsonlFile === null;
   if (!jsonlFile) {
     jsonlFile = resolveActiveJsonl(projectPath);
   }
@@ -1516,7 +1858,24 @@ export function getConversationPage(
       has_more: false,
       session_id: "",
       session_list: sessionList,
+      ...(requestedMissing ? { requested_session_missing: true } : {}),
     };
+  }
+
+  // Anchored read: only meaningful against the file that actually holds the
+  // anchor, so don't attempt it on a fallback conversation.
+  if (aroundUuid && !requestedMissing) {
+    const window = readConversationWindow(jsonlFile.path, aroundUuid, limit);
+    if (window.found) {
+      return {
+        entries: window.entries,
+        oldest_uuid: window.entries.length > 0 ? window.entries[0].uuid : null,
+        has_more: window.hasMore,
+        session_id: jsonlFile.id,
+        session_list: sessionList,
+        anchor_uuid: aroundUuid,
+      };
+    }
   }
 
   const { entries, hasMore } = readConversationTail(jsonlFile.path, limit, beforeUuid);
@@ -1527,6 +1886,8 @@ export function getConversationPage(
     has_more: hasMore,
     session_id: jsonlFile.id,
     session_list: sessionList,
+    ...(requestedMissing ? { requested_session_missing: true } : {}),
+    ...(aroundUuid ? { anchor_missing: true } : {}),
   };
 }
 
@@ -1577,39 +1938,39 @@ export function readTimeline(
     } catch { /* trace unreadable */ }
   }
 
-  // 2. Parse JSONL user entries for conversation events
-  if (jsonlPath && existsSync(jsonlPath)) {
-    try {
-      const content = readFileSync(jsonlPath, "utf-8");
-      const lines = content.split("\n");
+  // 2. Parse JSONL user entries for conversation events.
+  //
+  // Walked backwards and stopped at the limit rather than read whole: only
+  // the newest entries can survive the sort-and-slice below, and a 9.5 MB
+  // active transcript (bigger on older projects) cost ~20 MB of strings per
+  // timeline request to produce at most `limit * 3` of them.
+  if (jsonlPath) {
+    const wanted = limit * 3;
+    forEachJsonlLine(jsonlPath, (line) => {
+      // Quick prefix check
+      if (!line.includes('"type":"user"') && !line.includes('"type": "user"')) return;
 
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i];
-        // Quick prefix check
-        if (!line.includes('"type":"user"') && !line.includes('"type": "user"')) continue;
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string;
+          timestamp?: string;
+          message?: { content?: unknown };
+        };
+        if (entry.type !== "user" || !entry.timestamp) return;
 
-        try {
-          const entry = JSON.parse(line) as {
-            type?: string;
-            timestamp?: string;
-            message?: { content?: unknown };
-          };
-          if (entry.type !== "user" || !entry.timestamp) continue;
+        if (sinceDate && new Date(entry.timestamp) < sinceDate) return;
 
-          if (sinceDate && new Date(entry.timestamp) < sinceDate) continue;
+        const content = extractUserContent(entry.message ?? {});
+        events.push({
+          timestamp: entry.timestamp,
+          source: "conversation",
+          event: "User prompt",
+          detail: truncate(content, 80),
+        });
 
-          const content = extractUserContent(entry.message ?? {});
-          events.push({
-            timestamp: entry.timestamp,
-            source: "conversation",
-            event: "User prompt",
-            detail: truncate(content, 80),
-          });
-
-          if (events.length >= limit * 3) break;
-        } catch { /* skip malformed */ }
-      }
-    } catch { /* jsonl unreadable */ }
+        if (events.length >= wanted) return false;
+      } catch { /* skip malformed */ }
+    }, { reverse: true });
   }
 
   // Sort by timestamp descending and limit
@@ -1683,12 +2044,11 @@ export async function getDailyCostTimeline(
       // Skip files not modified within the window
       if (file.mtime < cutoff) continue;
 
-      // Stream-parse the JSONL file
-      const content = readFileSync(file.path, "utf-8");
-      const lines = content.split("\n");
-
-      for (const line of lines) {
-        if (!line.includes('"type":"assistant"') && !line.includes('"type": "assistant"')) continue;
+      // Streamed, not read whole: the comment said "stream-parse" while
+      // `readFileSync(...).split()` held the entire transcript plus a line
+      // array in memory, once per file, for every project in the window.
+      forEachJsonlLine(file.path, (line) => {
+        if (!line.includes('"type":"assistant"') && !line.includes('"type": "assistant"')) return;
 
         try {
           const raw = JSON.parse(line) as {
@@ -1710,14 +2070,14 @@ export async function getDailyCostTimeline(
             };
           };
 
-          if (raw.type !== "assistant" || !raw.timestamp) continue;
+          if (raw.type !== "assistant" || !raw.timestamp) return;
 
           const ts = new Date(raw.timestamp);
-          if (ts.getTime() < cutoff) continue;
+          if (ts.getTime() < cutoff) return;
 
           const dateKey = ts.toISOString().slice(0, 10); // YYYY-MM-DD
           const usage = raw.message?.usage;
-          if (!usage) continue;
+          if (!usage) return;
 
           // Priced against this entry's own model, like the main scanner.
           // An unpriced model contributes 0 rather than being charged an
@@ -1770,7 +2130,7 @@ export async function getDailyCostTimeline(
         } catch {
           // Skip malformed lines
         }
-      }
+      });
     }
   }
 

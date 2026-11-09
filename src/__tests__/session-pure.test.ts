@@ -2,7 +2,9 @@
  * session-pure.test.ts
  *
  * Tests for the pure, IO-free helpers extracted from session.ts:
- *   - formatTmuxTarget()  — constructs the `=name` / `=name:` sigil correctly
+ *   - formatTmuxTarget()     — constructs the `=name` / `=name:` sigil correctly
+ *   - classifyPaneLiveness() — reads a session's pane liveness out of tmux's
+ *     `list-panes` output, which is what tells a deliberate exit from a crash
  *
  * Context: tmux has two target namespaces with different sigil requirements.
  *
@@ -23,7 +25,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { formatTmuxTarget } from "../session.js";
+import { formatTmuxTarget, classifyPaneLiveness } from "../session.js";
 
 // ---------------------------------------------------------------------------
 // formatTmuxTarget
@@ -122,5 +124,71 @@ describe("formatTmuxTarget", () => {
   test("all-numeric name is preserved", () => {
     expect(formatTmuxTarget("12345")).toBe("=12345");
     expect(formatTmuxTarget("12345", true)).toBe("=12345:");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyPaneLiveness
+// ---------------------------------------------------------------------------
+// This decides whether a session that stopped running anything gets
+// restarted. Reading every dead pane as a crash meant operad reopened
+// sessions the user had just exited; reading every dead pane as an exit
+// would give up the OOM resilience the supervisor exists for.
+
+describe("classifyPaneLiveness", () => {
+  test("any live pane means the session is alive", () => {
+    expect(classifyPaneLiveness("0||").state).toBe("alive");
+    expect(classifyPaneLiveness("1|0|\n0||").state).toBe("alive");
+  });
+
+  test("no rows means the session is gone", () => {
+    expect(classifyPaneLiveness("").state).toBe("missing");
+    expect(classifyPaneLiveness("\n  \n").state).toBe("missing");
+  });
+
+  test("a dead pane with a zero status is an exit", () => {
+    const r = classifyPaneLiveness("1|0|");
+    expect(r.state).toBe("exited");
+    expect(r.state === "exited" && r.status).toBe(0);
+  });
+
+  test("a dead pane with empty status fields is still an exit", () => {
+    // tmux 3.5a on Termux reports `pane_dead` but leaves the status and
+    // signal fields empty, so "dead and nothing says it was killed" has to
+    // read as an exit rather than as an unknown.
+    expect(classifyPaneLiveness("1||").state).toBe("exited");
+  });
+
+  test("a signalled pane is a crash", () => {
+    const r = classifyPaneLiveness("1||9");
+    expect(r.state).toBe("killed");
+    expect(r.state === "killed" && r.signal).toBe(9);
+  });
+
+  test("a named signal is a crash too", () => {
+    // Some builds report the signal by name.
+    const r = classifyPaneLiveness("1||KILL");
+    expect(r.state).toBe("killed");
+  });
+
+  test("a non-zero exit status is a crash", () => {
+    const r = classifyPaneLiveness("1|7|");
+    expect(r.state).toBe("killed");
+    expect(r.state === "killed" && r.status).toBe(7);
+  });
+
+  test("an empty middle field does not shift the signal into the status", () => {
+    // With a space-separated format, a pane killed by signal 9 and no status
+    // arrives as "1  9" — the empty field collapses and the signal reads as
+    // an exit status, flipping the restart decision. The pipe-separated
+    // format keeps the positions.
+    const r = classifyPaneLiveness("1||9");
+    expect(r.state).toBe("killed");
+    expect(r.state === "killed" && r.signal).toBe(9);
+    expect(r.state === "killed" && r.status).toBeUndefined();
+  });
+
+  test("one killed pane among exited ones is a crash", () => {
+    expect(classifyPaneLiveness("1|0|\n1||9").state).toBe("killed");
   });
 });

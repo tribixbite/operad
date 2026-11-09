@@ -368,7 +368,22 @@ export interface ConversationPage {
   has_more: boolean;
   session_id: string;
   session_list: Array<{ id: string; last_modified: string; title?: string }>;
+  /**
+   * The requested `session_id` is not on disk — these entries are the
+   * project's newest conversation, NOT the one asked for. Surface it; a
+   * silent substitution is indistinguishable from a correct open.
+   */
+  requested_session_missing?: boolean;
+  /** The page is the window around this entry. */
+  anchor_uuid?: string;
+  /** An `around` anchor was requested but not present in the transcript. */
+  anchor_missing?: boolean;
 }
+
+/** Where a library prompt lives in a project's transcripts. */
+export type PromptLocation =
+  | { located: true; session_id: string; uuid: string; timestamp: string }
+  | { located: false; reason: "no-transcripts" | "not-found" };
 
 // -- Session timeline ---------------------------------------------------------
 

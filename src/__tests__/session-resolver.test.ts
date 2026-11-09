@@ -59,7 +59,7 @@ function makeClaudeSession(name: string, path: string, overrides: Partial<Sessio
 function makeConfig(sessions: SessionConfig[], boot?: Partial<BootConfig>): TmxConfig {
   return {
     sessions,
-    boot: { auto_start: 6, visible: 10, ...boot },
+    boot: { auto_start: 6, visible: 10, respect_manual_exit: true, ...boot },
   } as TmxConfig;
 }
 
@@ -503,5 +503,101 @@ describe("resolveBootSessions — registry auto-registration side-effect", () =>
     // with no extra registry entry added for it (unless the real history triggers
     // a named-session Phase 2 entry, which requires a JSONL file scan).
     expect(cfg.sessions.filter((s) => s.name === "already-configured").length).toBe(1);
+  });
+});
+
+// =============================================================================
+// resolveBootSessions — deliberate closes outrank recency
+// =============================================================================
+// Boot discovery ranks projects by their recency in Claude Code's
+// history.jsonl, which cannot express "and then I quit this one". A project
+// you just exited is by definition the most recent, so exiting a session was
+// the surest way to have it auto-started again on the next boot.
+
+describe("resolveBootSessions — manual closes", () => {
+  /** history.jsonl holding one prompt for `projPath` at `whenMs`. */
+  function seedHistory(projPath: string, whenMs: number): string {
+    const historyPath = join(tmpDir, "closed-history.jsonl");
+    writeFileSync(
+      historyPath,
+      JSON.stringify({ display: "do the thing", timestamp: whenMs, project: projPath }) + "\n",
+    );
+    return historyPath;
+  }
+
+  test("a closed project is not auto-registered or started", () => {
+    const projPath = join(tmpDir, "closed-proj");
+    mkdirSync(projPath, { recursive: true });
+    const closedAt = Date.now();
+    const historyPath = seedHistory(projPath, closedAt - 60_000);
+
+    const cfg = makeConfig([], { auto_start: 3, visible: 5 });
+    const reg = new Registry(join(tmpDir, "closed-reg.json"));
+    const state = new StateManager(join(tmpDir, "closed-state.json"), silentLog());
+    state.recordManualClose(resolve(projPath), new Date(closedAt));
+
+    resolveBootSessions(cfg, reg, state, silentLog(), historyPath);
+
+    expect(cfg.sessions.find((s) => s.path === resolve(projPath))).toBeUndefined();
+    expect(reg.findByPath(projPath)).toBeUndefined();
+  });
+
+  test("using the project again overrides the close", () => {
+    const projPath = join(tmpDir, "revived-proj");
+    mkdirSync(projPath, { recursive: true });
+    const closedAt = Date.now() - 3_600_000;
+    // Activity AFTER the close: the user went back to this project.
+    const historyPath = seedHistory(projPath, closedAt + 600_000);
+
+    const cfg = makeConfig([], { auto_start: 3, visible: 5 });
+    const reg = new Registry(join(tmpDir, "revived-reg.json"));
+    const state = new StateManager(join(tmpDir, "revived-state.json"), silentLog());
+    state.recordManualClose(resolve(projPath), new Date(closedAt));
+
+    resolveBootSessions(cfg, reg, state, silentLog(), historyPath);
+
+    expect(cfg.sessions.find((s) => s.path === resolve(projPath))).toBeDefined();
+  });
+
+  test("respect_manual_exit=false restores the old always-reopen behaviour", () => {
+    const projPath = join(tmpDir, "ignored-close-proj");
+    mkdirSync(projPath, { recursive: true });
+    const closedAt = Date.now();
+    const historyPath = seedHistory(projPath, closedAt - 60_000);
+
+    const cfg = makeConfig([], { auto_start: 3, visible: 5, respect_manual_exit: false });
+    const reg = new Registry(join(tmpDir, "ignored-reg.json"));
+    const state = new StateManager(join(tmpDir, "ignored-state.json"), silentLog());
+    state.recordManualClose(resolve(projPath), new Date(closedAt));
+
+    resolveBootSessions(cfg, reg, state, silentLog(), historyPath);
+
+    expect(cfg.sessions.find((s) => s.path === resolve(projPath))).toBeDefined();
+  });
+
+  test("an unrelated project is unaffected by another's close", () => {
+    const closedPath = join(tmpDir, "closed-one");
+    const openPath = join(tmpDir, "open-one");
+    mkdirSync(closedPath, { recursive: true });
+    mkdirSync(openPath, { recursive: true });
+    const now = Date.now();
+    const historyPath = join(tmpDir, "two-history.jsonl");
+    writeFileSync(
+      historyPath,
+      [
+        JSON.stringify({ display: "a", timestamp: now - 120_000, project: closedPath }),
+        JSON.stringify({ display: "b", timestamp: now - 60_000, project: openPath }),
+      ].join("\n") + "\n",
+    );
+
+    const cfg = makeConfig([], { auto_start: 3, visible: 5 });
+    const reg = new Registry(join(tmpDir, "two-reg.json"));
+    const state = new StateManager(join(tmpDir, "two-state.json"), silentLog());
+    state.recordManualClose(resolve(closedPath), new Date(now));
+
+    resolveBootSessions(cfg, reg, state, silentLog(), historyPath);
+
+    expect(cfg.sessions.find((s) => s.path === resolve(closedPath))).toBeUndefined();
+    expect(cfg.sessions.find((s) => s.path === resolve(openPath))).toBeDefined();
   });
 });

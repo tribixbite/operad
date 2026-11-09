@@ -14,7 +14,7 @@ import type { HealthCheckConfig, HealthResult, SessionConfig, TmxConfig } from "
 import { detectPlatform } from "./platform/platform.js";
 import type { Logger } from "./log.js";
 import type { StateManager } from "./state.js";
-import { sessionExists, isTmuxServerAlive } from "./session.js";
+import { isTmuxServerAlive, paneLiveness } from "./session.js";
 import { getHealthConfig } from "./config.js";
 import { getRuntime } from "./runtimes/index.js";
 
@@ -67,15 +67,69 @@ export function checkSessionHealth(
   }
 }
 
-/** Check if a tmux session exists */
+/**
+ * Check whether a session's tmux panes are still running anything, and —
+ * when they aren't — whether they ended or were killed.
+ *
+ * `sessionExists` alone cannot answer the second question, and the answer
+ * decides whether auto-restart should fire. Agent sessions are created with
+ * `remain-on-exit on`, so a shell that exits leaves a dead pane behind to be
+ * inspected instead of taking the whole tmux session down with it.
+ *
+ * `user_exited` is set for one case only: the tmux session is still there
+ * and every pane in it is dead with nothing reporting a kill. That is the
+ * shape a person typing `exit` leaves behind, and it is the only shape
+ * operad can positively identify.
+ *
+ * Everything else keeps the old crash handling:
+ *
+ *  - A MISSING session is not treated as an exit. It means something ran
+ *    kill-session, and a pre-existing session created before operad started
+ *    setting `remain-on-exit` also disappears on a clean exit, so the signal
+ *    is not specific. (Those sessions get the option when they are next
+ *    created, after which an exit is identifiable.)
+ *  - On tmux builds that do report an exit status — this one does not; tmux
+ *    3.5a under Termux leaves `pane_dead_status` and `pane_dead_signal`
+ *    empty — a signal or a non-zero status is a crash.
+ *
+ * The case this cannot separate is Android's low-memory killer taking just
+ * the pane's shell while the tmux server survives: with no status reported,
+ * that looks exactly like an exit and the session is retired rather than
+ * restarted. The OOM failure that actually happens on this platform takes
+ * the whole tmux server, which is handled separately (every session is
+ * marked failed and restored on the next boot), and `boot.respect_manual_exit
+ * = false` turns the new behaviour off for anyone who would rather have the
+ * restart.
+ */
 function tmuxAliveCheck(sessionName: string, startMs: number): HealthResult {
-  const alive = sessionExists(sessionName);
-  return {
-    session: sessionName,
-    healthy: alive,
-    message: alive ? "tmux session alive" : "tmux session not found",
-    duration_ms: Date.now() - startMs,
-  };
+  const liveness = paneLiveness(sessionName);
+  const base = { session: sessionName, duration_ms: Date.now() - startMs };
+
+  switch (liveness.state) {
+    case "alive":
+      return { ...base, healthy: true, message: "tmux session alive" };
+    case "exited":
+      return {
+        ...base,
+        healthy: false,
+        message: "tmux pane exited",
+        user_exited: true,
+      };
+    case "killed":
+      return {
+        ...base,
+        healthy: false,
+        message: liveness.signal !== undefined
+          ? `tmux pane killed by signal ${liveness.signal}`
+          : `tmux pane exited with status ${liveness.status}`,
+      };
+    case "missing":
+      return { ...base, healthy: false, message: "tmux session not found" };
+    default:
+      // tmux unreachable — don't guess; a transient failure must not be
+      // read as the user closing the session.
+      return { ...base, healthy: false, message: "tmux session state unknown" };
+  }
 }
 
 /** HTTP health check — GET url, expect 2xx */

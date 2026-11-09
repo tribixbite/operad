@@ -33,6 +33,13 @@ import type { MemoryMonitor } from "./memory.js";
 import type { ActivityDetector } from "./activity.js";
 import type { BatteryMonitor } from "./battery.js";
 import type { AndroidEngine } from "./android-engine.js";
+import type { SessionConfig, SessionType } from "./types.js";
+import { getRuntime } from "./runtimes/index.js";
+import {
+  detectRuntimeForPane,
+  snapshotProcesses,
+  type ProcessSnapshot,
+} from "./runtimes/detect.js";
 import { loadOrCreateToken } from "./auth.js";
 import { dirname } from "node:path";
 
@@ -97,6 +104,74 @@ export class MonitoringEngine {
   }
 
   /** Poll system memory and update per-session RSS/activity */
+  /**
+   * How many consecutive polls a different runtime must be seen before it is
+   * adopted. One poll is not enough: an agent that shells out to another for
+   * a single turn would otherwise rewrite the session's runtime.
+   */
+  private static readonly RUNTIME_SWITCH_POLLS = 2;
+
+  /** name → { runtime, polls } for a runtime seen but not yet adopted. */
+  private pendingRuntime = new Map<string, { runtime: SessionType; polls: number }>();
+
+  /**
+   * Notice when a session is running a different agent than operad launched,
+   * and record it so a restart or the next boot brings back what was there.
+   *
+   * The registry is the durable half: it is the only record of a session the
+   * daemon did not get from TOML, and it stamped every entry `claude`. A
+   * session the user had switched to Codex or Antigravity therefore came back
+   * as Claude Code — same name, same directory, wrong tool, and the previous
+   * conversation unreachable from it.
+   *
+   * A type declared in TOML is left alone: that is an explicit statement by
+   * the user about what the session is, and discovery does not get to
+   * overrule it. Only registry-backed (dynamically opened or discovered)
+   * sessions are reconciled.
+   */
+  private reconcileSessionRuntime(
+    session: SessionConfig,
+    panePid: number,
+    snapshot: ProcessSnapshot,
+  ): void {
+    if (!this.ctx.registry.find(session.name)) {
+      this.pendingRuntime.delete(session.name);
+      return; // TOML-declared — the user said what this is.
+    }
+
+    const detected = detectRuntimeForPane(panePid, snapshot);
+    if (detected === null || detected === session.type) {
+      // Nothing running yet (the pane is at a shell between agents), or it
+      // matches. Either way there is nothing to switch to.
+      this.pendingRuntime.delete(session.name);
+      return;
+    }
+
+    const pending = this.pendingRuntime.get(session.name);
+    const polls = pending && pending.runtime === detected ? pending.polls + 1 : 1;
+    if (polls < MonitoringEngine.RUNTIME_SWITCH_POLLS) {
+      this.pendingRuntime.set(session.name, { runtime: detected, polls });
+      return;
+    }
+    this.pendingRuntime.delete(session.name);
+
+    const previous = session.type;
+    session.type = detected;
+    const entry = this.ctx.registry.find(session.name);
+    if (entry) {
+      entry.type = detected;
+      // A conversation id belongs to the runtime that issued it; carrying a
+      // Claude UUID into `agy --conversation` would resume nothing.
+      entry.session_id = undefined;
+      this.ctx.registry.flush();
+    }
+    this.ctx.log.info(
+      `Session '${session.name}' is running ${detected}, not ${previous} — ` +
+      `recorded so a restart brings ${detected} back`,
+      { session: session.name },
+    );
+  }
+
   memoryPollAndShed(): void {
     // Invalidate caches at start of each poll cycle so we get fresh data
     this.memory.invalidatePsCache();
@@ -105,6 +180,11 @@ export class MonitoringEngine {
     // System memory
     const sysMem = this.memory.getSystemMemory();
     this.ctx.state.updateSystemMemory(sysMem);
+
+    // One process-table snapshot for the whole cycle, used to notice when a
+    // session is running a different agent than the one operad launched.
+    // Taken lazily: no agent sessions running, no `ps` call.
+    let procSnapshot: ProcessSnapshot | null = null;
 
     // Per-session RSS and activity classification
     for (const session of this.ctx.config.sessions) {
@@ -165,6 +245,14 @@ export class MonitoringEngine {
             claudeStatus = CLAUDE_WORKING_PATTERN.test(pane) ? "working" : "waiting";
           }
         }
+      }
+
+      // Which agent is actually in the pane? Only for agent sessions that
+      // operad started in tmux — a bare/adopted process has no pane shell to
+      // look under, and a service has no runtime to get wrong.
+      if (getRuntime(session.type) && !session.bare && adoptedPid === undefined) {
+        if (procSnapshot === null) procSnapshot = snapshotProcesses();
+        this.reconcileSessionRuntime(session, pid, procSnapshot);
       }
 
       this.ctx.state.updateSessionMetrics(session.name, rss_mb, activityState, lastOutput, claudeStatus);

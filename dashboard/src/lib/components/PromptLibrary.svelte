@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt } from "$lib/api";
+  import { fetchPrompts, fetchPromptProjects, starPrompt, unstarPrompt, locatePrompt } from "$lib/api";
   import { store } from "$lib/store.svelte";
   import type { PromptSearchResult, PromptEntry } from "$lib/types";
   import ConversationDrawer from "./ConversationDrawer.svelte";
@@ -218,17 +218,67 @@
   /** Project path + anchor for the drawer's history-by-path load. */
   let drawerPath = $state<string | null>(null);
   let drawerAnchorTs = $state<number | null>(null);
+  /** The exact entry uuid to open at, once the daemon has located it. */
+  let drawerAnchorUuid = $state<string | null>(null);
+  /** Set when the prompt's transcript is no longer on disk. */
+  let drawerMissingReason = $state<string | null>(null);
+  /** The prompt whose "open" is currently being resolved. */
+  let locating = $state<string | null>(null);
+
+  function closeDrawer() {
+    drawerSession = null;
+    drawerSessionId = null;
+    drawerPath = null;
+    drawerAnchorTs = null;
+    drawerAnchorUuid = null;
+    drawerMissingReason = null;
+  }
 
   /**
-   * Open the conversation a prompt came from in the drawer — directly from
-   * its project's history, anchored to the prompt. No session is spawned:
-   * the viewer loads by (path, session_id) so it works even for projects
-   * that aren't currently running. If a live session DOES exist for the
-   * path, the drawer picks it up (enabling replies + the Live tab); the
-   * display label falls back to the project basename otherwise.
+   * Open the conversation a prompt came from, at the prompt's own position.
+   *
+   * The library's rows come from `~/.claude/history.jsonl`, whose `sessionId`
+   * is absent on older entries and can name a transcript that Claude Code's
+   * retention sweep has since deleted. Taking it at face value is what made
+   * "open" land on the project's newest conversation: with no usable id the
+   * viewer asked for "this project" and got today's session, then looked for
+   * the prompt inside it and of course never found it.
+   *
+   * So ask the daemon which transcript actually holds this prompt, and open
+   * at that entry. A prompt whose transcript is gone says so instead of
+   * quietly showing an unrelated conversation.
    */
-  function handleOpenPrompt(prompt: PromptEntry) {
-    drawerSessionId = prompt.sessionId ?? null;
+  async function handleOpenPrompt(prompt: PromptEntry) {
+    locating = prompt.id;
+    try {
+      const found = await locatePrompt({
+        path: prompt.project,
+        ts: prompt.timestamp,
+        text: prompt.display,
+        session_id: prompt.sessionId,
+      });
+      if (found.located) {
+        drawerSessionId = found.session_id;
+        drawerAnchorUuid = found.uuid;
+        drawerMissingReason = null;
+      } else {
+        // Nothing on disk to anchor to. Still open the project's history —
+        // it's often the useful next step — but say what's missing.
+        drawerSessionId = prompt.sessionId ?? null;
+        drawerAnchorUuid = null;
+        drawerMissingReason = found.reason === "no-transcripts"
+          ? "No transcripts remain for this project — Claude Code's retention sweep deleted them."
+          : "This prompt's conversation is no longer on disk (deleted by Claude Code's retention sweep).";
+      }
+    } catch (err) {
+      // A locate failure must not block viewing — fall back to the old
+      // behaviour and let the viewer's own anchor search try.
+      drawerSessionId = prompt.sessionId ?? null;
+      drawerAnchorUuid = null;
+      drawerMissingReason = `Could not locate this prompt: ${(err as Error).message}`;
+    } finally {
+      locating = null;
+    }
     drawerPath = prompt.project;
     drawerAnchorTs = prompt.timestamp ?? null;
     drawerSession = findSessionForPath(prompt.project) ?? projectBasename(prompt.project);
@@ -421,10 +471,11 @@
               -->
               <button
                 class="prompt-action-btn"
-                onclick={(e) => { e.stopPropagation(); handleOpenPrompt(prompt); }}
+                onclick={(e) => { e.stopPropagation(); void handleOpenPrompt(prompt); }}
+                disabled={locating === prompt.id}
                 title={`Open conversation in ${projectBasename(prompt.project)}`}
                 aria-label="Open conversation"
-              >›</button>
+              >{locating === prompt.id ? "…" : "›"}</button>
             {/if}
             <!-- Star toggle (kept) -->
             <button
@@ -446,7 +497,9 @@
           initialSessionId={drawerSessionId}
           projectPath={drawerPath}
           anchorTimestamp={drawerAnchorTs}
-          onclose={() => { drawerSession = null; drawerSessionId = null; drawerPath = null; drawerAnchorTs = null; }}
+          anchorUuid={drawerAnchorUuid}
+          anchorNotice={drawerMissingReason}
+          onclose={closeDrawer}
         />
       {/if}
 

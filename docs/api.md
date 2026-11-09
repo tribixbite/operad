@@ -364,9 +364,31 @@ Query: `?days=14`.
 #### `GET /api/conversation/:name`
 Paginated Claude JSONL conversation viewer.
 
-Query: `?before=<uuid>`, `?limit=20`, `?session_id=<uuid>`.
+Query: `?before=<uuid>`, `?limit=20` (clamped to 1–200), `?session_id=<uuid>`,
+`?around=<uuid>`, `?path=<project>`.
 
-Response: `ConversationPage` with `entries`, `oldest_uuid`, `has_more`, `session_id`.
+`around` returns the window of entries containing that uuid instead of the
+newest page — used to open a historical prompt at its own position. `path`
+addresses a project directly, so history is readable without a live session.
+
+Response: `ConversationPage` with `entries`, `oldest_uuid`, `has_more`,
+`session_id`, `session_list`. Plus, when relevant:
+`requested_session_missing` (the asked-for `session_id` is not on disk, so the
+newest conversation is being served instead), `anchor_uuid` (the page is the
+window around this entry) and `anchor_missing` (`around` was not found in the
+file).
+
+#### `GET /api/prompt-locate`
+Resolve which conversation — and which entry in it — a prompt from the library
+came from. `~/.claude/history.jsonl` records a `sessionId` only on newer
+entries, and the transcript it names may since have been deleted by Claude
+Code's retention sweep, so the answer is derived from what is on disk.
+
+Query: `?path=<project>` (required), `?ts=<epoch-ms>`, `?text=<prompt>`,
+`?session_id=<uuid>`. One of `ts` or `session_id` is required.
+
+Response: `{ located: true, session_id, uuid, timestamp }`, or
+`{ located: false, reason: "no-transcripts" | "not-found" }`.
 
 #### `GET /api/timeline/:name`
 Session event timeline merging trace log and Claude JSONL events.

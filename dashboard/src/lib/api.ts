@@ -10,7 +10,7 @@ import type {
   CustomizationResponse, ScriptEntry, ProjectTokenUsage, ConversationPage,
   TimelineEvent, McpServerInfo, PromptSearchResult, DailyCost,
   NotificationRecord, GitInfo, FileEntry, FileContentResponse,
-  TelemetryResponse, TelemetryRecord,
+  TelemetryResponse, TelemetryRecord, PromptLocation,
 } from "./types";
 import { noteResponse } from "./auth.svelte";
 
@@ -674,12 +674,20 @@ export async function fetchSessionTokens(name: string): Promise<ProjectTokenUsag
 /** Fetch paginated conversation entries for a session */
 export async function fetchConversation(
   name: string,
-  opts?: { before?: string; limit?: number; session_id?: string; path?: string },
+  opts?: {
+    before?: string;
+    limit?: number;
+    session_id?: string;
+    path?: string;
+    /** Load the window containing this entry instead of the newest page. */
+    around?: string;
+  },
 ): Promise<ConversationPage> {
   const params = new URLSearchParams();
   if (opts?.before) params.set("before", opts.before);
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.session_id) params.set("session_id", opts.session_id);
+  if (opts?.around) params.set("around", opts.around);
   // When loading by explicit project path (history view for a project with
   // no live session), pass `path` and use a placeholder name segment — the
   // server resolves the path directly and ignores the name.
@@ -687,6 +695,29 @@ export async function fetchConversation(
   const seg = name || "_";
   const qs = params.toString();
   const res = await fetch(`/api/conversation/${encodeURIComponent(seg)}${qs ? `?${qs}` : ""}`);
+  return checkedJson(res);
+}
+
+/**
+ * Resolve the conversation and entry a library prompt came from.
+ *
+ * The prompt library's source (`~/.claude/history.jsonl`) carries a session id
+ * only on newer entries, and that id can name a transcript the retention
+ * sweep has deleted. Asking the daemon which transcript actually holds the
+ * prompt is what makes "open" land on the right conversation at the right
+ * position instead of on whatever session is newest.
+ */
+export async function locatePrompt(opts: {
+  path: string;
+  ts?: number;
+  text?: string;
+  session_id?: string;
+}): Promise<PromptLocation> {
+  const params = new URLSearchParams({ path: opts.path });
+  if (opts.ts) params.set("ts", String(opts.ts));
+  if (opts.text) params.set("text", opts.text.slice(0, 2000));
+  if (opts.session_id) params.set("session_id", opts.session_id);
+  const res = await fetch(`/api/prompt-locate?${params.toString()}`);
   return checkedJson(res);
 }
 

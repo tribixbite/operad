@@ -22,17 +22,28 @@
      */
     projectPath?: string | null;
     /**
-     * Optional epoch-ms of a specific prompt to anchor on. After load, the
-     * viewer pages back (capped) until it finds the matching user message,
-     * then scrolls to and highlights it instead of jumping to the bottom.
+     * Optional epoch-ms of a specific prompt to anchor on. Used only as a
+     * fallback when no `anchorUuid` could be resolved: the viewer then pages
+     * back (capped) looking for a user message with a matching timestamp.
      */
     anchorTimestamp?: number | null;
+    /**
+     * Exact entry uuid to open at. The server returns the window containing
+     * it in one request, so the position is reached regardless of how deep
+     * in the conversation it is — paging back from the tail cannot do that
+     * for a prompt thousands of entries old.
+     */
+    anchorUuid?: string | null;
+    /** Shown above the entries when the requested conversation is missing. */
+    anchorNotice?: string | null;
   }
   let {
     sessionName,
     initialSessionId = null,
     projectPath = null,
     anchorTimestamp = null,
+    anchorUuid = null,
+    anchorNotice = null,
   }: Props = $props();
 
   /**
@@ -123,21 +134,49 @@
     expandedBlocks = new Set(expandedBlocks);
   }
 
-  async function loadConversation(sessionId?: string) {
+  /**
+   * Notice shown above the entries. Either the caller's (the prompt's
+   * transcript is gone) or one derived from what the server served: a
+   * conversation that isn't the one asked for must not look like one that is.
+   */
+  const notice = $derived.by(() => {
+    if (anchorNotice) return anchorNotice;
+    if (page?.requested_session_missing) {
+      return "That conversation is no longer on disk — showing this project's most recent one instead.";
+    }
+    if (page?.anchor_missing) {
+      return "Could not find that prompt in this conversation — showing the latest messages.";
+    }
+    return null;
+  });
+
+  /**
+   * Load a page. With `anchor` the server returns the window containing that
+   * entry; otherwise the newest page.
+   *
+   * `anchor` is only honoured on the first load of a given conversation —
+   * switching conversations with the picker, or reloading after a send, wants
+   * the tail.
+   */
+  async function loadConversation(sessionId?: string, anchor?: string) {
     loading = true;
     error = null;
     try {
       page = await fetchConversation(sessionName, {
         session_id: sessionId || undefined,
         path: projectPath || undefined,
+        around: anchor || undefined,
         limit: 20,
       });
       if (!selectedSessionId && page.session_id) {
         selectedSessionId = page.session_id;
       }
-      // When anchoring on a specific prompt, page back to it and scroll
-      // there; otherwise jump to the latest message as usual.
-      if (anchorTimestamp) {
+      if (page.anchor_uuid) {
+        // The server put the anchor in this page — scroll straight to it.
+        scrollToEntry(page.anchor_uuid);
+      } else if (anchorTimestamp) {
+        // No uuid was resolvable (e.g. a pre-`sessionId` history entry whose
+        // text was rewritten): fall back to searching by timestamp.
         await anchorToPrompt();
       } else {
         requestAnimationFrame(() => {
@@ -153,11 +192,21 @@
     }
   }
 
+  /** Highlight an entry and bring it into view. */
+  function scrollToEntry(uuid: string) {
+    highlightUuid = uuid;
+    requestAnimationFrame(() => {
+      const el = scrollContainer?.querySelector(`[data-uuid="${uuid}"]`) as HTMLElement | null;
+      if (el) el.scrollIntoView({ block: "center" });
+      else if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    });
+  }
+
   /**
-   * Page backwards (capped) until the user message nearest `anchorTimestamp`
-   * is loaded, then scroll to and highlight it. Bounded so a deep prompt in
-   * a huge conversation can't trigger unbounded fetching — if not found
-   * within the cap we leave the viewer at the oldest loaded message.
+   * Fallback anchor: page backwards (capped) until a user message near
+   * `anchorTimestamp` is loaded, then scroll to it. Only reached when the
+   * daemon could not resolve the prompt to an entry uuid — with one, the
+   * server returns the right window directly and no paging is needed.
    */
   async function anchorToPrompt() {
     if (!anchorTimestamp) return;
@@ -175,11 +224,7 @@
       match = found();
     }
     if (match) {
-      highlightUuid = match.uuid;
-      requestAnimationFrame(() => {
-        const el = scrollContainer?.querySelector(`[data-uuid="${match!.uuid}"]`) as HTMLElement | null;
-        el?.scrollIntoView({ block: "center" });
-      });
+      scrollToEntry(match.uuid);
     } else {
       // Not found within the cap — fall back to the bottom (latest).
       requestAnimationFrame(() => {
@@ -336,13 +381,23 @@
       const stored = localStorage.getItem(RECALL_STORAGE_KEY);
       if (stored) sentMessages = JSON.parse(stored);
     } catch { /* ignore */ }
-    // Seed the first load with the requested session_id (if any) so the
-    // viewer opens the exact conversation rather than the project default.
-    loadConversation(initialSessionId || undefined);
+    // Seed the first load with the requested session_id and anchor (if any)
+    // so the viewer opens the exact conversation AT the requested entry,
+    // rather than the project default at its newest message.
+    loadConversation(initialSessionId || undefined, anchorUuid || undefined);
   });
 </script>
 
 <div class="conversation-viewer">
+  <!--
+    Shown when what's on screen is not what was asked for — a deleted
+    transcript, or an anchor that isn't in this conversation. Without it a
+    substituted conversation is indistinguishable from the right one.
+  -->
+  {#if notice}
+    <div class="viewer-notice" role="status">{notice}</div>
+  {/if}
+
   <!-- Session picker -->
   {#if page?.session_list && page.session_list.length > 1}
     <div class="session-picker">
@@ -605,6 +660,17 @@
   }
   /* Anchored prompt (opened from the Prompt Library) — briefly ringed so
    * the user sees which message they jumped to. */
+  .viewer-notice {
+    flex: 0 0 auto;
+    margin: 0.4rem 0.5rem 0;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--accent-yellow);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent-yellow) 12%, transparent);
+    color: var(--text-primary);
+    font-size: 0.72rem;
+    line-height: 1.35;
+  }
   .msg-highlight .user-content {
     outline: 2px solid var(--accent-blue);
     outline-offset: 2px;

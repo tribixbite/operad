@@ -44,6 +44,12 @@ enabled = true
 [boot]
 auto_start = 6                         # Auto-start N most recent sessions
 visible = 10                           # Show N sessions on dashboard
+# Honour a deliberate exit. When an agent session's shell exits, stop
+# supervising it instead of restarting it, clear its autostart pin, and keep
+# boot recency from reopening the project until it is used again (an entry in
+# Claude's history newer than the close, or an explicit open/start/pin).
+# Set false for the old behaviour, where anything that goes away comes back.
+respect_manual_exit = true
 
 # Health check defaults by session type
 [health_defaults.claude]

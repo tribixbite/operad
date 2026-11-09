@@ -11,6 +11,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { basename, dirname, join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
+import { forEachJsonlLine } from "./claude-session.js";
 
 /** A dynamically registered Claude session */
 export interface RegistryEntry {
@@ -28,6 +29,20 @@ export interface RegistryEntry {
   auto_go: boolean;
   /** Claude session ID for --resume (multi-instance support) */
   session_id?: string;
+  /**
+   * Which agent runtime this session runs (claude/codex/opencode/agy, or a
+   * service type). Absent on entries written before this field existed, and
+   * treated as "claude" for those.
+   *
+   * It has to be persisted: the registry is the only record of a session the
+   * daemon did not get from TOML, and `toSessionConfigs()` used to stamp
+   * every one of them `claude`. So a Codex or Antigravity session survived a
+   * restart in name only — operad brought it back running Claude Code in the
+   * same directory, which is not the session the user had.
+   */
+  type?: SessionType;
+  /** Command for service/daemon entries (ignored for agent runtimes). */
+  command?: string;
 }
 
 /** Persisted registry data */
@@ -60,6 +75,15 @@ export interface RecentProject {
 
 const CURRENT_VERSION = 1;
 const NAME_PATTERN = /^[a-z0-9-]+$/;
+
+/**
+ * Session types a registry entry may name. Kept here rather than imported
+ * from config.ts to avoid a cycle; `types-runtime.test.ts` asserts the two
+ * lists stay in step.
+ */
+const REGISTRY_SESSION_TYPES: SessionType[] = [
+  "claude", "opencode", "codex", "agy", "daemon", "service",
+];
 
 export class Registry {
   private data: RegistryData;
@@ -156,9 +180,9 @@ export class Registry {
   toSessionConfigs(): SessionConfig[] {
     return this.data.sessions.map((e): SessionConfig => ({
       name: e.name,
-      type: "claude" as SessionType,
+      type: e.type ?? ("claude" as SessionType),
       path: e.path,
-      command: undefined,
+      command: e.command,
       auto_go: e.auto_go,
       priority: e.priority,
       depends_on: [],
@@ -216,6 +240,17 @@ export class Registry {
           for (const entry of clean) {
             if (entry.session_id && !isValidSessionId(entry.session_id)) {
               entry.session_id = undefined;
+            }
+            // `type` selects a runtime adapter and, for service types, pairs
+            // with a `command` that is sent to a shell. A hand-edited or
+            // foreign registry must not be able to name a type operad doesn't
+            // know, nor smuggle a command in under an agent type.
+            if (entry.type !== undefined && !REGISTRY_SESSION_TYPES.includes(entry.type)) {
+              this.log?.warn(`Dropping unknown type '${String(entry.type)}' from registry entry '${entry.name}'`);
+              entry.type = undefined;
+            }
+            if (entry.command !== undefined && typeof entry.command !== "string") {
+              entry.command = undefined;
             }
           }
           return { version: CURRENT_VERSION, sessions: clean };
@@ -377,30 +412,36 @@ export function findNamedSessions(historyPath: string, maxAgeDays = 7): NamedSes
 
       if (!existsSync(sessionJsonl)) continue;
 
-      try {
-        const sessionContent = readFileSync(sessionJsonl, "utf-8");
-        // Find the LAST custom-title entry (most recent rename)
-        let customTitle: string | null = null;
-        for (const sLine of sessionContent.split("\n")) {
-          if (!sLine.includes("custom-title")) continue;
-          try {
-            const entry = JSON.parse(sLine) as { type: string; customTitle?: string };
-            if (entry.type === "custom-title" && entry.customTitle) {
-              customTitle = entry.customTitle;
-            }
-          } catch { /* skip */ }
-        }
+      // Find the LAST custom-title entry (most recent rename).
+      //
+      // Walked backwards and stopped at the first hit, rather than reading
+      // the transcript into a string and splitting it: this runs at BOOT for
+      // every session active in the last 7 days, and transcripts here reach
+      // tens of megabytes each. Loading all of them to recover a handful of
+      // short titles was a memory spike in exactly the place that has to
+      // survive memory pressure.
+      const titleHit: string[] = [];
+      forEachJsonlLine(sessionJsonl, (sLine) => {
+        if (!sLine.includes("custom-title")) return;
+        try {
+          const entry = JSON.parse(sLine) as { type: string; customTitle?: string };
+          if (entry.type === "custom-title" && entry.customTitle) {
+            titleHit.push(entry.customTitle);
+            return false; // newest-first, so the first hit IS the last rename
+          }
+        } catch { /* skip */ }
+      }, { reverse: true });
+      const customTitle = titleHit[0] ?? null;
 
-        // Only include sessions with short, meaningful titles
-        if (customTitle && customTitle.length < 30 && !customTitle.includes("(Fork)")) {
-          results.push({
-            title: customTitle,
-            session_id: sessionId,
-            path: info.path,
-            last_active: new Date(info.timestamp).toISOString(),
-          });
-        }
-      } catch { /* skip unreadable */ }
+      // Only include sessions with short, meaningful titles
+      if (customTitle && customTitle.length < 30 && !customTitle.includes("(Fork)")) {
+        results.push({
+          title: customTitle,
+          session_id: sessionId,
+          path: info.path,
+          last_active: new Date(info.timestamp).toISOString(),
+        });
+      }
     }
 
     results.sort((a, b) => b.last_active.localeCompare(a.last_active));

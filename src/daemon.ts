@@ -12,7 +12,7 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync, closeSync, appendFileSync, writeFileSync, readFileSync, chmodSync, readdirSync, statSync, renameSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { TmxConfig, IpcCommand, IpcResponse, SessionConfig, SessionStatus, Switchboard } from "./types.js";
+import type { TmxConfig, IpcCommand, IpcResponse, SessionConfig, SessionStatus, Switchboard, HealthResult } from "./types.js";
 import { defaultSwitchboard } from "./types.js";
 import { loadConfig } from "./config.js";
 import { detectPlatform } from "./platform/platform.js";
@@ -369,7 +369,7 @@ export class Daemon {
       cmdGo: (name) => this.sessionCommands.cmdGo(name),
       cmdSend: (name, text) => this.sessionCommands.cmdSend(name, text),
       cmdTabs: (names) => this.sessionCommands.cmdTabs(names),
-      cmdOpen: (path, name, autoGo, priority, forceNew) => this.sessionCommands.cmdOpen(path, name, autoGo, priority, forceNew),
+      cmdOpen: (path, name, autoGo, priority, forceNew, runtime) => this.sessionCommands.cmdOpen(path, name, autoGo, priority, forceNew, runtime),
       cmdClose: (name) => this.sessionCommands.cmdClose(name),
       cmdSetAutostart: (name, enabled) => this.sessionCommands.cmdSetAutostart(name, enabled),
       cmdDedupe: (dryRun) => this.sessionCommands.cmdDedupe(dryRun),
@@ -1292,6 +1292,64 @@ export class Daemon {
     }
   }
 
+  /**
+   * Retire agent sessions the user exited instead of restarting them.
+   *
+   * An interactive agent session that ends because someone typed `exit` is
+   * not a fault, but every signal operad had for it — "the tmux session is
+   * gone" — was the same signal a crash produces, so the health sweep marked
+   * it degraded and auto-restart reopened it. Boot then did it again, because
+   * boot ranks projects by their recency in Claude Code's history and a
+   * project you just quit is by definition recent.
+   *
+   * So an exit now: stops the session, clears its ⭐ autostart pin, and
+   * records the close against its project path (`state.manual_closes`), which
+   * boot resolution consults. Using the project again — a newer entry in
+   * Claude's history, or an explicit `open`/`start`/pin — undoes it.
+   *
+   * Only agent runtimes qualify. Services and daemons keep restarting on
+   * exit: that is what supervising them means.
+   */
+  private handleUserExits(results: HealthResult[]): void {
+    if (!this.config.boot.respect_manual_exit) return;
+
+    for (const result of results) {
+      if (result.healthy || !result.user_exited) continue;
+
+      const session = this.config.sessions.find((c) => c.name === result.session);
+      if (!session || !getRuntime(session.type)) continue;
+
+      const s = this.state.getSession(session.name);
+      if (!s || s.suspended) continue;
+      // Already retired by an earlier sweep — don't re-log every 30 s.
+      if (s.status === "stopped" || s.status === "failed") continue;
+
+      this.cancelRestart(session.name);
+      // Reap the dead pane `remain-on-exit` kept for us, so the session
+      // doesn't linger in tmux as a corpse.
+      void stopSession(session.name, this.log);
+      this.state.transition(session.name, "stopped", "Exited by user");
+      this.activity.remove(session.name);
+
+      // Unstar: an explicit exit is an explicit "not this one".
+      this.state.setAutostartOverride(session.name, false);
+      if (session.path) this.state.recordManualClose(resolve(session.path));
+
+      this.log.info(
+        `Session '${session.name}' was exited (${result.message}) — not restarting; ` +
+        `unstarred and excluded from auto-boot until you open it again`,
+        { session: session.name },
+      );
+      appendNotification({
+        type: "session_stop",
+        title: `Session '${session.name}' exited`,
+        content: "Closed by you — unstarred, and it won't auto-boot. " +
+          `Run 'operad start ${session.name}' to bring it back.`,
+        session: session.name,
+      });
+    }
+  }
+
   /** Run health sweep and handle auto-restarts for degraded sessions */
   private async healthSweepAndRestart(): Promise<void> {
     trace("health:sweep:start");
@@ -1307,6 +1365,10 @@ export class Daemon {
     this.rescanBareClaudeSessions();
 
     const results = runHealthSweep(this.config, this.state, this.log, this.adoptedPids);
+
+    // Sessions whose panes ENDED rather than broke. Taken before the restart
+    // loop so an exit is never answered with a restart.
+    this.handleUserExits(results);
 
     // Check for degraded sessions needing restart (skip suspended — they're intentionally frozen)
     for (const session of this.config.sessions) {
@@ -1420,6 +1482,13 @@ export class Daemon {
     // Prune stale entries (>30 days inactive)
     const pruned = this.registry.prune(30);
     if (pruned > 0) this.log.info(`Pruned ${pruned} stale registry entries`);
+
+    // Manual closes are keyed by project path and would otherwise accumulate
+    // one line per project ever closed, including deleted directories.
+    const prunedCloses = this.state.pruneManualCloses();
+    if (prunedCloses > 0) {
+      this.log.info(`Pruned ${prunedCloses} stale manual-close records`);
+    }
 
     const configNames = new Set(this.config.sessions.map((s) => s.name));
     const registryConfigs = this.registry.toSessionConfigs();

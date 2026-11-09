@@ -749,3 +749,71 @@ describe("nextSuffix", () => {
     expect(nextSuffix("torch", ["torch-3"])).toBe("torch-4");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Runtime persistence
+// ---------------------------------------------------------------------------
+// The registry is the only durable record of a session the daemon did not
+// get from TOML. It used to stamp every entry `claude` on the way out, so a
+// Codex or Antigravity session came back as Claude Code — same name, same
+// directory, wrong tool, previous conversation unreachable.
+
+describe("Registry — runtime persistence", () => {
+  test("round-trips an entry's runtime through a reload", () => {
+    const file = join(tmpDir, "runtime-reg.json");
+    const reg = new Registry(file);
+    reg.add({ name: "codexy", path: join(tmpDir, "p1"), priority: 50, auto_go: false, type: "codex" });
+    reg.add({ name: "agyish", path: join(tmpDir, "p2"), priority: 50, auto_go: false, type: "agy" });
+
+    const reloaded = new Registry(file);
+    expect(reloaded.find("codexy")?.type).toBe("codex");
+    expect(reloaded.find("agyish")?.type).toBe("agy");
+
+    const configs = reloaded.toSessionConfigs();
+    expect(configs.find((c) => c.name === "codexy")?.type).toBe("codex");
+    expect(configs.find((c) => c.name === "agyish")?.type).toBe("agy");
+  });
+
+  test("an entry with no runtime still resolves as claude", () => {
+    const file = join(tmpDir, "legacy-reg.json");
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      sessions: [{
+        name: "legacy", path: join(tmpDir, "p3"), priority: 50, auto_go: false,
+        opened_at: new Date().toISOString(), last_active: new Date().toISOString(),
+      }],
+    }));
+    const reg = new Registry(file);
+    expect(reg.toSessionConfigs()[0].type).toBe("claude");
+  });
+
+  test("drops a runtime operad does not know", () => {
+    const file = join(tmpDir, "bogus-reg.json");
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      sessions: [{
+        name: "bogus", path: join(tmpDir, "p4"), priority: 50, auto_go: false,
+        type: "rm -rf /", opened_at: new Date().toISOString(), last_active: new Date().toISOString(),
+      }],
+    }));
+    const reg = new Registry(file);
+    // `type` selects a runtime adapter and pairs with a shell command for
+    // service types; an unknown value must not survive a hand-edited file.
+    expect(reg.find("bogus")?.type).toBeUndefined();
+    expect(reg.toSessionConfigs()[0].type).toBe("claude");
+  });
+
+  test("drops a non-string command", () => {
+    const file = join(tmpDir, "cmd-reg.json");
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      sessions: [{
+        name: "svc", path: join(tmpDir, "p5"), priority: 50, auto_go: false,
+        type: "service", command: { not: "a string" },
+        opened_at: new Date().toISOString(), last_active: new Date().toISOString(),
+      }],
+    }));
+    const reg = new Registry(file);
+    expect(reg.find("svc")?.command).toBeUndefined();
+  });
+});
