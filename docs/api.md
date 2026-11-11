@@ -574,6 +574,11 @@ Response is a per-item report — individual rejects never fail the request:
 }
 ```
 
+Only documents are imported, mirroring what export emits: a `rel_path` whose
+file name is not `.md` / `.markdown` / `.txt`, or that has any dot-prefixed
+segment (`.git/…`, `.env`, `.hidden.md`), is skipped with reason
+`not a document (…)`.
+
 **What import does not do:** it never clones plugin repositories or runs an
 installer. It registers the marketplace source and marks the plugin enabled;
 Claude Code materialises the plugin on next launch. Fabricating
@@ -639,6 +644,11 @@ Remove an MCP server.
 #### `POST /api/mcp/:name/toggle`
 Enable or disable an MCP server.
 
+All four write routes are read-modify-write of `~/.claude.json` (toggle:
+`~/.claude/settings.json`) and write atomically (temp file + rename). When the
+existing file is unreadable, not valid JSON, or not a JSON object, they answer
+`409` with `{ error }` and leave the file untouched rather than replacing it.
+
 ---
 
 ### Switchboard
@@ -651,7 +661,12 @@ Returns current `Switchboard` state: `{ all, sdkBridge, cognitive, oodaAutoTrigg
 #### `PUT /api/switchboard`
 Partial patch — only specified fields are updated.
 
-Body: any subset of `Switchboard` fields.
+Body: a JSON object holding any subset of `Switchboard` fields. The boolean
+fields must be real booleans (`"false"` is rejected), and `agents` must be an
+object of booleans. A body that is not an object, or holds any unknown key or
+wrong-typed value, is refused whole with `400` and nothing is applied. (The WS
+`switchboard_update` message uses the same whitelist but applies the valid
+fields and drops the rest.)
 
 ---
 
@@ -869,8 +884,13 @@ List all registered tools.
 
 Query: `?source=builtin|user|toml`, `?category=observe|analyze|mutate|communicate|orchestrate`.
 
+#### `GET /api/tools/stats`
+Per-tool execution aggregates:
+`[{ tool_name, tool_category, total_calls, success_count, avg_duration_ms }]`.
+`503` when the memory database is not initialized.
+
 #### `GET /api/tools/:name`
-Get a single tool definition.
+Get a single tool definition. (`stats` is reserved for the route above.)
 
 #### `GET /api/tools/:name/history`
 Execution history for a tool.
@@ -1048,6 +1068,9 @@ Attach the SDK bridge to a Claude Code session.
 
 Body (optional): `{ "sessionId"?: string, "cwd"?: string }`
 
+`403` when the switchboard has `all` or `sdkBridge` off — the same gate as the
+WS `attach` message.
+
 #### `POST /api/sdk/detach`
 Detach the active SDK session.
 
@@ -1056,7 +1079,9 @@ Send a prompt to the attached session (non-blocking — stream via WebSocket).
 
 Body: `{ "prompt": "string", "effort"?: string, "thinking"?: object }`
 
-Returns `202 Accepted`.
+Returns `202 Accepted`. `403` when the switchboard has `all` or `sdkBridge`
+off (also enforced for the WS `prompt` message), even if a session is still
+attached.
 
 #### `POST /api/sdk/interrupt`
 Interrupt the currently active SDK prompt.
@@ -1225,7 +1250,12 @@ All REST endpoints return:
 - `403` for forbidden operations (e.g., deleting a builtin agent)
 - `404` for not found
 - `405` for wrong HTTP method
-- `413` for oversized request body
+- `408` when the request body does not arrive within 10 s
+- `409` when the target's current state prevents the change (e.g. an MCP write against an unparseable `~/.claude.json`)
+- `413` for oversized request body (over 1 MB)
+
+`408` and `413` are sent as normal JSON replies with `Connection: close`; the
+connection is closed after the reply rather than reset.
 - `503` when a required subsystem is not initialized (e.g., memory DB, SDK bridge)
 - `500` for unexpected errors
 

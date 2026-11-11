@@ -7,16 +7,25 @@
  * Extracted from RestHandler (rest-handler.ts) as part of domain split.
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "../orchestrator-context.js";
+import { readJsonObjectFile, writeJsonFileAtomic } from "./customization-transfer.js";
+
+/** Route result envelope, as returned to RestHandler. */
+type RouteResult = { status: number; data: unknown };
 
 /**
  * McpRoutes — handles POST/PUT/DELETE /api/mcp and POST /api/mcp/:name/toggle.
  *
  * Also exposes readClaudeJson() and settingsJsonPath for the mcp GET list
  * (called inline from the RestHandler dispatch for the GET case).
+ *
+ * Every write is read-modify-write of a file Claude Code owns. The read goes
+ * through readJsonObjectFile, which reports an unreadable / unparseable /
+ * non-object file as an error instead of `{}`; the route then answers 409 and
+ * leaves the file byte-identical rather than replacing Claude Code's whole
+ * state with a near-empty object.
  */
 export class McpRoutes {
   constructor(private readonly ctx: OrchestratorContext) {}
@@ -35,21 +44,52 @@ export class McpRoutes {
     return join(homedir(), ".claude", "settings.json");
   }
 
-  /** Read ~/.claude.json, returning parsed object or empty default */
+  /**
+   * Read ~/.claude.json for DISPLAY, returning the parsed object or `{}`.
+   *
+   * Lenient on purpose: the GET list only renders it. Never feed this result
+   * back into a write — use {@link updateJsonObject}, which refuses instead.
+   */
   readClaudeJson(): Record<string, unknown> {
-    try {
-      if (existsSync(this.claudeJsonPath)) {
-        return JSON.parse(readFileSync(this.claudeJsonPath, "utf-8")) as Record<string, unknown>;
-      }
-    } catch { /* fall through */ }
-    return {};
+    const read = readJsonObjectFile(this.claudeJsonPath);
+    return read.ok ? read.obj : {};
   }
 
-  /** Atomic JSON file write: write .tmp then rename */
-  private writeJsonFileAtomic(filePath: string, data: unknown): void {
-    const tmp = `${filePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf-8");
-    renameSync(tmp, filePath);
+  /**
+   * Read-modify-write a JSON object file.
+   *
+   * `mutate` either changes the object and returns null (→ the file is
+   * written atomically and `onWritten` builds the 200 body), or returns a
+   * RouteResult to short-circuit without writing (404 / 409 for a missing or
+   * duplicate server). A file that exists but is not a readable JSON object
+   * is answered with 409 and never written.
+   */
+  private updateJsonObject(
+    path: string,
+    mutate: (obj: Record<string, unknown>) => RouteResult | null,
+    onWritten: (obj: Record<string, unknown>) => unknown,
+  ): RouteResult {
+    const read = readJsonObjectFile(path);
+    if (!read.ok) return { status: 409, data: { error: read.error } };
+    const early = mutate(read.obj);
+    if (early) return early;
+    const writeErr = writeJsonFileAtomic(path, read.obj);
+    if (writeErr) return { status: 500, data: { error: writeErr } };
+    return { status: 200, data: onWritten(read.obj) };
+  }
+
+  /**
+   * The `mcpServers` map of a parsed ~/.claude.json, created when absent.
+   * Throws when it exists but is not an object — assigning a server into an
+   * array or string would be silently lost on serialisation.
+   */
+  private serversOf(data: Record<string, unknown>): Record<string, Record<string, unknown>> {
+    if (data.mcpServers === undefined) data.mcpServers = {};
+    const servers = data.mcpServers;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+      throw new Error("mcpServers in ~/.claude.json is not an object");
+    }
+    return servers as Record<string, Record<string, unknown>>;
   }
 
   // ---------------------------------------------------------------------------
@@ -60,21 +100,24 @@ export class McpRoutes {
   cmdMcpAdd(
     serverName: string,
     config: { command: string; args?: string[]; env?: Record<string, string> },
-  ): { status: number; data: unknown } {
+  ): RouteResult {
     try {
-      const data = this.readClaudeJson();
-      if (!data.mcpServers) data.mcpServers = {};
-      const servers = data.mcpServers as Record<string, unknown>;
-      if (servers[serverName]) {
-        return { status: 409, data: { error: `MCP server '${serverName}' already exists` } };
-      }
-      servers[serverName] = {
-        command: config.command,
-        args: config.args ?? [],
-        ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
-      };
-      this.writeJsonFileAtomic(this.claudeJsonPath, data);
-      return { status: 200, data: { ok: true, servers: Object.keys(servers) } };
+      return this.updateJsonObject(
+        this.claudeJsonPath,
+        (data) => {
+          const servers = this.serversOf(data);
+          if (servers[serverName]) {
+            return { status: 409, data: { error: `MCP server '${serverName}' already exists` } };
+          }
+          servers[serverName] = {
+            command: config.command,
+            args: config.args ?? [],
+            ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
+          };
+          return null;
+        },
+        (data) => ({ ok: true, servers: Object.keys(this.serversOf(data)) }),
+      );
     } catch (err) {
       return { status: 500, data: { error: `Failed to add MCP server: ${err}` } };
     }
@@ -84,64 +127,80 @@ export class McpRoutes {
   cmdMcpUpdate(
     serverName: string,
     config: { command?: string; args?: string[]; env?: Record<string, string> },
-  ): { status: number; data: unknown } {
+  ): RouteResult {
     try {
-      const data = this.readClaudeJson();
-      const servers = (data.mcpServers ?? {}) as Record<string, Record<string, unknown>>;
-      if (!servers[serverName]) {
-        return { status: 404, data: { error: `MCP server '${serverName}' not found` } };
-      }
-      if (config.command !== undefined) servers[serverName].command = config.command;
-      if (config.args !== undefined) servers[serverName].args = config.args;
-      if (config.env !== undefined) {
-        if (Object.keys(config.env).length > 0) {
-          servers[serverName].env = config.env;
-        } else {
-          delete servers[serverName].env;
-        }
-      }
-      this.writeJsonFileAtomic(this.claudeJsonPath, data);
-      return { status: 200, data: { ok: true } };
+      return this.updateJsonObject(
+        this.claudeJsonPath,
+        (data) => {
+          const server = this.serversOf(data)[serverName];
+          if (!server) {
+            return { status: 404, data: { error: `MCP server '${serverName}' not found` } };
+          }
+          if (config.command !== undefined) server.command = config.command;
+          if (config.args !== undefined) server.args = config.args;
+          if (config.env !== undefined) {
+            if (Object.keys(config.env).length > 0) {
+              server.env = config.env;
+            } else {
+              delete server.env;
+            }
+          }
+          return null;
+        },
+        () => ({ ok: true }),
+      );
     } catch (err) {
       return { status: 500, data: { error: `Failed to update MCP server: ${err}` } };
     }
   }
 
   /** Delete an MCP server from ~/.claude.json */
-  cmdMcpDelete(serverName: string): { status: number; data: unknown } {
+  cmdMcpDelete(serverName: string): RouteResult {
     try {
-      const data = this.readClaudeJson();
-      const servers = (data.mcpServers ?? {}) as Record<string, unknown>;
-      if (!servers[serverName]) {
-        return { status: 404, data: { error: `MCP server '${serverName}' not found` } };
-      }
-      delete servers[serverName];
-      this.writeJsonFileAtomic(this.claudeJsonPath, data);
-      return { status: 200, data: { ok: true, servers: Object.keys(servers) } };
+      return this.updateJsonObject(
+        this.claudeJsonPath,
+        (data) => {
+          const servers = this.serversOf(data);
+          if (!servers[serverName]) {
+            return { status: 404, data: { error: `MCP server '${serverName}' not found` } };
+          }
+          delete servers[serverName];
+          return null;
+        },
+        (data) => ({ ok: true, servers: Object.keys(this.serversOf(data)) }),
+      );
     } catch (err) {
       return { status: 500, data: { error: `Failed to delete MCP server: ${err}` } };
     }
   }
 
   /** Toggle MCP server enable/disable in settings.json */
-  cmdMcpToggle(serverName: string): { status: number; data: unknown } {
+  cmdMcpToggle(serverName: string): RouteResult {
     try {
-      let settings: Record<string, unknown> = {};
-      if (existsSync(this.settingsJsonPath)) {
-        try {
-          settings = JSON.parse(readFileSync(this.settingsJsonPath, "utf-8")) as Record<string, unknown>;
-        } catch { /* use empty */ }
-      }
-      const disabled = (settings.disabledMcpServers ?? []) as string[];
-      const idx = disabled.indexOf(serverName);
-      if (idx >= 0) {
-        disabled.splice(idx, 1);
-      } else {
-        disabled.push(serverName);
-      }
-      settings.disabledMcpServers = disabled;
-      this.writeJsonFileAtomic(this.settingsJsonPath, settings);
-      return { status: 200, data: { ok: true, disabled: idx < 0 } };
+      let nowDisabled = false;
+      return this.updateJsonObject(
+        this.settingsJsonPath,
+        (settings) => {
+          const raw = settings.disabledMcpServers ?? [];
+          if (!Array.isArray(raw)) {
+            return {
+              status: 409,
+              data: { error: `disabledMcpServers in ${this.settingsJsonPath} is not an array — refusing to overwrite it` },
+            };
+          }
+          const disabled = raw as unknown[];
+          const idx = disabled.indexOf(serverName);
+          if (idx >= 0) {
+            disabled.splice(idx, 1);
+          } else {
+            disabled.push(serverName);
+          }
+          nowDisabled = idx < 0;
+          settings.disabledMcpServers = disabled;
+          return null;
+        },
+        () => ({ ok: true, disabled: nowDisabled }),
+      );
     } catch (err) {
       return { status: 500, data: { error: `Failed to toggle MCP server: ${err}` } };
     }

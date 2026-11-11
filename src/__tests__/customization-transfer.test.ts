@@ -375,6 +375,32 @@ describe("importBundle — hostile input", () => {
     expect(report.skipped[0].reason).toBe("missing content");
   });
 
+  // Export only ever emits documents (isDocumentFile, no dot-entries at any
+  // depth), but import wrote whatever rel_path a bundle named — an
+  // executable script, a JSON config, or a dotfile/dot-directory.
+  test("non-document and dot paths are skipped and reported, not written", () => {
+    const relPaths = [
+      "evil.sh",
+      "tool/run.py",
+      "settings.json",
+      ".hidden.md",
+      ".git/hooks/pre-commit.md",
+      "skill/.env",
+      "noext",
+    ];
+    const bundle = emptyBundle({
+      documents: [
+        ...relPaths.map((rel_path) => ({ collection: "skills" as const, scope: "user" as const, rel_path, content: "x" })),
+        { collection: "skills", scope: "user", rel_path: "ok/SKILL.md", content: "fine" },
+      ],
+    });
+    const report = importBundle(bundle, { home: dst });
+    expect(report.written).toEqual([join(dst, ".claude", "skills", "ok", "SKILL.md")]);
+    expect(report.skipped.map((s) => s.path).sort()).toEqual([...relPaths].sort());
+    for (const s of report.skipped) expect(s.reason).toContain("not a document");
+    for (const rel of relPaths) expect(existsSync(join(dst, ".claude", "skills", rel))).toBe(false);
+  });
+
   test("project-scoped docs are skipped when no target project is given", () => {
     const bundle = emptyBundle({
       documents: [

@@ -416,6 +416,34 @@ describe("RestHandler — agent-messages", () => {
     const res = await h.handleDashboardApi("POST", "/api/agent-messages", "bad{json");
     expect(res.status).toBe(400);
   });
+
+  // The dispatcher already decodes segments[1] into `name`; agent-messages
+  // decoded it a second time, so a name holding a literal `%` (sent as `%25`)
+  // threw URIError → 500, and `%2541` silently became a different name ("A").
+  test("GET /api/agent-messages/<a>/<b> decodes each segment exactly once", async () => {
+    fc.db!.sendAgentMessage("50%off", "ideator", "Percent msg");
+    const res = await h.handleDashboardApi("GET", "/api/agent-messages/50%25off/ideator", "");
+    expect(res.status).toBe(200);
+    expect((res.data as { content: string }[]).some((m) => m.content === "Percent msg")).toBe(true);
+  });
+});
+
+describe("RestHandler — agent-chat decodes the agent name once", () => {
+  test("GET /api/agent-chat/<%25-name> → 200, not a URIError 500", async () => {
+    const res = await h.handleDashboardApi("GET", "/api/agent-chat/50%25off", "");
+    expect(res.status).toBe(200);
+  });
+
+  test("%2541 addresses the literal name '%41', not 'A'", async () => {
+    fc.db!.appendConversation("A", "user", "wrong agent");
+    fc.db!.appendConversation("%41", "user", "right agent");
+    const del = await h.handleDashboardApi("DELETE", "/api/agent-chat/%2541", "");
+    expect(del.status).toBe(200);
+    expect((del.data as { cleared: number }).cleared).toBe(1);
+    // "A"'s history must be untouched.
+    const a = await h.handleDashboardApi("GET", "/api/agent-chat/A", "");
+    expect((a.data as unknown[]).length).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

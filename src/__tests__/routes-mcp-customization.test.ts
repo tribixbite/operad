@@ -33,7 +33,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -271,6 +271,55 @@ describe("McpRoutes.cmdMcpToggle()", () => {
     routes.cmdMcpToggle("srv");
     const onDisk = JSON.parse(readFileSync(join(fc.dir, "settings.json"), "utf-8")) as Record<string, unknown>;
     expect(onDisk.theme).toBe("dark");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Write paths refuse to replace a config file they cannot parse
+//
+// readClaudeJson() and cmdMcpToggle used to fall back to {} on a read/parse
+// failure and then write that {} back, so one stray byte in ~/.claude.json
+// (Claude Code's whole state: projects, account, MCP servers) or a
+// settings.json mid-write by Claude Code was replaced by a near-empty file.
+// ---------------------------------------------------------------------------
+
+describe("McpRoutes write paths — unparseable config is never overwritten", () => {
+  /** Hostile-but-plausible existing contents: corrupt JSON and non-objects. */
+  const BAD_CONTENTS = ['{ "projects": { truncated', "[1, 2, 3]", '"just a string"', "null"];
+
+  for (const bad of BAD_CONTENTS) {
+    test(`cmdMcpAdd/Update/Delete refuse with 409 and leave .claude.json byte-identical (${bad.slice(0, 12)})`, () => {
+      const path = join(fc.dir, ".claude.json");
+      writeFileSync(path, bad, "utf-8");
+      const routes = new TempMcpRoutes(fc.ctx, fc.dir);
+      for (const res of [
+        routes.cmdMcpAdd("new-tool", { command: "npx" }),
+        routes.cmdMcpUpdate("new-tool", { command: "npx" }),
+        routes.cmdMcpDelete("new-tool"),
+      ]) {
+        expect(res.status).toBe(409);
+        expect((res.data as { error: string }).error).toContain("refusing to overwrite");
+      }
+      expect(readFileSync(path, "utf-8")).toBe(bad);
+    });
+
+    test(`cmdMcpToggle refuses with 409 and leaves settings.json byte-identical (${bad.slice(0, 12)})`, () => {
+      const path = join(fc.dir, "settings.json");
+      writeFileSync(path, bad, "utf-8");
+      const routes = new TempMcpRoutes(fc.ctx, fc.dir);
+      const res = routes.cmdMcpToggle("srv");
+      expect(res.status).toBe(409);
+      expect((res.data as { error: string }).error).toContain("refusing to overwrite");
+      expect(readFileSync(path, "utf-8")).toBe(bad);
+    });
+  }
+
+  test("successful writes leave no temp file beside the target", () => {
+    const routes = new TempMcpRoutes(fc.ctx, fc.dir);
+    expect(routes.cmdMcpAdd("t", { command: "c" }).status).toBe(200);
+    expect(routes.cmdMcpToggle("t").status).toBe(200);
+    const leftovers = readdirSync(fc.dir).filter((n) => n.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
   });
 });
 
