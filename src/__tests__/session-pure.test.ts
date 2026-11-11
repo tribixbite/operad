@@ -25,7 +25,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { formatTmuxTarget, classifyPaneLiveness } from "../session.js";
+import { formatTmuxTarget, classifyPaneLiveness, agentSessionsToAdopt } from "../session.js";
 
 // ---------------------------------------------------------------------------
 // formatTmuxTarget
@@ -241,5 +241,29 @@ describe("classifyPaneLiveness with exit records", () => {
     expect(classifyPaneLiveness("1|||4436|%5", records({})).state).toBe("exited");
     expect(classifyPaneLiveness("1||9|4436|%5", records({})).state).toBe("killed");
     expect(classifyPaneLiveness([row(1, "%5"), "1|||4436|%7"].join("\n"), records({ "4436-5": 0 })).state).toBe("exited");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agentSessionsToAdopt — which running tmux sessions get the agent options
+// at daemon start
+// ---------------------------------------------------------------------------
+// Boot adoption used to only mark already-running sessions "running"; their
+// tmux options were never touched, so sessions that predated the exit
+// handling never kept a dead pane and a manual exit was still read as a
+// crash. Every configured, tmux-hosted agent session that is alive gets the
+// options; services, bare sessions and sessions not in tmux do not.
+
+describe("agentSessionsToAdopt", () => {
+  const cfg = (name: string, type: string, bare = false) =>
+    ({ name, type, bare }) as unknown as import("../types.js").SessionConfig;
+
+  test("alive agent sessions are adopted; services, bare and absent ones are not", () => {
+    const configs = [
+      cfg("a", "claude"), cfg("b", "agy"), cfg("svc", "service"),
+      cfg("bare", "claude", true), cfg("gone", "codex"),
+    ];
+    const alive = new Set(["a", "b", "svc", "bare", "unconfigured"]);
+    expect(agentSessionsToAdopt(configs, alive)).toEqual(["a", "b"]);
   });
 });

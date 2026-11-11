@@ -19,7 +19,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -138,6 +138,20 @@ describe.skipIf(!HAS_TMUX)("agent tmux sessions (isolated server)", () => {
     t("new-session", "-d", "-s", "t-legacy");
     applyAgentSessionOptions("t-legacy");
     expect(t("show-options", "-w", "-v", "-t", "=t-legacy:", "remain-on-exit")).toBe("on");
+  });
+
+  test("adopting a session creates the record directory its new windows will write to", () => {
+    // The recorder only writes into a directory that exists; adoption sets
+    // the recorder as default-command, so it must create the directory too.
+    const fresh = join(dir, "not-yet-created");
+    setExitRecordDir(fresh);
+    try {
+      t("new-session", "-d", "-s", "t-adopt-dir");
+      applyAgentSessionOptions("t-adopt-dir");
+      expect(existsSync(fresh)).toBe(true);
+    } finally {
+      setExitRecordDir(dir);
+    }
   });
 
   test("without a record dir the session is a plain shell (no recorder)", () => {

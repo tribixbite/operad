@@ -76,6 +76,23 @@ export function setExitRecordDir(dir: string | null): void {
   exitRecordDir = dir;
 }
 
+/**
+ * The exit-record directory, created if needed, or null when recording is
+ * off or the directory can't be made. The recorder only writes into a
+ * directory that exists, so every path that installs it must call this:
+ * without the directory a recorded pane is indistinguishable from one that
+ * never had a recorder.
+ */
+function usableExitRecordDir(): string | null {
+  if (exitRecordDir === null) return null;
+  try {
+    mkdirSync(exitRecordDir, { recursive: true });
+    return exitRecordDir;
+  } catch {
+    return null;
+  }
+}
+
 /** Default readiness polling timeout if a runtime adapter doesn't override (ms). */
 const DEFAULT_READY_TIMEOUT = 60_000;
 /** Default interval between readiness polls if a runtime adapter doesn't override (ms). */
@@ -465,16 +482,12 @@ export function openTmuxSession(name: string, path: string | undefined, recordEx
   const createArgs = ["new-session", "-d", "-s", name];
   if (path) createArgs.push("-c", path);
 
-  const dir = recordExit ? exitRecordDir : null;
+  // An unusable record dir costs exit detection for this session, not the
+  // session itself.
+  const dir = recordExit ? usableExitRecordDir() : null;
   if (dir !== null) {
-    try {
-      mkdirSync(dir, { recursive: true });
-      // `--` then argv: tmux execs it directly, no extra shell in between.
-      createArgs.push("--", ...buildRecorderArgv(dir, tmuxDefaultShell()));
-    } catch {
-      // An unusable record dir costs exit detection for this session, not
-      // the session itself.
-    }
+    // `--` then argv: tmux execs it directly, no extra shell in between.
+    createArgs.push("--", ...buildRecorderArgv(dir, tmuxDefaultShell()));
   }
 
   const result = spawnTmux(createArgs, { timeout: 10_000, capture: false });
@@ -508,9 +521,23 @@ export function applyAgentSessionOptions(name: string): void {
   const target = formatTmuxTarget(name, true);
   tmux("set-option", "-t", target, "remain-on-exit", "on");
   tmux("set-hook", "-t", target, "after-new-window", "set-option -w remain-on-exit on");
-  if (exitRecordDir !== null) {
-    tmux("set-option", "-t", target, "default-command", buildRecorderCommand(exitRecordDir, tmuxDefaultShell()));
+  const dir = usableExitRecordDir();
+  if (dir !== null) {
+    tmux("set-option", "-t", target, "default-command", buildRecorderCommand(dir, tmuxDefaultShell()));
   }
+}
+
+/**
+ * Which running tmux sessions should get the agent session options when the
+ * daemon starts: configured agent-runtime sessions that are alive in tmux and
+ * not bare. Boot adoption used to only mark these "running", so sessions that
+ * predated exit handling never kept a dead pane and an `exit` still read as
+ * a crash.
+ */
+export function agentSessionsToAdopt(configs: readonly SessionConfig[], alive: ReadonlySet<string>): string[] {
+  return configs
+    .filter((c) => !c.bare && alive.has(c.name) && getRuntime(c.type) !== null)
+    .map((c) => c.name);
 }
 
 /** Create and start a new tmux session */

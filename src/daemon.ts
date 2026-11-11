@@ -86,6 +86,8 @@ import {
   runScriptInTab,
   capturePane,
   setExitRecordDir,
+  agentSessionsToAdopt,
+  applyAgentSessionOptions,
 } from "./session.js";
 import { exitRecordDirFor } from "./exit-record.js";
 import { getRuntime } from "./runtimes/index.js";
@@ -1121,6 +1123,13 @@ export class Daemon {
     const configuredNames = new Set(this.config.sessions.map((s) => s.name));
 
     if (tmuxAlive) {
+      // Give every live agent session the exit-handling options (dead panes
+      // kept, recorder for windows opened later). Idempotent, so sessions
+      // this daemon or an earlier one created already have them.
+      for (const name of agentSessionsToAdopt(this.config.sessions, existingSessions)) {
+        applyAgentSessionOptions(name);
+      }
+
       // Adopt tmux sessions that are alive but daemon thinks are not running
       for (const name of existingSessions) {
         if (!configuredNames.has(name)) continue;
