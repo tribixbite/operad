@@ -104,24 +104,40 @@ export interface ClaudeJsonWriteOpts {
 }
 
 /**
- * Apply a surgical RMW to `~/.claude.json`. Returns nothing on success;
+ * Apply a surgical RMW to `~/.claude.json`. Returns what it claimed;
  * throws SkillError on any precondition failure.
  *
  * Caller is responsible for invoking this OUTSIDE any other long-held
  * lock — the flock here is fine-grained.
  */
-export function writeClaudeJson(opts: ClaudeJsonWriteOpts): void {
+export function writeClaudeJson(opts: ClaudeJsonWriteOpts): ClaudeJsonWriteResult {
   ensureFileExists();
-  withFlock(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
+  return withFlock(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
+}
+
+/** What a writeClaudeJson call actually changed. */
+export interface ClaudeJsonWriteResult {
+  /**
+   * Names from `opts.add` that operad did not manage before this write (new
+   * entries, or user-owned ones taken over with force_take_ownership). The
+   * rest were already operad-managed — on an upgrade, by the previous
+   * version — so an install rollback must restore those, not delete them.
+   */
+  claimed: string[];
 }
 
 /**
  * One pass of read-modify-write. On race detection, recurses with
  * `retriesLeft - 1`; on second race, throws CLAUDE_JSON_RACED.
  */
-function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): void {
+function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): ClaudeJsonWriteResult {
   const snap = readSnapshot();
   const next = applyEdits(snap.parsed, opts);
+  const managedBefore = (snap.parsed.operad_managed as Record<string, unknown> | undefined) ?? {};
+  const serversBefore = (snap.parsed.mcpServers as Record<string, unknown> | undefined) ?? {};
+  const claimed = (opts.add ?? [])
+    .map((a) => a.entry.name)
+    .filter((n) => !(n in managedBefore && n in serversBefore));
 
   // Re-stat just before rename. We want to catch any write that
   // landed between our read and our planned rename.
@@ -129,8 +145,7 @@ function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): void {
   const postSha = sha256Of(readFileSync(claudeJsonPath()));
   if (post.mtimeNs !== snap.mtime_ns || postSha !== snap.sha256) {
     if (retriesLeft > 0) {
-      attemptWrite(opts, retriesLeft - 1);
-      return;
+      return attemptWrite(opts, retriesLeft - 1);
     }
     throw new SkillError(
       "CLAUDE_JSON_RACED",
@@ -140,6 +155,7 @@ function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): void {
   }
 
   writeAtomic(next);
+  return { claimed };
 }
 
 /**

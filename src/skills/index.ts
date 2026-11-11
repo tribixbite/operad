@@ -16,12 +16,12 @@
  * while any tool consumer is active.
  */
 
-import { mkdirSync, renameSync, rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { rmSync, existsSync, readdirSync } from "node:fs";
+import { basename } from "node:path";
 import type { MemoryDb } from "../memory-db.js";
 import type { Logger } from "../log.js";
 import type { ToolExecutor } from "../tools.js";
-import type { WorkflowEngine } from "../workflow.js";
+import type { WorkflowEngine, WorkflowRecord, WorkflowSpec } from "../workflow.js";
 import { resolveDaemonId, type DaemonIdResult } from "./daemon-id.js";
 import {
   type OperadSkill,
@@ -233,8 +233,17 @@ export class SkillManager {
     try {
       // Step 2: provider fetch + extract.
       const cacheParent = this.store.cacheParent(provider, locator);
+      // Which version dirs exist before this fetch. A re-install of an
+      // installed version (or of whatever is cached) lands on an existing
+      // dir; the rollback must not delete it, because the live install is
+      // using it.
+      const dirsBefore = new Set(existsSync(cacheParent) ? readdirSync(cacheParent) : []);
       const fetch = await providerMod.fetch(locator, version, cacheParent);
-      completedSteps.push({ kind: "fetch", cacheParent, version: fetch.resolved_version });
+      // Same mapping (versionDirName) the provider used to name the dir. The
+      // rollback used join(cacheParent, version), which for `commit:<sha>`
+      // is not the `commit-<sha>` dir that was created — never removed.
+      const fetchedDir = this.store.cacheDir(provider, locator, fetch.resolved_version);
+      completedSteps.push({ kind: "fetch", dir: fetchedDir, preexisted: dirsBefore.has(basename(fetchedDir)) });
 
       // Step 3: adapter read.
       const manifest = await providerMod.read(fetch.extracted_path);
@@ -287,6 +296,13 @@ export class SkillManager {
       // mutation so the user can retry without cleanup.
       this.detectConflicts(skill);
 
+      // Compile and validate every workflow BEFORE any side effect. A spec
+      // that failed validateSpec inside registerInMemory threw after earlier
+      // workflows and tool cap rows were already written — with no rollback
+      // step recorded yet — so they stayed behind and every retry failed
+      // with WORKFLOW_NAME_CONFLICT.
+      const compiledWorkflows = this.compileWorkflows(skill);
+
       // Step 4: cache disk is already in `<cacheParent>/<version>/`
       // from the provider's fetch. We treat the provider's
       // extracted_path as the canonical install location; no atomic
@@ -296,25 +312,33 @@ export class SkillManager {
 
       // Step 5: ~/.claude.json (MCP entries).
       if (skill.mcps && skill.mcps.length > 0) {
-        writeClaudeJson({
+        const { claimed } = writeClaudeJson({
           daemon_id: this.daemonId.id,
           add: skill.mcps.map((m) => ({ entry: m, skill_id: skill!.id })),
           force_take_ownership: opts.force_take_ownership,
         });
-        completedSteps.push({ kind: "claude_json", mcp_names: skill.mcps.map((m) => m.name) });
+        // Entries that were already operad-managed (the previous version's)
+        // are restored on rollback from `existing`, not deleted.
+        const replaced = skill.mcps.map((m) => m.name).filter((n) => !claimed.includes(n));
+        completedSteps.push({ kind: "claude_json", claimed, replaced });
       }
 
-      // Step 6: ~/.claude/settings.json (SKILL.md entries).
+      // Step 6: ~/.claude/settings.json (SKILL.md entries). Roll back only
+      // the paths this write added: a same-version reinstall re-adds the
+      // live install's own paths, and removing those stripped its SKILL.mds.
       if (skill.skill_mds && skill.skill_mds.length > 0) {
-        writeSettingsJson({ add: skill.skill_mds.map((s) => s.bundle_path) });
-        completedSteps.push({ kind: "settings_json", paths: skill.skill_mds.map((s) => s.bundle_path) });
+        const { added } = writeSettingsJson({ add: skill.skill_mds.map((s) => s.bundle_path) });
+        completedSteps.push({ kind: "settings_json", paths: added });
       }
 
       // Step 7: in-memory registries — write into the pending
       // generation so the live one stays serving in-flight consumers
-      // until the commit.
-      this.registerInMemory(skill, pendingGen);
-      completedSteps.push({ kind: "register" });
+      // until the commit. The step is recorded BEFORE registering, with a
+      // journal registerInMemory fills as it goes: a throw part-way through
+      // used to leave everything already written with no rollback entry.
+      const journal: RegisterJournal = { tools: [], workflows: [] };
+      completedSteps.push({ kind: "register", journal });
+      this.registerInMemory(skill, pendingGen, compiledWorkflows, journal);
 
       // Step 8: SQLite COMMIT + atomic generation swap. From this
       // point new lookups resolve at pendingGen; existing pinned
@@ -334,7 +358,7 @@ export class SkillManager {
       return { skill, warnings };
     } catch (err) {
       this.log.error(`Install failed at step ${completedSteps.length}: ${(err as Error).message}`);
-      this.rollback(completedSteps, skill);
+      this.rollback(completedSteps, skill, existing);
       throw err;
     }
   }
@@ -510,12 +534,53 @@ export class SkillManager {
 
   // -- internals -----------------------------------------------------------
 
-  private registerInMemory(skill: OperadSkill, gen?: number): void {
+  /**
+   * Compile and validate every workflow in the manifest. Throws (with no side
+   * effects) on the first invalid one, naming it.
+   */
+  private compileWorkflows(skill: OperadSkill): Map<string, WorkflowSpec> {
+    const compiled = new Map<string, WorkflowSpec>();
+    if (!this.opts.workflowEngine) return compiled;
+    // Local require to avoid a circular import (matches registerInMemory).
+    const { compileWorkflowConfig, validateSpec } = require("../workflow.js") as typeof import("../workflow.js");
+    for (const w of skill.workflows ?? []) {
+      try {
+        const spec = compileWorkflowConfig(w);
+        validateSpec(spec);
+        compiled.set(w.name, spec);
+      } catch (err) {
+        throw new SkillError(
+          "PROVIDER_READ_FAILED",
+          `workflow '${w.name}' is invalid: ${(err as Error).message}`,
+          { workflow: w.name },
+        );
+      }
+    }
+    return compiled;
+  }
+
+  /**
+   * Register tools, cap rows and workflows for `skill`.
+   *
+   * `journal` records, before each write, what that name held beforehand
+   * (cap row / workflow record, or null), so an install rollback can put
+   * back exactly the previous state — restoring an upgrade's previous
+   * version instead of deleting it. `compiled` carries the specs
+   * compileWorkflows already validated.
+   */
+  private registerInMemory(
+    skill: OperadSkill,
+    gen?: number,
+    compiled?: Map<string, WorkflowSpec>,
+    journal?: RegisterJournal,
+  ): void {
     const { defaultBucketForTier } = require("./types.js") as typeof import("./types.js");
     const defaultBucket = defaultBucketForTier(skill.trust_tier);
 
     const order: Record<string, number> = { observe: 0, suggest: 1, supervised: 2, trusted: 3, autonomous: 4 };
     for (const t of skill.tools ?? []) {
+      const existingRow = this.db.getToolAutonomyCap(t.toml.name);
+      journal?.tools.push({ name: t.toml.name, priorCap: existingRow });
       // Phase C: route into the pending generation (gen) if a
       // transaction is open; otherwise the live one. The
       // registerTomlTools overload threads gen down to register().
@@ -527,7 +592,6 @@ export class SkillManager {
       // tier default. The cross-tier downgrade path above has
       // already clamped any rows that would otherwise exceed the
       // new cap, so anything here is either at-or-below cap.
-      const existingRow = this.db.getToolAutonomyCap(t.toml.name);
       const capRank = order[t.autonomy_cap];
       const preserveCurrent = existingRow
         && (order[existingRow.current_bucket] ?? 0) <= capRank
@@ -541,17 +605,54 @@ export class SkillManager {
       );
     }
     if (this.opts.workflowEngine) {
+      const specs = compiled ?? this.compileWorkflows(skill);
       for (const w of skill.workflows ?? []) {
-        // Compile + upsert. Engine's upsert is idempotent.
-        // Use a local import to avoid circular deps.
-        const { compileWorkflowConfig } = require("../workflow.js") as typeof import("../workflow.js");
-        this.opts.workflowEngine.upsert(w.name, compileWorkflowConfig(w), `skill:${skill.id}`);
+        const spec = specs.get(w.name);
+        if (!spec) continue; // unreachable: compileWorkflows covers every entry
+        journal?.workflows.push({ name: w.name, prior: this.opts.workflowEngine.get(w.name) });
+        // Engine's upsert is idempotent (UPSERT on name).
+        this.opts.workflowEngine.upsert(w.name, spec, `skill:${skill.id}`);
       }
     }
     // Agents (A1+): the AgentEngine doesn't yet expose a runtime
     // registration API the way ToolExecutor does. A0 ships without
     // agent registration; the agents land in the database via the
     // manifest_json column and Phase A1 will wire seedSpecializations.
+  }
+
+  /**
+   * Reverse a (possibly partial) registerInMemory from its journal, newest
+   * write first. Each restore is independent so one failure does not leave
+   * the rest unrun; failures are rethrown together for rollback() to log.
+   */
+  private undoRegister(journal: RegisterJournal, gen?: number): void {
+    const errors: string[] = [];
+    for (const w of [...journal.workflows].reverse()) {
+      try {
+        if (!this.opts.workflowEngine) break;
+        if (w.prior) {
+          this.opts.workflowEngine.upsert(w.name, w.prior.spec, w.prior.created_by);
+          if (!w.prior.enabled) this.opts.workflowEngine.setEnabled(w.name, false);
+        } else {
+          this.opts.workflowEngine.delete(w.name);
+        }
+      } catch (err) {
+        errors.push(`workflow ${w.name}: ${(err as Error).message}`);
+      }
+    }
+    for (const t of [...journal.tools].reverse()) {
+      try {
+        this.opts.toolExecutor.unregister(t.name, gen);
+        if (t.priorCap) {
+          this.db.setToolAutonomyCap(t.name, t.priorCap.max_bucket, t.priorCap.current_bucket, t.priorCap.set_by_provider);
+        } else {
+          this.db.deleteToolAutonomyCap(t.name);
+        }
+      } catch (err) {
+        errors.push(`tool ${t.name}: ${(err as Error).message}`);
+      }
+    }
+    if (errors.length > 0) throw new Error(errors.join("; "));
   }
 
   private unregisterInMemory(skill: OperadSkill, gen?: number): void {
@@ -613,29 +714,52 @@ export class SkillManager {
    * PARTIAL_INSTALL_RECOVERY_FAILED event and continues — we don't
    * want one broken step to leave the other rollbacks unrun.
    */
-  private rollback(completedSteps: InstallStep[], skill: OperadSkill | null): void {
+  private rollback(
+    completedSteps: InstallStep[],
+    skill: OperadSkill | null,
+    previous: OperadSkill | null,
+  ): void {
     for (let i = completedSteps.length - 1; i >= 0; i--) {
       const step = completedSteps[i];
       try {
         if (step.kind === "sqlite" && skill) {
+          // TODO: on an upgrade this deletes the active-version pointer
+          // instead of restoring `previous`'s. Only reachable if a step after
+          // the SQLite commit (appendEvent) throws.
           this.store.rollbackInstall(skill);
-        } else if (step.kind === "register" && skill) {
-          // Phase C: unregister from the pending generation, NOT live.
-          // Find the generation step (always first if present) and use
-          // it; fall back to live for legacy installs.
+        } else if (step.kind === "register") {
+          // Phase C: tools are unregistered from the pending generation,
+          // NOT live (abortGeneration drops it anyway). Cap rows and
+          // workflows are not generation-scoped, so put back exactly what
+          // the journal says each name held before: an upgrade's previous
+          // version is restored, and only names this install created are
+          // deleted. unregisterInMemory deleted them all — the live
+          // version's workflows (with their run history) and cap rows too.
           const genStep = completedSteps.find((s): s is Extract<InstallStep, { kind: "generation" }> => s.kind === "generation");
-          this.unregisterInMemory(skill, genStep?.gen);
+          this.undoRegister(step.journal, genStep?.gen);
         } else if (step.kind === "settings_json") {
-          writeSettingsJson({ remove: step.paths });
+          if (step.paths.length > 0) writeSettingsJson({ remove: step.paths });
         } else if (step.kind === "claude_json") {
-          writeClaudeJson({ daemon_id: this.daemonId.id, remove: step.mcp_names });
+          if (step.claimed.length > 0) {
+            writeClaudeJson({ daemon_id: this.daemonId.id, remove: step.claimed });
+          }
+          // Names that were already operad-managed: restore the previous
+          // version's entries where we have them.
+          const restore = (previous?.mcps ?? []).filter((m) => step.replaced.includes(m.name));
+          if (restore.length > 0) {
+            writeClaudeJson({
+              daemon_id: this.daemonId.id,
+              add: restore.map((m) => ({ entry: m, skill_id: previous!.id })),
+            });
+          }
         } else if (step.kind === "fetch") {
-          const dir = join(step.cacheParent, step.version);
-          if (existsSync(dir)) {
+          // A dir that existed before this fetch belongs to the live
+          // install (same-version reinstall); deleting it broke that install.
+          if (!step.preexisted && existsSync(step.dir)) {
             try {
-              rmSync(dir, { recursive: true, force: true });
+              rmSync(step.dir, { recursive: true, force: true });
             } catch (e) {
-              this.log.warn(`Rollback cache rm failed at ${dir}: ${(e as Error).message}`);
+              this.log.warn(`Rollback cache rm failed at ${step.dir}: ${(e as Error).message}`);
             }
           }
         } else if (step.kind === "generation") {
@@ -666,10 +790,25 @@ export class SkillManager {
 
 // -- Step descriptors for rollback ----------------------------------------
 
+/** Cap row shape as MemoryDb.getToolAutonomyCap returns it. */
+type CapRow = NonNullable<ReturnType<MemoryDb["getToolAutonomyCap"]>>;
+
+/**
+ * What registerInMemory overwrote, in write order. `null` means the name
+ * did not exist before this install.
+ */
+interface RegisterJournal {
+  tools: Array<{ name: string; priorCap: CapRow | null }>;
+  workflows: Array<{ name: string; prior: WorkflowRecord | null }>;
+}
+
 type InstallStep =
   | { kind: "generation"; gen: number }
-  | { kind: "fetch"; cacheParent: string; version: string }
-  | { kind: "claude_json"; mcp_names: string[] }
+  /** `dir` is the version's cache dir; `preexisted` = it was there before the fetch. */
+  | { kind: "fetch"; dir: string; preexisted: boolean }
+  /** `claimed` were new to operad; `replaced` were already operad-managed. */
+  | { kind: "claude_json"; claimed: string[]; replaced: string[] }
+  /** Only the paths this install added. */
   | { kind: "settings_json"; paths: string[] }
-  | { kind: "register" }
+  | { kind: "register"; journal: RegisterJournal }
   | { kind: "sqlite" };

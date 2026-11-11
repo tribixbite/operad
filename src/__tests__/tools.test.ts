@@ -1457,3 +1457,204 @@ describe("execute() — tool leases", () => {
     expect(r.authorisedByLease).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Subprocess exit status: diff-files / grep-search
+//
+// Both used spawnSync and never looked at `status`, so git exit 128 (not a
+// repo, bad ref) reported "No differences" and grep exit 2 (bad regex,
+// missing path) reported "No matches found" — both as success.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(process.platform === "win32")("built-in diff-files / grep-search exit status", () => {
+  test("diff-files outside a git repository fails with git's error", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("diff-files", { path: tmp }, makeCtx(db));
+    expect(r.success).toBe(false);
+    expect(r.summary).toMatch(/not a git repository/i);
+  });
+
+  test("diff-files with an unknown ref fails instead of 'No differences'", async () => {
+    const repo = join(tmp, "repo");
+    mkdirSync(repo);
+    const git = (...args: string[]) =>
+      Bun.spawnSync(["git", "-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo });
+    git("init", "-q");
+    writeFileSync(join(repo, "a.txt"), "a\n");
+    git("add", "a.txt");
+    git("commit", "-qm", "one");
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("diff-files", { path: repo, ref1: "nosuchref", ref2: "HEAD" }, makeCtx(db));
+    expect(r.success).toBe(false);
+    expect(r.summary).not.toBe("No differences");
+  });
+
+  test("grep-search with an invalid regex fails", async () => {
+    writeFileSync(join(tmp, "x.ts"), "hello\n");
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("grep-search", { pattern: "[unclosed", path: tmp }, makeCtx(db));
+    expect(r.success).toBe(false);
+    expect(r.summary).not.toBe("No matches found");
+  });
+
+  test("grep-search with no matches is still a success", async () => {
+    writeFileSync(join(tmp, "x.ts"), "hello\n");
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("grep-search", { pattern: "zzzznotthere", path: tmp }, makeCtx(db));
+    expect(r.success).toBe(true);
+    expect(r.summary).toBe("No matches found");
+  });
+
+  test("grep-search finds a match", async () => {
+    writeFileSync(join(tmp, "x.ts"), "hello world\n");
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("grep-search", { pattern: "wor.d", path: tmp }, makeCtx(db));
+    expect(r.success).toBe(true);
+    expect(r.summary).toContain("hello world");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// file-read byte cap
+// ---------------------------------------------------------------------------
+
+describe("built-in file-read — size cap", () => {
+  // file-read is `observe` (auto-approved at every level) and slurped the
+  // whole file with readFileSync, so a multi-GB log could exhaust the
+  // daemon's memory from one model-emitted tool block.
+  test("a file over the cap is read partially and reported as truncated", async () => {
+    const big = join(tmp, "big.log");
+    const line = "x".repeat(99) + "\n";
+    writeFileSync(big, line.repeat(30_000)); // ~3 MB
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("file-read", { path: big }, makeCtx(db));
+    expect(r.success).toBe(true);
+    const data = r.data as { bytesRead: number; fileBytes: number; byteTruncated: boolean };
+    expect(data.fileBytes).toBe(3_000_000);
+    expect(data.byteTruncated).toBe(true);
+    expect(data.bytesRead).toBeLessThanOrEqual(1024 * 1024);
+    expect(r.summary).toMatch(/truncated/i);
+  });
+
+  test("last-N on a file over the cap returns the real tail", async () => {
+    const big = join(tmp, "big-tail.log");
+    const body = Array.from({ length: 40_000 }, (_, i) => `row-${i}`.padEnd(79, ".")).join("\n");
+    writeFileSync(big, body);
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("file-read", { path: big, lines: "last-2" }, makeCtx(db));
+    expect(r.success).toBe(true);
+    expect(r.summary).toContain("row-39999");
+    expect(r.summary).toContain("row-39998");
+    expect(r.summary).not.toContain("row-39997");
+  });
+
+  test("a small file is not marked byte-truncated", async () => {
+    const f = join(tmp, "small.txt");
+    writeFileSync(f, "a\nb\n");
+    const ex = new ToolExecutor(db, silentLog);
+    const r = await ex.execute("file-read", { path: f }, makeCtx(db));
+    expect((r.data as { byteTruncated: boolean }).byteTruncated).toBe(false);
+    expect(r.summary).not.toMatch(/truncated/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isAllowedPath — auto-executed locations
+// ---------------------------------------------------------------------------
+
+describe("isAllowedPath — code-execution locations", () => {
+  const HOME = process.env.HOME || homedir();
+
+  // Each of these runs whatever lands in it without the user typing it:
+  // Claude Code hooks/plugins, Termux:Boot / Termux:Widget scripts, PATH
+  // shims, desktop autostart and systemd user units, and git hooks inside an
+  // otherwise-allowed repo.
+  test.each([
+    [".claude/hooks/pre.sh"],
+    [".claude/plugins/p/hooks/hooks.json"],
+    [".termux/boot/start.sh"],
+    [".shortcuts/run.sh"],
+    [".local/bin/git"],
+    [".config/autostart/x.desktop"],
+    [".config/systemd/user/x.service"],
+    [".config/fish/config.fish"],
+    [".bash_login"],
+    [".bash_logout"],
+    [".zlogin"],
+    ["git/proj/.git/hooks/pre-commit"],
+    ["git/proj/.git/config"],
+  ])("denies ~/%s", (rel) => {
+    expect(isAllowedPath(join(HOME, ...rel.split("/")))).toBe(false);
+  });
+
+  test("ordinary repo files and ~/.claude/skills stay allowed", () => {
+    expect(isAllowedPath(join(HOME, "git", "proj", "src", "hooks", "useThing.ts"))).toBe(true);
+    expect(isAllowedPath(join(HOME, "git", "proj", ".github", "workflows", "ci.yml"))).toBe(true);
+    expect(isAllowedPath(join(HOME, ".claude", "skills", "s", "SKILL.md"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timeouts actually bound execution
+// ---------------------------------------------------------------------------
+
+describe("ToolExecutor — timeouts", () => {
+  // The executor aborted a signal on timeout, but nothing awaited that abort:
+  // a builtin that ignores ctx.signal ran to completion however long it took.
+  test("a tool that ignores its signal is abandoned at the timeout", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.register({
+      ...makeTool("deaf"),
+      timeout_ms: 200,
+      execute: async () => {
+        await new Promise((r) => setTimeout(r, 5_000));
+        return { success: true, data: null, summary: "finished", sideEffects: [], duration_ms: 0 };
+      },
+    });
+    const t0 = Date.now();
+    const r = await ex.execute("deaf", {}, makeCtx(db));
+    expect(Date.now() - t0).toBeLessThan(3_000);
+    expect(r.success).toBe(false);
+    expect(r.summary).toMatch(/timed out/i);
+  }, 10_000);
+
+  // exec's own timeout SIGTERMs only `sh`; a grandchild still holding the
+  // stdout pipe kept the call open until it exited on its own.
+  test.skipIf(process.platform === "win32")(
+    "a TOML tool's timeout kills the whole process group",
+    async () => {
+      const pidFile = join(tmp, "grandchild.pid");
+      const ex = new ToolExecutor(db, silentLog);
+      ex.registerTomlTools([{
+        name: "spawns-grandchild", description: "d", category: "analyze",
+        command: `sleep 30 & echo $! > '${pidFile}'; wait`,
+        timeout_ms: 500,
+      }]);
+      const t0 = Date.now();
+      const r = await ex.execute("spawns-grandchild", {}, makeCtx(db));
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(r.success).toBe(false);
+      expect(r.summary).toMatch(/timed out/i);
+
+      const pid = Number(readFileSync(pidFile, "utf-8").trim());
+      expect(pid).toBeGreaterThan(0);
+      await new Promise((res) => setTimeout(res, 200));
+      let alive = true;
+      try { process.kill(pid, 0); } catch { alive = false; }
+      if (alive) { try { process.kill(pid, "SIGKILL"); } catch { /* raced */ } }
+      expect(alive).toBe(false);
+    },
+    15_000,
+  );
+
+  test.skipIf(process.platform === "win32")("a TOML tool's non-zero exit reports stderr", async () => {
+    const ex = new ToolExecutor(db, silentLog);
+    ex.registerTomlTools([{
+      name: "fails", description: "d", category: "analyze",
+      command: "echo boom >&2; exit 3",
+    }]);
+    const r = await ex.execute("fails", {}, makeCtx(db));
+    expect(r.success).toBe(false);
+    expect(r.summary).toContain("boom");
+  });
+});

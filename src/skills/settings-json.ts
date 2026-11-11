@@ -63,21 +63,33 @@ interface ReadSnapshot {
   sha256: string;
 }
 
-export function writeSettingsJson(opts: SettingsJsonWriteOpts): void {
-  ensureFileExists();
-  withLockfile(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
+/** What a writeSettingsJson call actually changed. */
+export interface SettingsJsonWriteResult {
+  /**
+   * Paths from `opts.add` that were not already present. An install's
+   * rollback must remove only these: on a same-version reinstall or an
+   * upgrade sharing a bundle path, the path belongs to the live install.
+   */
+  added: string[];
 }
 
-function attemptWrite(opts: SettingsJsonWriteOpts, retriesLeft: number): void {
+export function writeSettingsJson(opts: SettingsJsonWriteOpts): SettingsJsonWriteResult {
+  ensureFileExists();
+  return withLockfile(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
+}
+
+function attemptWrite(opts: SettingsJsonWriteOpts, retriesLeft: number): SettingsJsonWriteResult {
   const snap = readSnapshot();
   const next = applyEdits(snap.parsed, opts);
+  // Computed against the same snapshot the write is based on, inside the lock.
+  const before = new Set(Array.isArray(snap.parsed.skills) ? (snap.parsed.skills as string[]) : []);
+  const added = [...new Set(opts.add ?? [])].filter((p) => !before.has(p));
 
   const post = statSync(settingsPath(), { bigint: true });
   const postSha = sha256Of(readFileSync(settingsPath()));
   if (post.mtimeNs !== snap.mtime_ns || postSha !== snap.sha256) {
     if (retriesLeft > 0) {
-      attemptWrite(opts, retriesLeft - 1);
-      return;
+      return attemptWrite(opts, retriesLeft - 1);
     }
     throw new SkillError(
       "CLAUDE_JSON_RACED",
@@ -87,6 +99,7 @@ function attemptWrite(opts: SettingsJsonWriteOpts, retriesLeft: number): void {
   }
 
   writeAtomic(next);
+  return { added };
 }
 
 /**

@@ -123,7 +123,7 @@ describe("nextCronTime — invalid expressions", () => {
 describe("nextCronTime — wildcard (*)", () => {
   test("'* * * * *' fires 1 minute after the reference date", () => {
     // Reference: 2025-01-15T12:00:00Z (a Wednesday)
-    const after = new Date("2025-01-15T12:00:00Z");
+    const after = new Date("2025-01-15T12:00:00");
     const next = nextCronTime("* * * * *", after);
     expect(next).not.toBeNull();
     // Next fire = +1 minute exactly
@@ -132,83 +132,83 @@ describe("nextCronTime — wildcard (*)", () => {
 
   test("'* * * * *' result is always 60s after after (second boundary stripped)", () => {
     // After has non-zero seconds — they should be zeroed in the candidate
-    const after = new Date("2025-03-10T08:45:30Z");
+    const after = new Date("2025-03-10T08:45:30");
     const next = nextCronTime("* * * * *", after)!;
     // Seconds should be 0
-    expect(next.getUTCSeconds()).toBe(0);
+    expect(next.getSeconds()).toBe(0);
     // Should be 2025-03-10T08:46:00Z
-    expect(next.getTime()).toBe(new Date("2025-03-10T08:46:00Z").getTime());
+    expect(next.getTime()).toBe(new Date("2025-03-10T08:46:00").getTime());
   });
 });
 
 describe("nextCronTime — specific minute/hour", () => {
   test("'30 9 * * *' next fire after 09:30 is next day at 09:30", () => {
-    const after = new Date("2025-01-15T09:30:00Z");
+    const after = new Date("2025-01-15T09:30:00");
     const next = nextCronTime("30 9 * * *", after)!;
-    expect(next.getUTCHours()).toBe(9);
-    expect(next.getUTCMinutes()).toBe(30);
+    expect(next.getHours()).toBe(9);
+    expect(next.getMinutes()).toBe(30);
     // Must be the day AFTER (since after == fire time, next is +1 minute → same day 09:31,
     // which is not at minute=30/hour=9, so advances to next day)
-    expect(next.getUTCDate()).toBe(16); // Jan 16
+    expect(next.getDate()).toBe(16); // Jan 16
   });
 
   test("'0 0 * * *' fires at midnight — next fire after 23:59 is midnight next day", () => {
-    const after = new Date("2025-06-01T23:59:00Z");
+    const after = new Date("2025-06-01T23:59:00");
     const next = nextCronTime("0 0 * * *", after)!;
-    expect(next.toISOString()).toBe("2025-06-02T00:00:00.000Z");
+    expect(next.getTime()).toBe(new Date("2025-06-02T00:00:00").getTime());
   });
 
   test("'0 12 * * *' fires in about 12h if current time is midnight", () => {
-    const after = new Date("2025-04-10T00:00:00Z");
+    const after = new Date("2025-04-10T00:00:00");
     const next = nextCronTime("0 12 * * *", after)!;
-    expect(next.toISOString()).toBe("2025-04-10T12:00:00.000Z");
+    expect(next.getTime()).toBe(new Date("2025-04-10T12:00:00").getTime());
   });
 });
 
 describe("nextCronTime — step syntax (*/N)", () => {
   test("'*/15 * * * *' fires at next :00, :15, :30, or :45", () => {
-    const after = new Date("2025-01-01T10:01:00Z");
+    const after = new Date("2025-01-01T10:01:00");
     const next = nextCronTime("*/15 * * * *", after)!;
-    expect(next.getUTCMinutes()).toBe(15);
-    expect(next.getUTCHours()).toBe(10);
+    expect(next.getMinutes()).toBe(15);
+    expect(next.getHours()).toBe(10);
   });
 
   test("'0 */6 * * *' fires every 6 hours (0h, 6h, 12h, 18h)", () => {
-    const after = new Date("2025-01-01T06:00:00Z"); // just past 06:00:00
+    const after = new Date("2025-01-01T06:00:00"); // just past 06:00:00
     const next = nextCronTime("0 */6 * * *", after)!;
-    expect(next.getUTCHours()).toBe(12);
-    expect(next.getUTCMinutes()).toBe(0);
+    expect(next.getHours()).toBe(12);
+    expect(next.getMinutes()).toBe(0);
   });
 });
 
 describe("nextCronTime — range syntax (A-B)", () => {
   test("'0 9-11 * * *' fires at 10:00 when after=09:01", () => {
-    const after = new Date("2025-03-05T09:01:00Z");
+    const after = new Date("2025-03-05T09:01:00");
     const next = nextCronTime("0 9-11 * * *", after)!;
-    expect(next.getUTCHours()).toBe(10);
-    expect(next.getUTCMinutes()).toBe(0);
+    expect(next.getHours()).toBe(10);
+    expect(next.getMinutes()).toBe(0);
   });
 
   test("'30-35 * * * *' fires at :31 when after is :30", () => {
-    const after = new Date("2025-03-05T14:30:00Z");
+    const after = new Date("2025-03-05T14:30:00");
     const next = nextCronTime("30-35 * * * *", after)!;
-    expect(next.getUTCMinutes()).toBe(31);
+    expect(next.getMinutes()).toBe(31);
   });
 });
 
 describe("nextCronTime — list syntax (A,B,C)", () => {
   test("'0 8,12,18 * * *' after 08:01 fires at 12:00", () => {
-    const after = new Date("2025-02-20T08:01:00Z");
+    const after = new Date("2025-02-20T08:01:00");
     const next = nextCronTime("0 8,12,18 * * *", after)!;
-    expect(next.getUTCHours()).toBe(12);
-    expect(next.getUTCMinutes()).toBe(0);
+    expect(next.getHours()).toBe(12);
+    expect(next.getMinutes()).toBe(0);
   });
 
   test("'0,30 * * * *' fires at :00 then :30 of next hour after :30", () => {
-    const after = new Date("2025-02-20T10:30:00Z");
+    const after = new Date("2025-02-20T10:30:00");
     const next = nextCronTime("0,30 * * * *", after)!;
-    expect(next.getUTCHours()).toBe(11);
-    expect(next.getUTCMinutes()).toBe(0);
+    expect(next.getHours()).toBe(11);
+    expect(next.getMinutes()).toBe(0);
   });
 });
 
@@ -224,47 +224,47 @@ describe("nextCronTime — day-of-week / day-of-month", () => {
    * agent schedule ran 7x.
    */
   test("'0 9 * * 1' fires only on Mondays", () => {
-    // 2025-01-15 is a Wednesday at 09:00:00 UTC; the next Monday is Jan 20.
-    const after = new Date("2025-01-15T09:00:00Z");
+    // 2025-01-15 is a Wednesday at 09:00:00 local time; the next Monday is Jan 20.
+    const after = new Date("2025-01-15T09:00:00");
     const next = nextCronTime("0 9 * * 1", after)!;
-    expect(next.getUTCHours()).toBe(9);
-    expect(next.getUTCMinutes()).toBe(0);
-    expect(next.getUTCDay()).toBe(1);
-    expect(next.getUTCDate()).toBe(20);
+    expect(next.getHours()).toBe(9);
+    expect(next.getMinutes()).toBe(0);
+    expect(next.getDay()).toBe(1);
+    expect(next.getDate()).toBe(20);
   });
 
   test("'0 9 1 * 1' fires at 09:00 on the next Monday or 1st (whichever comes first)", () => {
     // 2025-01-15 Wed 09:01 → next match is Jan 20 (Monday) or Feb 1 (1st)
     // Jan 20 is Monday, comes before Feb 1
-    const after = new Date("2025-01-15T09:01:00Z");
+    const after = new Date("2025-01-15T09:01:00");
     const next = nextCronTime("0 9 1 * 1", after)!;
     // Should be Jan 20 (Monday) at 09:00 since that's before Feb 1
-    expect(next.getUTCHours()).toBe(9);
-    expect(next.getUTCDate()).toBeLessThanOrEqual(31);
-    expect(next.getUTCMonth()).toBe(0); // still January
+    expect(next.getHours()).toBe(9);
+    expect(next.getDate()).toBeLessThanOrEqual(31);
+    expect(next.getMonth()).toBe(0); // still January
   });
 
   test("'0 0 * 1 *' (any midnight in January) fires at next midnight in Jan", () => {
     // dom=* and dow=* → every midnight in January qualifies
-    const after = new Date("2025-01-01T00:01:00Z");
+    const after = new Date("2025-01-01T00:01:00");
     const next = nextCronTime("0 0 * 1 *", after)!;
     // Next midnight in January = Jan 2 00:00
-    expect(next.getUTCMonth()).toBe(0); // January
-    expect(next.getUTCDate()).toBe(2);
-    expect(next.getUTCHours()).toBe(0);
-    expect(next.getUTCMinutes()).toBe(0);
+    expect(next.getMonth()).toBe(0); // January
+    expect(next.getDate()).toBe(2);
+    expect(next.getHours()).toBe(0);
+    expect(next.getMinutes()).toBe(0);
   });
 
   test("'0 0 * * 0' (wildcard dom + Sunday dow) fires at next 00:00", () => {
     // 2025-01-18 is Saturday at 23:59 — dom is * so every day matches
-    const after = new Date("2025-01-18T23:59:00Z");
+    const after = new Date("2025-01-18T23:59:00");
     const next = nextCronTime("0 0 * * 0", after)!;
     // dom=* → fires at next midnight = Jan 19 00:00 (Sunday in this case, but
     // dom=* means it fires next midnight regardless of dow)
-    expect(next.getUTCHours()).toBe(0);
-    expect(next.getUTCMinutes()).toBe(0);
+    expect(next.getHours()).toBe(0);
+    expect(next.getMinutes()).toBe(0);
     // Jan 19 2025 is a Sunday — happens to match both dom=* and dow=0
-    expect(next.getUTCDate()).toBe(19);
+    expect(next.getDate()).toBe(19);
   });
 });
 
@@ -293,7 +293,7 @@ describe("ScheduleEngine — computeNext", () => {
 
   test("cron schedule: next is a valid future epoch", () => {
     const engine = new TestableScheduleEngine(db, silentLog(), successHandler());
-    const after = Math.floor(new Date("2025-01-15T10:00:00Z").getTime() / 1000);
+    const after = Math.floor(new Date("2025-01-15T10:00:00").getTime() / 1000);
     const next = engine.computeNext("0 12 * * *", null, after);
     expect(next).not.toBeNull();
     expect(next!).toBeGreaterThan(after);
@@ -599,19 +599,19 @@ describe("ScheduleEngine — start/stop lifecycle", () => {
 
 describe("nextCronTime — dom/dow restriction semantics", () => {
   // A Tuesday, so a Monday-only rule must skip ahead rather than match today.
-  const TUE = new Date("2026-08-11T00:00:00Z");
+  const TUE = new Date("2026-08-11T00:00:00");
   const dayOf = (d: Date | null) =>
-    d ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getUTCDay()] : null;
+    d ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()] : null;
 
   test("dow-only restriction lands on that weekday, not tomorrow", () => {
     const d = nextCronTime("0 9 * * 1", TUE);
     expect(dayOf(d)).toBe("Mon");
-    expect(d!.toISOString()).toBe("2026-08-17T09:00:00.000Z");
+    expect(d!.getTime()).toBe(new Date("2026-08-17T09:00:00").getTime());
   });
 
   test("dom-only restriction lands on that date", () => {
-    expect(nextCronTime("0 0 5 * *", TUE)!.getUTCDate()).toBe(5);
-    expect(nextCronTime("0 9 1 * *", TUE)!.getUTCDate()).toBe(1);
+    expect(nextCronTime("0 0 5 * *", TUE)!.getDate()).toBe(5);
+    expect(nextCronTime("0 9 1 * *", TUE)!.getDate()).toBe(1);
   });
 
   test("a weekday range excludes the weekend", () => {
@@ -626,14 +626,14 @@ describe("nextCronTime — dom/dow restriction semantics", () => {
   test("both fields restricted is a union, per POSIX", () => {
     // 1st of the month OR any Monday.
     const d = nextCronTime("0 0 1 * 1", TUE)!;
-    const isFirst = d.getUTCDate() === 1;
+    const isFirst = d.getDate() === 1;
     const isMonday = dayOf(d) === "Mon";
     expect(isFirst || isMonday).toBe(true);
   });
 
   test("neither field restricted fires every day", () => {
     const d = nextCronTime("0 3 * * *", TUE)!;
-    expect(d.toISOString()).toBe("2026-08-11T03:00:00.000Z");
+    expect(d.getTime()).toBe(new Date("2026-08-11T03:00:00").getTime());
   });
 
   test("dow=7 is Sunday, the common alias that used to return null", () => {
@@ -781,5 +781,172 @@ describe("ScheduleEngine — poll re-entrancy, deferrals and id accounting", () 
     expect(b).not.toBe(a);
     const aAgain = engine.upsert({ agentName: "optimizer", scheduleName: "A", intervalMinutes: 30, prompt: "y" });
     expect(aAgain).toBe(a);
+  });
+});
+
+// -- cron parser strictness --------------------------------------------------
+
+describe("nextCronTime — N/step and strict validation", () => {
+  // `5/10` fell through to parseInt("5/10") === 5, so "every 10 minutes from
+  // :05" fired once an hour at :05.
+  test("'5/10 * * * *' fires at :05, :15, :25 …", () => {
+    const a = nextCronTime("5/10 * * * *", new Date("2025-01-15T10:01:00"))!;
+    expect(a.getMinutes()).toBe(5);
+    const b = nextCronTime("5/10 * * * *", a)!;
+    expect(b.getMinutes()).toBe(15);
+    expect(b.getHours()).toBe(10);
+  });
+
+  test("'0 2/6 * * *' runs 2..23 step 6 (02, 08, 14, 20)", () => {
+    const n = nextCronTime("0 2/6 * * *", new Date("2025-01-15T09:00:00"))!;
+    expect(n.getHours()).toBe(14);
+  });
+
+  test.each([
+    ["non-numeric minute", "abc * * * *"],
+    ["trailing garbage parseInt accepted", "5x * * * *"],
+    ["range past the field max", "0 20-30 * * *"],
+    ["reversed range", "30-10 * * * *"],
+    ["step range past the max", "1-70/5 * * * *"],
+    ["N/step start past the max", "60/5 * * * *"],
+    ["empty list element", "1,,2 * * * *"],
+    ["negative-looking value", "-5 * * * *"],
+    ["month 0", "0 0 1 0 *"],
+    ["dow 8", "0 0 * * 8"],
+  ])("rejects %s (%s)", (_label, expr) => {
+    expect(nextCronTime(expr, new Date("2025-01-15T10:00:00"))).toBeNull();
+  });
+});
+
+describe("nextCronTime — local wall-clock time, like crontab", () => {
+  // Fields were matched with getUTC*, so on any host not in UTC `0 9 * * *`
+  // ran at 09:00 UTC — 04:00 in New York. Run in a child with a fixed TZ so
+  // the assertion is meaningful even on a UTC CI runner.
+  test("'0 9 * * *' fires at 09:00 in the process time zone", () => {
+    const mod = join(import.meta.dir, "..", "schedule.ts");
+    const script =
+      `const { nextCronTime } = await import(${JSON.stringify(mod)});` +
+      `console.log(nextCronTime("0 9 * * *", new Date("2025-01-15T00:00:00Z")).toISOString());`;
+    const proc = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, TZ: "America/New_York" },
+    });
+    expect(proc.stderr.toString()).toBe("");
+    // 09:00 EST is 14:00 UTC.
+    expect(proc.stdout.toString().trim()).toBe("2025-01-15T14:00:00.000Z");
+  });
+});
+
+// -- enable, restart and deferral semantics ----------------------------------
+
+describe("ScheduleEngine — re-enable, restart persistence and deferral retry", () => {
+  const rec = (id: number) =>
+    db.requireDb().prepare(`SELECT * FROM agent_schedules WHERE id = ?`).get(id) as unknown as ScheduleRecord;
+  const setDue = (id: number) =>
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`).run(epoch(-10), id);
+
+  // Auto-disable writes next_run_at = NULL; setEnabled(true) only flipped the
+  // flag, and the poll query requires next_run_at IS NOT NULL — so a
+  // re-enabled schedule never fired again until a daemon restart.
+  test("re-enabling an auto-disabled schedule re-arms it and clears failures", async () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), failHandler());
+    const id = engine.upsert({ agentName: "a", scheduleName: "s", intervalMinutes: 5, prompt: "x" });
+    engine.start();
+    for (let i = 0; i < 3; i++) { setDue(id); await engine.poll(); }
+    expect(rec(id).enabled).toBe(0);
+    expect(rec(id).next_run_at).toBeNull();
+
+    engine.setEnabled(id, true);
+    engine.stop();
+    const r = rec(id);
+    expect(r.enabled).toBe(1);
+    expect(r.consecutive_failures).toBe(0);
+    expect(r.next_run_at).not.toBeNull();
+    expect(r.next_run_at!).toBeGreaterThan(epoch());
+  });
+
+  test("enabling an already-enabled schedule leaves its next run alone", () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), successHandler());
+    const id = engine.upsert({ agentName: "a", scheduleName: "s", intervalMinutes: 60, prompt: "x" });
+    const at = epoch(120);
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`).run(at, id);
+    engine.setEnabled(id, true);
+    expect(rec(id).next_run_at).toBe(at);
+  });
+
+  // recomputeAllNextRuns used `last_run_at ?? now`, so a never-run interval
+  // schedule was pushed a full interval out on every restart — a daemon that
+  // restarts more often than the interval starves it forever.
+  test("a restart preserves a pending next_run_at", () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), successHandler());
+    const id = engine.upsert({ agentName: "a", scheduleName: "s", intervalMinutes: 60, prompt: "x" });
+    const at = epoch(100);
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`).run(at, id);
+    engine.start();
+    engine.stop();
+    expect(rec(id).next_run_at).toBe(at);
+  });
+
+  test("a restart still fills in a missing next_run_at", () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), successHandler());
+    const id = engine.upsert({ agentName: "a", scheduleName: "s", intervalMinutes: 60, prompt: "x" });
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = NULL WHERE id = ?`).run(id);
+    engine.start();
+    engine.stop();
+    expect(rec(id).next_run_at).not.toBeNull();
+  });
+
+  // A deferral rescheduled a full cycle out, so a nightly job deferred once
+  // because a session was attached simply skipped the night.
+  test("a deferred run retries within about a minute, not a full cycle", async () => {
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => ({ success: false, deferred: true }));
+    const id = engine.upsert({ agentName: "a", scheduleName: "s", intervalMinutes: 60 * 24, prompt: "x" });
+    engine.start();
+    setDue(id);
+    await engine.poll();
+    engine.stop();
+    const next = rec(id).next_run_at!;
+    expect(next).toBeGreaterThan(epoch());
+    expect(next).toBeLessThanOrEqual(epoch(65));
+  });
+
+  test("a deferral never retries later than the schedule's natural next slot", async () => {
+    // Interval shorter than the retry delay: the natural slot wins.
+    const engine = new TestableScheduleEngine(db, silentLog(), async () => ({ success: false, deferred: true }));
+    const id = engine.upsert({ agentName: "a", scheduleName: "s", intervalMinutes: 0.5, prompt: "x" });
+    engine.start();
+    setDue(id);
+    await engine.poll();
+    engine.stop();
+    expect(rec(id).next_run_at!).toBeLessThanOrEqual(epoch(31));
+  });
+
+  // Two polls overlap while A's handler runs. Poll 2 fires B and reschedules
+  // it; poll 1 then resumed its stale `due` snapshot and fired B a second
+  // time, with the failure count it read before poll 2 updated it.
+  test("an overlapping poll does not refire a schedule from a stale snapshot", async () => {
+    const calls: Record<string, number> = {};
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const engine = new TestableScheduleEngine(db, silentLog(), async (s) => {
+      calls[s.schedule_name] = (calls[s.schedule_name] ?? 0) + 1;
+      if (s.schedule_name === "A") await gate;
+      return { success: true };
+    });
+    const a = engine.upsert({ agentName: "x", scheduleName: "A", intervalMinutes: 60, prompt: "x" });
+    const b = engine.upsert({ agentName: "x", scheduleName: "B", intervalMinutes: 60, prompt: "x" });
+    engine.start();
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`).run(epoch(-20), a);
+    db.requireDb().prepare(`UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`).run(epoch(-10), b);
+
+    const first = engine.poll();               // fires A, blocks on the gate
+    await new Promise((r) => setTimeout(r, 10));
+    await engine.poll();                       // skips in-flight A, fires B
+    release();
+    await first;                               // must NOT fire B again
+    engine.stop();
+
+    expect(calls.A).toBe(1);
+    expect(calls.B).toBe(1);
+    expect(rec(b).run_count).toBe(1);
   });
 });

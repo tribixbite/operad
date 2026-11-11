@@ -249,6 +249,25 @@ describe("Memory search", () => {
     // A bare AND with no operands would normally error in FTS5
     expect(() => db.searchMemories("/proj", "AND")).not.toThrow();
   });
+
+  // The memory-search tool passes "*" for a global search, but the query
+  // filtered `project_path = '*'` (in both the FTS and LIKE paths), so every
+  // global search came back empty.
+  test("searchMemories('*') searches every project", () => {
+    db.createMemory("/proj-a", "discovery", "zebra crossing in project a");
+    db.createMemory("/proj-b", "discovery", "zebra stripes in project b");
+    db.createMemory("/proj-b", "discovery", "nothing relevant");
+    const results = db.searchMemories("*", "zebra");
+    expect(results.map((r) => r.project_path).sort()).toEqual(["/proj-a", "/proj-b"]);
+  });
+
+  test("searchMemories('*') LIKE fallback also searches every project", () => {
+    db.createMemory("/proj-a", "discovery", "a (paren AND quote\" text");
+    db.createMemory("/proj-b", "discovery", "b (paren AND quote\" text");
+    // An unbalanced quote is invalid FTS5 syntax, forcing the LIKE path.
+    const results = db.searchMemories("*", "quote\"");
+    expect(results.length).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
