@@ -19,8 +19,21 @@
  * live orphan. stdin is /dev/null, so a child that reads stdin gets EOF
  * instead of hanging on a pipe nobody writes.
  *
- * TODO: on Windows `detached` does not create a POSIX process group; only the
- * direct child is killed there (taskkill /T would be needed for the tree).
+ * Platform coverage:
+ *  - POSIX (Linux, Android/Termux, macOS): fully covered and tested — the
+ *    group kill reaches every descendant that stayed in the group. A
+ *    descendant that calls setsid()/setpgid() to leave it is NOT reached.
+ *  - Windows: NOT covered and not tested on this project's devices.
+ *    `detached` there creates a new console, not a process group, so
+ *    signalGroup() falls back to child.kill() on the direct child only
+ *    (TerminateProcess); its descendants keep running and may keep the
+ *    stdout/stderr pipes open. The timeout, abort and output-cap triggers
+ *    still fire and the promise still settles (the grace timer resolves it
+ *    even if 'close' never arrives), so callers are never left waiting —
+ *    only the descendant cleanup is missing.
+ *
+ * TODO: Windows tree kill — `taskkill /PID <pid> /T /F` (or a Job Object)
+ * in signalGroup when isWin.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
