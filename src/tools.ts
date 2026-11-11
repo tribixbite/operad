@@ -224,8 +224,15 @@ const CATEGORY_LEVEL: Record<ToolCategory, number> = {
 export class ToolExecutor {
   /** Generation-keyed shadow maps. `generations.get(currentGen)` is "live". */
   private generations = new Map<number, Map<string, ToolDef>>();
-  /** Highest generation ever produced — monotonic; never reused. */
+  /** The live generation. Normally the newest; revertGeneration can step it back. */
   private currentGen = 0;
+  /**
+   * Highest generation number ever allocated. Allocation uses this rather
+   * than currentGen so a number is never reused after revertGeneration — a
+   * consumer pinned to the reverted generation must not see a different map
+   * under the same id.
+   */
+  private highestGen = 0;
   /** Pending uncommitted generations (in-flight beginGenerationTransaction). */
   private pending = new Set<number>();
   private providers: ToolProvider[] = [];
@@ -259,11 +266,30 @@ export class ToolExecutor {
    * `commitGeneration(n)` or `abortGeneration(n)`.
    */
   beginGenerationTransaction(): number {
-    const newGen = Math.max(this.currentGen, ...this.pending) + 1;
+    const newGen = Math.max(this.highestGen, this.currentGen, ...this.pending) + 1;
+    this.highestGen = newGen;
     const liveMap = this.generations.get(this.currentGen)!;
     this.generations.set(newGen, new Map(liveMap));
     this.pending.add(newGen);
     return newGen;
+  }
+
+  /**
+   * Undo a commitGeneration: make `toGen` live again. Used by an install
+   * rollback when a step AFTER the commit fails, so the previous tool surface
+   * is restored instead of the half-installed one staying live.
+   *
+   * No-op (returns false) unless `gen` is currently live. The reverted map is
+   * kept, not deleted: a consumer that pinned it in the meantime keeps a
+   * stable view, and the GC sweeper prunes it once unpinned.
+   */
+  revertGeneration(gen: number, toGen: number): boolean {
+    if (this.currentGen !== gen) return false;
+    if (!this.generations.has(toGen)) {
+      throw new Error(`revertGeneration: generation ${toGen} no longer exists`);
+    }
+    this.currentGen = toGen;
+    return true;
   }
 
   /** Atomic flip — the new generation becomes "live". */

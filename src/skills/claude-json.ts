@@ -101,10 +101,27 @@ export interface ClaudeJsonWriteOpts {
    * MCP_OWNED_BY_OTHER_DAEMON — cross-daemon resolution is manual.
    */
   force_take_ownership?: boolean;
+  /**
+   * Put entries back exactly as a previous write's `prior` journal recorded
+   * them (install rollback). Applied after removes and before adds. Only
+   * touches a name that is absent or owned by this daemon.
+   */
+  restore?: PriorMcpEntry[];
 }
 
 /**
- * Apply a surgical RMW to `~/.claude.json`. Returns what it claimed;
+ * The state of one `mcpServers` name immediately before a write replaced it:
+ * the raw server object and its operad_managed record (null when the entry
+ * was user-owned).
+ */
+export interface PriorMcpEntry {
+  name: string;
+  server: unknown;
+  managed: OperadManagedEntry | null;
+}
+
+/**
+ * Apply a surgical RMW to `~/.claude.json`. Returns a journal of what it replaced;
  * throws SkillError on any precondition failure.
  *
  * Caller is responsible for invoking this OUTSIDE any other long-held
@@ -115,15 +132,17 @@ export function writeClaudeJson(opts: ClaudeJsonWriteOpts): ClaudeJsonWriteResul
   return withFlock(lockPath(), () => attemptWrite(opts, /* retriesLeft */ 1));
 }
 
-/** What a writeClaudeJson call actually changed. */
+/** What a writeClaudeJson call's adds replaced, for an exact rollback. */
 export interface ClaudeJsonWriteResult {
+  /** Names from `opts.add` with no `mcpServers` entry before the write. */
+  created: string[];
   /**
-   * Names from `opts.add` that operad did not manage before this write (new
-   * entries, or user-owned ones taken over with force_take_ownership). The
-   * rest were already operad-managed — on an upgrade, by the previous
-   * version — so an install rollback must restore those, not delete them.
+   * Every other added name, as it was before the write: the previous
+   * version's operad-managed entry, or a user-owned entry taken over with
+   * force_take_ownership. Rollback restores these instead of deleting them
+   * — deleting a taken-over entry destroyed the user's own MCP config.
    */
-  claimed: string[];
+  prior: PriorMcpEntry[];
 }
 
 /**
@@ -133,11 +152,22 @@ export interface ClaudeJsonWriteResult {
 function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): ClaudeJsonWriteResult {
   const snap = readSnapshot();
   const next = applyEdits(snap.parsed, opts);
-  const managedBefore = (snap.parsed.operad_managed as Record<string, unknown> | undefined) ?? {};
+  // Journal against the same snapshot the write is based on, inside the lock.
+  const managedBefore = (snap.parsed.operad_managed as Record<string, OperadManagedEntry> | undefined) ?? {};
   const serversBefore = (snap.parsed.mcpServers as Record<string, unknown> | undefined) ?? {};
-  const claimed = (opts.add ?? [])
-    .map((a) => a.entry.name)
-    .filter((n) => !(n in managedBefore && n in serversBefore));
+  const created: string[] = [];
+  const prior: PriorMcpEntry[] = [];
+  for (const name of new Set((opts.add ?? []).map((a) => a.entry.name))) {
+    if (!(name in serversBefore)) {
+      created.push(name);
+    } else {
+      prior.push({
+        name,
+        server: structuredClone(serversBefore[name]),
+        managed: managedBefore[name] ? { ...managedBefore[name] } : null,
+      });
+    }
+  }
 
   // Re-stat just before rename. We want to catch any write that
   // landed between our read and our planned rename.
@@ -155,7 +185,7 @@ function attemptWrite(opts: ClaudeJsonWriteOpts, retriesLeft: number): ClaudeJso
   }
 
   writeAtomic(next);
-  return { claimed };
+  return { created, prior };
 }
 
 /**
@@ -197,6 +227,24 @@ export function applyEdits(
     }
     delete mcpServers[name];
     delete operadManaged[name];
+  }
+
+  // Restores — verbatim, including dropping operad's ownership claim on an
+  // entry that was user-owned before. Refused only if another daemon has
+  // since claimed the name; an unmanaged current entry is ours to replace
+  // because it can only be the one our own add wrote.
+  for (const p of opts.restore ?? []) {
+    const owner = operadManaged[p.name];
+    if (owner && owner.daemon_id !== opts.daemon_id) {
+      throw new SkillError(
+        "MCP_OWNED_BY_OTHER_DAEMON",
+        `MCP '${p.name}' is owned by another operad daemon (${owner.daemon_id}); cannot restore its previous entry.`,
+        { name: p.name, owner_daemon_id: owner.daemon_id, our_daemon_id: opts.daemon_id },
+      );
+    }
+    mcpServers[p.name] = structuredClone(p.server);
+    if (p.managed) operadManaged[p.name] = { ...p.managed };
+    else delete operadManaged[p.name];
   }
 
   // Adds.

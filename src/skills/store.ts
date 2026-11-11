@@ -58,6 +58,19 @@ interface ActiveVersionRow {
   generation: number;
 }
 
+/**
+ * Pre-commit state of the rows commitInstall overwrites (see
+ * SkillStore.snapshotInstall). Rows are kept as raw column maps so restore
+ * is verbatim regardless of schema additions. null = the row did not exist.
+ */
+export interface InstallSnapshot {
+  skillId: string;
+  provider: string;
+  locator: string;
+  skillRow: Record<string, unknown> | null;
+  active: Record<string, unknown> | null;
+}
+
 export class SkillStore {
   private cacheRoot: string;
 
@@ -144,20 +157,51 @@ export class SkillStore {
   }
 
   /**
-   * Reverse `commitInstall` — used by §3.15 compensation when a later
-   * transaction step fails after the SQLite row has been inserted.
+   * Capture exactly the rows `commitInstall(skill)` will overwrite: the
+   * `skills` row with this id (present on a same-version reinstall) and the
+   * (provider, locator) active-version pointer (present on any upgrade).
+   * Take it immediately before commitInstall; pass it to restoreInstall.
    */
-  rollbackInstall(skill: OperadSkill): void {
+  snapshotInstall(skill: OperadSkill): InstallSnapshot {
     const db = this.db.requireDb();
+    const skillRow = db.prepare(`SELECT * FROM skills WHERE id = ?`).get(skill.id) as
+      Record<string, unknown> | null | undefined;
+    const active = db.prepare(
+      `SELECT * FROM skill_active_version WHERE provider = ? AND locator = ?`,
+    ).get(skill.source.provider, skill.source.locator) as Record<string, unknown> | null | undefined;
+    return {
+      skillId: skill.id,
+      provider: skill.source.provider,
+      locator: skill.source.locator,
+      skillRow: skillRow ?? null,
+      active: active ?? null,
+    };
+  }
+
+  /**
+   * Reverse `commitInstall` — §3.15 compensation when a later step fails
+   * after the SQLite COMMIT. Puts back the snapshotted rows verbatim.
+   *
+   * This used to DELETE the active-version pointer and the skill row
+   * unconditionally, so an upgrade (or same-version reinstall) failing after
+   * the commit left the skill with no active version at all — the previous
+   * install vanished from list/get while its files and tools remained.
+   */
+  restoreInstall(snap: InstallSnapshot): void {
+    const db = this.db.requireDb();
+    const reinsert = (table: string, row: Record<string, unknown>): void => {
+      const cols = Object.keys(row);
+      db.prepare(
+        `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+      ).run(...cols.map((c) => row[c] as string | number | null));
+    };
     db.exec("BEGIN");
     try {
-      // If we're rolling back an UPSERT (i.e. there was a previous
-      // version), the simplest correct behaviour is to delete the row;
-      // any caller that needs the previous row preserved must capture
-      // it before calling commitInstall. A0 only installs fresh.
+      db.prepare(`DELETE FROM skills WHERE id = ?`).run(snap.skillId);
+      if (snap.skillRow) reinsert("skills", snap.skillRow);
       db.prepare(`DELETE FROM skill_active_version WHERE provider = ? AND locator = ?`)
-        .run(skill.source.provider, skill.source.locator);
-      db.prepare(`DELETE FROM skills WHERE id = ?`).run(skill.id);
+        .run(snap.provider, snap.locator);
+      if (snap.active) reinsert("skill_active_version", snap.active);
       db.exec("COMMIT");
     } catch (err) {
       db.exec("ROLLBACK");

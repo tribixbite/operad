@@ -327,6 +327,29 @@ describe("generation transactions", () => {
     expect(() => ex.abortGeneration(g)).not.toThrow();
   });
 
+  // Install rollback after the commit must put the previous tool surface
+  // back, and must never hand out the reverted generation's number again.
+  test("revertGeneration restores the previous live generation without reusing its id", () => {
+    const ex = new ToolExecutor(db, silentLog);
+    const before = ex.getCurrentGeneration();
+    const g = ex.beginGenerationTransaction();
+    ex.register(makeTool("only-in-new-gen"), g);
+    ex.commitGeneration(g);
+    expect(ex.hasTool("only-in-new-gen")).toBe(true);
+
+    expect(ex.revertGeneration(g, before)).toBe(true);
+    expect(ex.getCurrentGeneration()).toBe(before);
+    expect(ex.hasTool("only-in-new-gen")).toBe(false);
+    expect(ex.beginGenerationTransaction()).toBeGreaterThan(g);
+  });
+
+  test("revertGeneration is a no-op when that generation is not live", () => {
+    const ex = new ToolExecutor(db, silentLog);
+    const g = ex.beginGenerationTransaction();
+    expect(ex.revertGeneration(g, 0)).toBe(false); // still pending, never live
+    expect(ex.getCurrentGeneration()).toBe(0);
+  });
+
   test("commitGeneration throws for unknown generation", () => {
     const ex = new ToolExecutor(db, silentLog);
     expect(() => ex.commitGeneration(999)).toThrow(/not pending/);

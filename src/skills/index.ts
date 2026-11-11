@@ -33,8 +33,8 @@ import {
   type SkillSearchHit,
   type SkillSearchResult,
 } from "./types.js";
-import { SkillStore } from "./store.js";
-import { writeClaudeJson } from "./claude-json.js";
+import { SkillStore, type InstallSnapshot } from "./store.js";
+import { writeClaudeJson, type PriorMcpEntry } from "./claude-json.js";
 import { writeSettingsJson } from "./settings-json.js";
 
 /**
@@ -226,9 +226,11 @@ export class SkillManager {
     // Phase C: open a generation transaction NOW so registerInMemory
     // writes into the pending generation rather than the live one.
     // commitGeneration runs at step-8 success; abortGeneration in
-    // rollback drops the pending gen + its tool entries.
+    // rollback drops the pending gen + its tool entries — or, if it was
+    // already committed, makes the previous live generation live again.
+    const previousGen = this.opts.toolExecutor.getCurrentGeneration();
     const pendingGen = this.opts.toolExecutor.beginGenerationTransaction();
-    completedSteps.push({ kind: "generation", gen: pendingGen });
+    completedSteps.push({ kind: "generation", gen: pendingGen, previousGen });
 
     try {
       // Step 2: provider fetch + extract.
@@ -312,15 +314,14 @@ export class SkillManager {
 
       // Step 5: ~/.claude.json (MCP entries).
       if (skill.mcps && skill.mcps.length > 0) {
-        const { claimed } = writeClaudeJson({
+        // The writer journals what each name held before the write, so the
+        // rollback can restore it verbatim.
+        const { created, prior } = writeClaudeJson({
           daemon_id: this.daemonId.id,
           add: skill.mcps.map((m) => ({ entry: m, skill_id: skill!.id })),
           force_take_ownership: opts.force_take_ownership,
         });
-        // Entries that were already operad-managed (the previous version's)
-        // are restored on rollback from `existing`, not deleted.
-        const replaced = skill.mcps.map((m) => m.name).filter((n) => !claimed.includes(n));
-        completedSteps.push({ kind: "claude_json", claimed, replaced });
+        completedSteps.push({ kind: "claude_json", created, prior });
       }
 
       // Step 6: ~/.claude/settings.json (SKILL.md entries). Roll back only
@@ -343,9 +344,14 @@ export class SkillManager {
       // Step 8: SQLite COMMIT + atomic generation swap. From this
       // point new lookups resolve at pendingGen; existing pinned
       // callers continue at their snapshotted older gen.
+      // The snapshot is taken right before the commit and the step recorded
+      // right after it, so anything failing from here on (commitGeneration,
+      // the install event) restores the previous rows instead of deleting
+      // the active-version pointer.
+      const snapshot = this.store.snapshotInstall(skill);
       this.store.commitInstall(skill, pendingGen);
+      completedSteps.push({ kind: "sqlite", snapshot });
       this.opts.toolExecutor.commitGeneration(pendingGen);
-      completedSteps.push({ kind: "sqlite" });
 
       this.store.appendEvent(skill.id, "install", {
         provider,
@@ -358,7 +364,7 @@ export class SkillManager {
       return { skill, warnings };
     } catch (err) {
       this.log.error(`Install failed at step ${completedSteps.length}: ${(err as Error).message}`);
-      this.rollback(completedSteps, skill, existing);
+      this.rollback(completedSteps, skill);
       throw err;
     }
   }
@@ -714,19 +720,15 @@ export class SkillManager {
    * PARTIAL_INSTALL_RECOVERY_FAILED event and continues — we don't
    * want one broken step to leave the other rollbacks unrun.
    */
-  private rollback(
-    completedSteps: InstallStep[],
-    skill: OperadSkill | null,
-    previous: OperadSkill | null,
-  ): void {
+  private rollback(completedSteps: InstallStep[], skill: OperadSkill | null): void {
     for (let i = completedSteps.length - 1; i >= 0; i--) {
       const step = completedSteps[i];
       try {
-        if (step.kind === "sqlite" && skill) {
-          // TODO: on an upgrade this deletes the active-version pointer
-          // instead of restoring `previous`'s. Only reachable if a step after
-          // the SQLite commit (appendEvent) throws.
-          this.store.rollbackInstall(skill);
+        if (step.kind === "sqlite") {
+          // Put back the pre-commit skill row and active-version pointer:
+          // the previous version stays active on a failed upgrade, and a
+          // fresh install's rows are simply removed.
+          this.store.restoreInstall(step.snapshot);
         } else if (step.kind === "register") {
           // Phase C: tools are unregistered from the pending generation,
           // NOT live (abortGeneration drops it anyway). Cap rows and
@@ -740,17 +742,12 @@ export class SkillManager {
         } else if (step.kind === "settings_json") {
           if (step.paths.length > 0) writeSettingsJson({ remove: step.paths });
         } else if (step.kind === "claude_json") {
-          if (step.claimed.length > 0) {
-            writeClaudeJson({ daemon_id: this.daemonId.id, remove: step.claimed });
-          }
-          // Names that were already operad-managed: restore the previous
-          // version's entries where we have them.
-          const restore = (previous?.mcps ?? []).filter((m) => step.replaced.includes(m.name));
-          if (restore.length > 0) {
-            writeClaudeJson({
-              daemon_id: this.daemonId.id,
-              add: restore.map((m) => ({ entry: m, skill_id: previous!.id })),
-            });
+          // One write: remove the names this install created, and put every
+          // overwritten entry back exactly as it was — the previous
+          // version's, or a user-owned entry taken over with
+          // force_take_ownership (which used to be deleted outright).
+          if (step.created.length > 0 || step.prior.length > 0) {
+            writeClaudeJson({ daemon_id: this.daemonId.id, remove: step.created, restore: step.prior });
           }
         } else if (step.kind === "fetch") {
           // A dir that existed before this fetch belongs to the live
@@ -763,9 +760,12 @@ export class SkillManager {
             }
           }
         } else if (step.kind === "generation") {
-          // Drop the pending generation. Idempotent — if commit
-          // already swapped it to live, abortGeneration is a no-op.
+          // Drop the pending generation (idempotent). If the commit already
+          // swapped it to live, abortGeneration is a no-op and the
+          // half-installed tool surface stayed live — revert to the
+          // generation that was live before this install.
           this.opts.toolExecutor.abortGeneration(step.gen);
+          this.opts.toolExecutor.revertGeneration(step.gen, step.previousGen);
         }
       } catch (err) {
         // Recovery itself failed — log a structured event so the user
@@ -803,12 +803,14 @@ interface RegisterJournal {
 }
 
 type InstallStep =
-  | { kind: "generation"; gen: number }
+  /** `previousGen` was live when the transaction opened. */
+  | { kind: "generation"; gen: number; previousGen: number }
   /** `dir` is the version's cache dir; `preexisted` = it was there before the fetch. */
   | { kind: "fetch"; dir: string; preexisted: boolean }
-  /** `claimed` were new to operad; `replaced` were already operad-managed. */
-  | { kind: "claude_json"; claimed: string[]; replaced: string[] }
+  /** `created` had no entry before; `prior` is the exact pre-write state of the rest. */
+  | { kind: "claude_json"; created: string[]; prior: PriorMcpEntry[] }
   /** Only the paths this install added. */
   | { kind: "settings_json"; paths: string[] }
   | { kind: "register"; journal: RegisterJournal }
-  | { kind: "sqlite" };
+  /** Rows commitInstall overwrote, restored verbatim on rollback. */
+  | { kind: "sqlite"; snapshot: InstallSnapshot };
