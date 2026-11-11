@@ -14,6 +14,10 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { isAbsolute } from "node:path";
 import { detectPlatform, resetPlatform } from "../platform/platform.js";
 import type { Platform, PlatformId } from "../platform/platform.js";
+import { AndroidPlatform } from "../platform/android.js";
+import { LinuxPlatform } from "../platform/linux.js";
+import { DarwinPlatform } from "../platform/darwin.js";
+import { WindowsPlatform } from "../platform/windows.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -222,8 +226,14 @@ describe("Platform interface shape", () => {
     expect(typeof platform.resolveAdbPath).toBe("function");
   });
 
-  test("applyPhantomFix is a function", () => {
-    expect(typeof platform.applyPhantomFix).toBe("function");
+  test("no platform impl carries its own applyPhantomFix (AndroidEngine owns it)", () => {
+    // The Android impl had a second, divergent copy of the process-protection
+    // stack (no serial verification, no failure reporting) that nothing
+    // called; the others were no-op stubs for it. One implementation only.
+    for (const Impl of [AndroidPlatform, LinuxPlatform, DarwinPlatform, WindowsPlatform]) {
+      expect("applyPhantomFix" in Impl.prototype).toBe(false);
+    }
+    expect("applyPhantomFix" in platform).toBe(false);
   });
 
   test("resolveLocalIp is a function", () => {

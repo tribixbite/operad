@@ -313,11 +313,6 @@ export class LinuxPlatform implements Platform {
     return null;
   }
 
-  /** Apply Android phantom process killer fix — no-op on desktop */
-  applyPhantomFix(_adbBin: string, _serialArgs: string[]): void {
-    // Android-specific OOM/phantom process protections not needed on desktop
-  }
-
   /** Resolve local IP address via ip route */
   resolveLocalIp(): string | null {
     return resolveLocalIpViaRoute();

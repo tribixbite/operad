@@ -533,11 +533,6 @@ end tell`,
     return null;
   }
 
-  /** No-op — phantom process killer is Android-specific */
-  applyPhantomFix(_adbBin: string, _serialArgs: string[]): void {
-    // Not applicable on macOS
-  }
-
   /**
    * Resolve local IP address via `route -n get default` + ifconfig.
    * Falls back to scanning ifconfig output for a private IP.

@@ -91,8 +91,6 @@ function assertUniversalSurface(p: Platform, id: PlatformId): void {
   expect(() => p.killTrackedNotifyProcesses()).not.toThrow();
   expect(typeof p.killStaleNotifyProcesses()).toBe("number");
   expect(() => p.removeNotification("nope")).not.toThrow();
-  // applyPhantomFix is a no-op off Android even with bogus args.
-  expect(() => p.applyPhantomFix("adb", ["-s", "x"])).not.toThrow();
 }
 
 // ---------------------------------------------------------------------------
