@@ -14,9 +14,9 @@
    * via the onExpand callback if provided.
    */
 
-  import { fetchAllCustomization } from "$lib/api";
+  import { AllCustomizationLoader } from "$lib/all-customization.svelte";
   import { shortenHomePath as shortenPath } from "$lib/env.svelte";
-  import type { AgentsMdFile, AllProjectsCustomizationResponse } from "$lib/types";
+  import type { AgentsMdFile } from "$lib/types";
   import { formatBytes, formatRelativeTime, copyToClipboard } from "$lib/format";
 
   // -- Props ------------------------------------------------------------------
@@ -39,9 +39,8 @@
   type Tab = "user" | "project" | "all";
   let activeTab = $state<Tab>("user");
 
-  let allData: AllProjectsCustomizationResponse | null = $state(null);
-  let allLoading = $state(false);
-  let allError: string | null = $state(null);
+  /** Lazily fetched on first visit to the "All Projects" tab. */
+  const allProjects = new AllCustomizationLoader();
 
 
   // -- Derived ----------------------------------------------------------------
@@ -54,14 +53,14 @@
 
   /** All AGENTS.md entries across all projects */
   const allFiles = $derived<Array<AgentsMdFile & { projectPath?: string; projectName?: string }>>(
-    allData
+    allProjects.data
       ? [
-          ...(allData.user.agentsMdFiles ?? []).map(f => ({
+          ...(allProjects.data.user.agentsMdFiles ?? []).map(f => ({
             ...f,
             projectPath: undefined,
             projectName: "~/.claude",
           })),
-          ...allData.projects.flatMap(p =>
+          ...allProjects.data.projects.flatMap(p =>
             p.agentsMdFile
               ? [{ ...p.agentsMdFile, projectPath: p.path, projectName: p.name }]
               : [],
@@ -72,22 +71,9 @@
 
   // -- Functions --------------------------------------------------------------
 
-  async function loadAll() {
-    if (allData || allLoading) return;
-    allLoading = true;
-    allError = null;
-    try {
-      allData = await fetchAllCustomization();
-    } catch (e: unknown) {
-      allError = e instanceof Error ? e.message : String(e);
-    } finally {
-      allLoading = false;
-    }
-  }
-
   function selectTab(tab: Tab) {
     activeTab = tab;
-    if (tab === "all") loadAll();
+    if (tab === "all") allProjects.load();
   }
 
   function downloadJson(filename: string, payload: unknown) {
@@ -153,7 +139,7 @@
     onclick={() => selectTab("all")}
   >
     All Projects
-    {#if allData}
+    {#if allProjects.data}
       <span class="tab-count">{allFiles.length}</span>
     {/if}
   </button>
@@ -248,14 +234,14 @@
   <!-- All Projects tab -->
   {:else if activeTab === "all"}
     <div class="tab-actions">
-      <button class="btn-dl" onclick={downloadAll} disabled={allFiles.length === 0 || allLoading}>
+      <button class="btn-dl" onclick={downloadAll} disabled={allFiles.length === 0 || allProjects.loading}>
         Download JSON
       </button>
     </div>
-    {#if allLoading}
+    {#if allProjects.loading}
       <p class="muted">Loading…</p>
-    {:else if allError}
-      <p class="error-msg">{allError}</p>
+    {:else if allProjects.error}
+      <p class="error-msg">{allProjects.error}</p>
     {:else if allFiles.length === 0}
       <p class="muted">No AGENTS.md found across any known projects.</p>
     {:else}
@@ -514,23 +500,5 @@
     text-align: center;
     padding-left: 0;
     padding-right: 0.25rem;
-  }
-  .path-icon-btn {
-    background: none;
-    border: 1px solid transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 0.1875rem 0.25rem;
-    border-radius: 4px;
-    line-height: 0;
-    transition: color 0.15s, border-color 0.15s, background 0.15s;
-  }
-  .path-icon-btn:hover {
-    color: var(--accent-blue);
-    border-color: var(--border);
-    background: var(--bg-tertiary);
-  }
-  .path-icon-btn:active {
-    color: var(--accent-green);
   }
 </style>

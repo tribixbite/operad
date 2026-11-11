@@ -22,6 +22,9 @@
     ConsolidationSummary, AgentInfo,
   } from "$lib/types";
 
+  /** Per-instance prefix for form control ids (label for= association) */
+  const uid = $props.id();
+
   let tab: "trust" | "leases" | "schedules" | "consolidation" = $state("trust");
 
   let agents = $state<AgentInfo[]>([]);
@@ -244,8 +247,8 @@
       <p class="muted">Loading agents…</p>
     {:else}
       <div class="agent-picker">
-        <label>Agent:</label>
-        <select bind:value={leasesAgent} onchange={() => loadLeases(leasesAgent)}>
+        <label for="{uid}-leases-agent">Agent:</label>
+        <select id="{uid}-leases-agent" bind:value={leasesAgent} onchange={() => loadLeases(leasesAgent)}>
           {#each agents as a (a.name)}<option value={a.name}>{a.name}</option>{/each}
         </select>
         <button class="btn btn-xs" onclick={() => loadLeases(leasesAgent)} disabled={leasesLoading}>Refresh</button>
@@ -395,7 +398,7 @@
   }
   .form-card label { display: flex; flex-direction: column; gap: 0.125rem; font-size: 0.6875rem; color: var(--text-secondary); }
   .form-card label.inline { flex-direction: row; align-items: center; gap: 0.25rem; }
-  .form-card input, .form-card textarea, .form-card select {
+  .form-card input, .form-card textarea {
     padding: 0.25rem 0.5rem; background: var(--bg-secondary);
     border: 1px solid var(--border); border-radius: 4px;
     color: var(--text-primary); font-family: inherit; font-size: 0.75rem;

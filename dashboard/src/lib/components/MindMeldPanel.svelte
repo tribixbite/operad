@@ -156,10 +156,10 @@
   </div>
 
   {#if actionMsg}
-    <div class="action-msg" onclick={() => (actionMsg = null)}>{actionMsg}</div>
+    <button type="button" class="action-msg" title="Dismiss" onclick={() => (actionMsg = null)}>{actionMsg}</button>
   {/if}
   {#if error}
-    <div class="error-msg" onclick={() => (error = null)}>{error}</div>
+    <button type="button" class="error-msg" title="Dismiss" onclick={() => (error = null)}>{error}</button>
   {/if}
 
   {#if loading}
@@ -338,6 +338,8 @@
     border-radius: 4px;
     cursor: pointer;
   }
+  /* Dismiss-on-tap banners are <button>s: keep the full-width block layout */
+  .action-msg, .error-msg { display: block; width: 100%; text-align: left; }
   .muted { color: var(--text-muted); font-size: 0.6875rem; }
 
   .input {

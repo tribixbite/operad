@@ -27,7 +27,7 @@
 
   // -- State ------------------------------------------------------------------
 
-  let data: CustomizationResponse | null = $state(null);
+  let data = $state<CustomizationResponse | null>(null);
   let loading = $state(true);
   let error: string | null = $state(null);
 
@@ -346,7 +346,7 @@ Example usage or output
   // -- Environment migration (export / import bundle) -----------------------
 
   /** Which migrate action is in flight ("" = idle). */
-  let migrateBusy = $state("");
+  let migrateBusy = $state<"" | "export" | "dry" | "apply">("");
   /** Parsed bundle chosen by the user, or null when none is loaded. */
   let importBundleData = $state<unknown>(null);
   let importFilename = $state("");
@@ -453,7 +453,7 @@ Example usage or output
         }),
       );
 
-      const files: Array<{ name: string; data: Uint8Array }> = [];
+      const files: Array<{ name: string; data: Uint8Array<ArrayBuffer> }> = [];
       const projLabel = selectedProject ? selectedProject.split("/").pop() ?? "project" : "user";
 
       for (const r of results) {
@@ -484,9 +484,10 @@ Example usage or output
   }
 
   /** Minimal zip file builder (store-only, no compression) */
-  function buildZip(files: Array<{ name: string; data: Uint8Array }>): Blob {
-    const parts: Uint8Array[] = [];
-    const centralDir: Uint8Array[] = [];
+  function buildZip(files: Array<{ name: string; data: Uint8Array<ArrayBuffer> }>): Blob {
+    // ArrayBuffer-backed (not ArrayBufferLike): Blob rejects SharedArrayBuffer views.
+    const parts: Uint8Array<ArrayBuffer>[] = [];
+    const centralDir: Uint8Array<ArrayBuffer>[] = [];
     let offset = 0;
 
     for (const { name, data } of files) {
@@ -613,9 +614,6 @@ Example usage or output
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
     return String(n);
   }
-
-  /** Stop event propagation (for buttons inside section headers) */
-  function stopProp(e: Event) { e.stopPropagation(); }
 </script>
 
 <div class="settings-root">
@@ -662,15 +660,17 @@ Example usage or output
 
     <!-- Section 1: MCP Servers -->
     <div class="card section-card">
-      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("mcp")}>
-        <span class="chevron">{sections.mcp ? "▾" : "▸"}</span>
-        <span class="section-title">MCP Servers</span>
-        <span class="badge badge-blue">{data.mcpServers.length}</span>
-        <span class="header-actions" onclick={stopProp}>
+      <div class="section-header split">
+        <button type="button" class="section-toggle" aria-expanded={sections.mcp} onclick={() => toggleSection("mcp")}>
+          <span class="chevron">{sections.mcp ? "▾" : "▸"}</span>
+          <span class="section-title">MCP Servers</span>
+          <span class="badge badge-blue">{data.mcpServers.length}</span>
+        </button>
+        <span class="header-actions">
           <button
             class="btn-icon btn-sm-icon"
             title="Download JSON config of all MCP servers (re-importable on a new device)"
-            onclick={() => downloadJsonPayload("operad-mcp-config", { mcpServers: data.mcpServers })}
+            onclick={() => { if (data) downloadJsonPayload("operad-mcp-config", { mcpServers: data.mcpServers }); }}
             disabled={data.mcpServers.length === 0}
           >⤓</button>
         </span>
@@ -684,15 +684,17 @@ Example usage or output
 
     <!-- Section 2: Plugins -->
     <div class="card section-card">
-      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("plugins")}>
-        <span class="chevron">{sections.plugins ? "▾" : "▸"}</span>
-        <span class="section-title">Plugins</span>
-        <span class="badge badge-blue">{data.plugins.length}</span>
-        <span class="header-actions" onclick={stopProp}>
+      <div class="section-header split">
+        <button type="button" class="section-toggle" aria-expanded={sections.plugins} onclick={() => toggleSection("plugins")}>
+          <span class="chevron">{sections.plugins ? "▾" : "▸"}</span>
+          <span class="section-title">Plugins</span>
+          <span class="badge badge-blue">{data.plugins.length}</span>
+        </button>
+        <span class="header-actions">
           <button
             class="btn-icon btn-sm-icon"
             title="Download JSON of installed plugins (re-importable on a new device)"
-            onclick={() => downloadJsonPayload("operad-plugins-config", { plugins: data.plugins })}
+            onclick={() => { if (data) downloadJsonPayload("operad-plugins-config", { plugins: data.plugins }); }}
             disabled={data.plugins.length === 0}
           >⤓</button>
         </span>
@@ -751,17 +753,19 @@ Example usage or output
 
     <!-- Section 3: Skills -->
     <div class="card section-card">
-      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("skills")}>
-        <span class="chevron">{sections.skills ? "▾" : "▸"}</span>
-        <span class="section-title">Skills</span>
-        <span class="badge badge-blue">{data.skills.length}</span>
-        <!-- Header action buttons (stop propagation so they don't toggle the section) -->
-        <span class="header-actions" onclick={stopProp}>
+      <div class="section-header split">
+        <button type="button" class="section-toggle" aria-expanded={sections.skills} onclick={() => toggleSection("skills")}>
+          <span class="chevron">{sections.skills ? "▾" : "▸"}</span>
+          <span class="section-title">Skills</span>
+          <span class="badge badge-blue">{data.skills.length}</span>
+        </button>
+        <!-- Header action buttons (siblings of the toggle, so clicks never toggle the section) -->
+        <span class="header-actions">
           <button
             class="btn-icon btn-sm-icon"
             title="Download all as zip"
             disabled={downloadingAll === "skills"}
-            onclick={() => handleDownloadAll(data!.skills, "skills")}
+            onclick={() => { if (data) handleDownloadAll(data.skills, "skills"); }}
           >{downloadingAll === "skills" ? "..." : "\u2913"}</button>
           <span class="new-skill-dropdown">
             <button class="btn-icon btn-sm-icon primary" title="New skill" onclick={() => {
@@ -854,16 +858,18 @@ Example usage or output
 
     <!-- Section 3.5: Plans -->
     <div class="card section-card">
-      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("plans")}>
-        <span class="chevron">{sections.plans ? "▾" : "▸"}</span>
-        <span class="section-title">Plans</span>
-        <span class="badge badge-blue">{(data.plans ?? []).length}</span>
-        <span class="header-actions" onclick={stopProp}>
+      <div class="section-header split">
+        <button type="button" class="section-toggle" aria-expanded={sections.plans} onclick={() => toggleSection("plans")}>
+          <span class="chevron">{sections.plans ? "▾" : "▸"}</span>
+          <span class="section-title">Plans</span>
+          <span class="badge badge-blue">{(data.plans ?? []).length}</span>
+        </button>
+        <span class="header-actions">
           <button
             class="btn-icon btn-sm-icon"
             title="Download all as zip"
             disabled={downloadingAll === "plans"}
-            onclick={() => handleDownloadAll(data!.plans ?? [], "plans")}
+            onclick={() => { if (data) handleDownloadAll(data.plans ?? [], "plans"); }}
           >{downloadingAll === "plans" ? "..." : "\u2913"}</button>
         </span>
       </div>
@@ -910,16 +916,18 @@ Example usage or output
 
     <!-- Section 4: CLAUDE.md -->
     <div class="card section-card">
-      <div class="section-header" role="button" tabindex="0" onclick={() => toggleSection("claudeMd")}>
-        <span class="chevron">{sections.claudeMd ? "▾" : "▸"}</span>
-        <span class="section-title">CLAUDE.md</span>
-        <span class="badge badge-blue">{data.claudeMds.length}</span>
-        <span class="header-actions" onclick={stopProp}>
+      <div class="section-header split">
+        <button type="button" class="section-toggle" aria-expanded={sections.claudeMd} onclick={() => toggleSection("claudeMd")}>
+          <span class="chevron">{sections.claudeMd ? "▾" : "▸"}</span>
+          <span class="section-title">CLAUDE.md</span>
+          <span class="badge badge-blue">{data.claudeMds.length}</span>
+        </button>
+        <span class="header-actions">
           <button
             class="btn-icon btn-sm-icon"
             title="Download all as zip"
             disabled={downloadingAll === "claude-md"}
-            onclick={() => handleDownloadAll(data!.claudeMds, "claude-md")}
+            onclick={() => { if (data) handleDownloadAll(data.claudeMds, "claude-md"); }}
           >{downloadingAll === "claude-md" ? "..." : "\u2913"}</button>
         </span>
       </div>
@@ -1056,7 +1064,7 @@ Example usage or output
           </p>
 
           <div class="migrate-actions">
-            <button class="btn" onclick={handleExportBundle} disabled={migrateBusy}>
+            <button class="btn" onclick={handleExportBundle} disabled={migrateBusy !== ""}>
               {migrateBusy === "export" ? "Exporting\u2026" : "Export bundle"}
             </button>
             <label class="btn btn-file">
@@ -1079,10 +1087,10 @@ Example usage or output
               </label>
             </div>
             <div class="migrate-actions">
-              <button class="btn" onclick={() => runImport(true)} disabled={migrateBusy}>
+              <button class="btn" onclick={() => runImport(true)} disabled={migrateBusy !== ""}>
                 {migrateBusy === "dry" ? "Checking\u2026" : "Preview (dry run)"}
               </button>
-              <button class="btn btn-primary" onclick={() => runImport(false)} disabled={migrateBusy}>
+              <button class="btn btn-primary" onclick={() => runImport(false)} disabled={migrateBusy !== ""}>
                 {migrateBusy === "apply" ? "Importing\u2026" : "Apply import"}
               </button>
             </div>
@@ -1502,6 +1510,25 @@ Example usage or output
     text-align: left;
   }
   .section-header:hover { background: var(--bg-tertiary); }
+  /* Header with action buttons: the toggle is its own <button> so the actions
+     sit beside it rather than nested inside an interactive element. The toggle
+     absorbs the row padding, keeping the whole row (bar the actions) clickable. */
+  .section-header.split { padding: 0; cursor: default; }
+  .section-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    padding: 0.75rem 0 0.75rem 1rem;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .section-header.split .header-actions { padding-right: 1rem; }
   /* Chevron: larger and more readable */
   .chevron { font-size: 0.6875rem; color: var(--text-muted); width: 0.875rem; flex-shrink: 0; }
   .section-title {
@@ -1551,75 +1578,15 @@ Example usage or output
     vertical-align: top;
   }
   tr:last-child td { border-bottom: none; }
-  tr:hover:not(.detail-row) { background: rgba(88, 166, 255, 0.04); cursor: pointer; }
+  tr:hover { background: rgba(88, 166, 255, 0.04); cursor: pointer; }
   .disabled-row { opacity: 0.5; }
   .blocked-row td:first-child { color: var(--accent-red); }
-  .name-cell { font-weight: 500; white-space: nowrap; }
-  .cmd-cell {
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-secondary);
-  }
-  .mono { font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace; color: var(--accent-purple); }
   /* Empty state text: muted with leading-relaxed */
   .muted { color: var(--text-muted); font-size: 0.8125rem; line-height: 1.6; }
-
-  /* Detail row (expanded MCP server) */
-  .detail-row td { padding: 0; border-bottom: 1px solid var(--border); }
-  .detail-content { padding: 0.5rem 0.75rem; background: var(--bg-primary); }
-  .detail-grid {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 0.125rem 0.75rem;
-    font-size: 0.6875rem;
-  }
-  .detail-label { color: var(--text-muted); }
 
   /* Plugin table */
   .plugin-name { font-weight: 500; }
   .plugin-author { font-size: 0.625rem; color: var(--text-muted); }
-
-  /* Item list (skills, CLAUDE.md) */
-  .item-list {
-    display: flex;
-    flex-direction: column;
-  }
-  .item-row {
-    border-bottom: 1px solid var(--border);
-  }
-  .item-row:last-child { border-bottom: none; }
-  .item-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    width: 100%;
-    /* Increased padding for easier touch targets */
-    padding: 0.625rem 0.25rem;
-    background: none;
-    border: none;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: 0.8125rem;
-    cursor: pointer;
-    text-align: left;
-  }
-  .item-header:hover { background: rgba(88, 166, 255, 0.05); }
-  .item-name { font-weight: 500; white-space: nowrap; }
-  .item-path {
-    flex: 1;
-    /* Bumped from 0.5625rem — was illegibly tiny */
-    font-size: 0.6875rem;
-    font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    text-align: right;
-    min-width: 0;
-  }
-  .plugin-source { font-size: 0.625rem; }
 
   /* File content viewer */
   .item-content {
@@ -1749,6 +1716,7 @@ Example usage or output
     line-height: 1.4;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
@@ -1829,6 +1797,9 @@ Example usage or output
   /* Mobile — keep font sizes readable; don't shrink below 0.6875rem */
   @media (max-width: 768px) {
     .section-header { padding: 0.625rem 0.75rem; }
+    .section-header.split { padding: 0; }
+    .section-toggle { padding: 0.625rem 0 0.625rem 0.75rem; }
+    .section-header.split .header-actions { padding-right: 0.75rem; }
     /* Section titles stay at 0.75rem on mobile — not shrunk further */
     .section-title { font-size: 0.75rem; }
     .section-body { padding: 0.25rem 0.625rem 0.75rem; }
@@ -1838,13 +1809,11 @@ Example usage or output
     /* Floor for mono code preview: 0.6875rem */
     .file-preview { font-size: 0.6875rem; max-height: 300px; }
     .edit-area { font-size: 0.6875rem; }
-    .item-header { font-size: 0.75rem; }
     .mp-name { font-size: 0.75rem; }
     /* Description text: floor at 0.6875rem */
     .mp-desc { font-size: 0.6875rem; }
     .btn-sm-icon { width: 1.25rem; height: 1.25rem; font-size: 0.7rem; }
     /* Path hint: floor at 0.625rem */
-    .item-path { font-size: 0.625rem; }
     .project-path-hint { font-size: 0.625rem; }
   }
 

@@ -2338,15 +2338,17 @@ export class MemoryDb {
     ).all() as Array<{ agent1: string; agent2: string; message_count: number; last_message_at: number }>;
   }
 
-  /** Get per-agent decision quality metrics */
+  /** Get per-agent decision quality metrics: all-time totals plus the rolling
+   * {@link getDecisionQualityTrend} trend, which the dashboard badges render. */
   getDecisionMetrics(): Array<{
     agent_name: string;
     total_decisions: number;
     scored_decisions: number;
     avg_score: number | null;
+    trend: "improving" | "declining" | "stable" | "insufficient_data";
   }> {
     const db = this.requireDb();
-    return db.prepare(
+    const rows = db.prepare(
       `SELECT agent_name,
               COUNT(*) as total_decisions,
               COUNT(score) as scored_decisions,
@@ -2355,6 +2357,8 @@ export class MemoryDb {
        GROUP BY agent_name
        ORDER BY agent_name`,
     ).all() as Array<{ agent_name: string; total_decisions: number; scored_decisions: number; avg_score: number | null }>;
+    // One small windowed query per agent; the agent count is a handful.
+    return rows.map((r) => ({ ...r, trend: this.getDecisionQualityTrend(r.agent_name).trend }));
   }
 
   // -- Tool execution audit log -----------------------------------------------

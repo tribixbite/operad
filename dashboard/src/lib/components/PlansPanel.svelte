@@ -11,9 +11,9 @@
    * Each tab has a "Download JSON" button that triggers a browser file download.
    */
 
-  import { fetchAllCustomization } from "$lib/api";
+  import { AllCustomizationLoader } from "$lib/all-customization.svelte";
   import { shortenHomePath as shortenPath } from "$lib/env.svelte";
-  import type { PlanInfo, AllProjectsCustomizationResponse } from "$lib/types";
+  import type { PlanInfo } from "$lib/types";
   import { formatBytes, formatRelativeTime, copyToClipboard } from "$lib/format";
 
   // -- Props ------------------------------------------------------------------
@@ -36,9 +36,8 @@
   type Tab = "user" | "project" | "all";
   let activeTab = $state<Tab>("user");
 
-  let allData: AllProjectsCustomizationResponse | null = $state(null);
-  let allLoading = $state(false);
-  let allError: string | null = $state(null);
+  /** Lazily fetched on first visit to the "All Projects" tab. */
+  const allProjects = new AllCustomizationLoader();
 
 
   // -- Derived ----------------------------------------------------------------
@@ -47,10 +46,10 @@
   const projectPlans = $derived(plans.filter(p => p.scope === "project"));
 
   const allPlans = $derived<Array<PlanInfo & { projectPath?: string; projectName?: string }>>(
-    allData
+    allProjects.data
       ? [
-          ...allData.user.plans.map(p => ({ ...p, projectPath: undefined, projectName: "~/.claude" })),
-          ...allData.projects.flatMap(proj =>
+          ...allProjects.data.user.plans.map(p => ({ ...p, projectPath: undefined, projectName: "~/.claude" })),
+          ...allProjects.data.projects.flatMap(proj =>
             proj.plans.map(p => ({ ...p, projectPath: proj.path, projectName: proj.name })),
           ),
         ]
@@ -59,22 +58,9 @@
 
   // -- Functions --------------------------------------------------------------
 
-  async function loadAll() {
-    if (allData || allLoading) return;
-    allLoading = true;
-    allError = null;
-    try {
-      allData = await fetchAllCustomization();
-    } catch (e: unknown) {
-      allError = e instanceof Error ? e.message : String(e);
-    } finally {
-      allLoading = false;
-    }
-  }
-
   function selectTab(tab: Tab) {
     activeTab = tab;
-    if (tab === "all") loadAll();
+    if (tab === "all") allProjects.load();
   }
 
   function downloadJson(filename: string, payload: unknown) {
@@ -131,7 +117,7 @@
     onclick={() => selectTab("all")}
   >
     All Projects
-    {#if allData}
+    {#if allProjects.data}
       <span class="tab-count">{allPlans.length}</span>
     {/if}
   </button>
@@ -231,14 +217,14 @@
 
   {:else if activeTab === "all"}
     <div class="tab-actions">
-      <button class="btn-dl" onclick={downloadAll} disabled={allPlans.length === 0 || allLoading}>
+      <button class="btn-dl" onclick={downloadAll} disabled={allPlans.length === 0 || allProjects.loading}>
         Download JSON
       </button>
     </div>
-    {#if allLoading}
+    {#if allProjects.loading}
       <p class="muted">Loading…</p>
-    {:else if allError}
-      <p class="error-msg">{allError}</p>
+    {:else if allProjects.error}
+      <p class="error-msg">{allProjects.error}</p>
     {:else if allPlans.length === 0}
       <p class="muted">No plans found across any known projects.</p>
     {:else}

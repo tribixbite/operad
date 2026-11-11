@@ -206,10 +206,10 @@
   </div>
 
   {#if actionMsg}
-    <div class="action-msg" onclick={() => (actionMsg = null)}>{actionMsg}</div>
+    <button type="button" class="action-msg" title="Dismiss" onclick={() => (actionMsg = null)}>{actionMsg}</button>
   {/if}
   {#if error}
-    <div class="error-msg" onclick={() => (error = null)}>{error}</div>
+    <button type="button" class="error-msg" title="Dismiss" onclick={() => (error = null)}>{error}</button>
   {/if}
 
   {#if loading}
@@ -239,16 +239,24 @@
     <!-- Agent list -->
     {#each agents as agent (agent.name)}
       <div class="agent-card" class:disabled={!agent.enabled}>
-        <div class="agent-header" onclick={() => expandedAgent = expandedAgent === agent.name ? null : agent.name}>
-          <span class="chevron">{expandedAgent === agent.name ? "▾" : "▸"}</span>
-          <span class="agent-name">{agent.name}</span>
-          <span class="badge {sourceBadge[agent.source] ?? 'badge-gray'}">{agent.source}</span>
-          {#if agent.effort}
-            <span class="badge badge-dim">{agent.effort}</span>
-          {/if}
-          <span class="spacer"></span>
-          <label class="toggle" onclick={(e: MouseEvent) => e.stopPropagation()}>
-            <input type="checkbox" checked={agent.enabled} onchange={() => handleToggle(agent.name)} />
+        <div class="agent-header">
+          <!-- Expand toggle and enable switch are siblings, so the switch never expands the card -->
+          <button
+            type="button"
+            class="agent-toggle"
+            aria-expanded={expandedAgent === agent.name}
+            onclick={() => expandedAgent = expandedAgent === agent.name ? null : agent.name}
+          >
+            <span class="chevron">{expandedAgent === agent.name ? "▾" : "▸"}</span>
+            <span class="agent-name">{agent.name}</span>
+            <span class="badge {sourceBadge[agent.source] ?? 'badge-gray'}">{agent.source}</span>
+            {#if agent.effort}
+              <span class="badge badge-dim">{agent.effort}</span>
+            {/if}
+            <span class="spacer"></span>
+          </button>
+          <label class="toggle">
+            <input type="checkbox" aria-label={`Enable ${agent.name}`} checked={agent.enabled} onchange={() => handleToggle(agent.name)} />
             <span class="toggle-slider"></span>
           </label>
         </div>
@@ -469,6 +477,8 @@
     border-radius: 4px;
     cursor: pointer;
   }
+  /* Dismiss-on-tap banners are <button>s: keep the full-width block layout */
+  .action-msg, .error-msg { display: block; width: 100%; text-align: left; }
   .error-text { color: var(--accent-red, #f87171); font-size: 0.6875rem; margin: 0.25rem 0; }
   .muted { color: var(--text-muted); font-size: 0.6875rem; }
 
@@ -483,6 +493,19 @@
     display: flex;
     align-items: center;
     gap: 0.375rem;
+  }
+  .agent-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
     cursor: pointer;
   }
   .chevron { font-size: 0.625rem; color: var(--text-muted); width: 0.75rem; flex-shrink: 0; }
@@ -494,6 +517,7 @@
     line-height: 1.3;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }

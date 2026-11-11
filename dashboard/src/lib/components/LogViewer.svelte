@@ -13,10 +13,15 @@
   let autoScroll: boolean = $state(true);
   let container: HTMLElement | undefined = $state();
 
-  // Initial fetch (only in browser — SSR has no API to call)
-  if (typeof window !== "undefined") {
-    fetchLogs(sessionFilter || undefined).then((e) => (entries = e));
-  }
+  // Initial fetch (only in browser — SSR has no API to call). An effect, not
+  // top-level code, so a changed `sessionFilter` prop refetches; the flag drops
+  // a response that lands after the filter has moved on.
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    let stale = false;
+    fetchLogs(sessionFilter || undefined).then((e) => { if (!stale) entries = e; });
+    return () => { stale = true; };
+  });
 
   // SSE for real-time log events (browser only) — cleaned up on component destroy
   $effect(() => {

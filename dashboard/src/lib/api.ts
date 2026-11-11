@@ -1249,10 +1249,18 @@ export async function fetchAgentPersonality(agentName: string): Promise<import("
   return checkedJson(res);
 }
 
+/** One significant trait change, as returned by memory-db `getPersonalityDrift()`.
+ * Only changes with |delta| > 0.05 are reported, so "stable" is rare in practice. */
+export interface PersonalityDrift {
+  trait_name: string;
+  current_value: number;
+  previous_value: number;
+  delta: number;
+  direction: "increased" | "decreased" | "stable";
+}
+
 /** Fetch agent personality drift */
-export async function fetchAgentDrift(agentName: string): Promise<Array<{
-  trait_name: string; current_value: number; previous_value: number; delta: number; direction: string;
-}>> {
+export async function fetchAgentDrift(agentName: string): Promise<PersonalityDrift[]> {
   const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/personality/drift`);
   return checkedJson(res);
 }
@@ -1274,10 +1282,18 @@ export async function fetchStrategyHistory(agentName: string, limit = 20): Promi
   return checkedJson(res);
 }
 
+/** Per-agent decision metrics, as returned by memory-db `getDecisionMetrics()`:
+ * all-time totals, plus a trend over the agent's last 10 decisions. */
+export interface DecisionMetric {
+  agent_name: string;
+  total_decisions: number;
+  scored_decisions: number;
+  avg_score: number | null;
+  trend: "improving" | "declining" | "stable" | "insufficient_data";
+}
+
 /** Fetch decision quality metrics */
-export async function fetchDecisionMetrics(): Promise<Array<{
-  agent_name: string; total_decisions: number; scored_decisions: number; avg_score: number | null;
-}>> {
+export async function fetchDecisionMetrics(): Promise<DecisionMetric[]> {
   const res = await fetch("/api/cognitive/metrics");
   return checkedJson(res);
 }

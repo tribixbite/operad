@@ -822,6 +822,8 @@ Query: `?agent=master-controller` (default).
 #### `GET /api/cognitive/metrics`
 Per-agent decision quality metrics.
 
+Response: `[{ agent_name, total_decisions, scored_decisions, avg_score, trend }]` — `trend` (`improving` | `declining` | `stable` | `insufficient_data`) covers the agent's last 10 decisions.
+
 ---
 
 ### User Profile (Mind Meld)

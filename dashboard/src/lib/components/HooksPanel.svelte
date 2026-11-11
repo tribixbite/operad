@@ -10,9 +10,9 @@
    * Each tab has a "Download JSON" button that triggers a browser file download.
    */
 
-  import { fetchAllCustomization } from "$lib/api";
+  import { AllCustomizationLoader } from "$lib/all-customization.svelte";
   import { shortenHomePath as shortenPath } from "$lib/env.svelte";
-  import type { HookInfo, AllProjectsCustomizationResponse } from "$lib/types";
+  import type { HookInfo } from "$lib/types";
 
   // -- Props ------------------------------------------------------------------
 
@@ -32,9 +32,8 @@
   type Tab = "user" | "project" | "all";
   let activeTab = $state<Tab>("user");
 
-  let allData: AllProjectsCustomizationResponse | null = $state(null);
-  let allLoading = $state(false);
-  let allError: string | null = $state(null);
+  /** Lazily fetched on first visit to the "All Projects" tab. */
+  const allProjects = new AllCustomizationLoader();
 
 
   // -- Derived ----------------------------------------------------------------
@@ -47,10 +46,10 @@
 
   /** All hooks flattened from all-projects response with project path annotation */
   const allHooks = $derived<Array<HookInfo & { projectPath?: string; projectName?: string }>>(
-    allData
+    allProjects.data
       ? [
-          ...allData.user.hooks.map(h => ({ ...h, projectPath: undefined, projectName: "~/.claude" })),
-          ...allData.projects.flatMap(p =>
+          ...allProjects.data.user.hooks.map(h => ({ ...h, projectPath: undefined, projectName: "~/.claude" })),
+          ...allProjects.data.projects.flatMap(p =>
             p.hooks.map(h => ({ ...h, projectPath: p.path, projectName: p.name })),
           ),
         ]
@@ -59,23 +58,10 @@
 
   // -- Functions --------------------------------------------------------------
 
-  /** Load all-projects data (lazy — only when tab is selected) */
-  async function loadAll() {
-    if (allData || allLoading) return;
-    allLoading = true;
-    allError = null;
-    try {
-      allData = await fetchAllCustomization();
-    } catch (e: unknown) {
-      allError = e instanceof Error ? e.message : String(e);
-    } finally {
-      allLoading = false;
-    }
-  }
-
+  /** Switch tab; all-projects data loads lazily on first "all" visit */
   function selectTab(tab: Tab) {
     activeTab = tab;
-    if (tab === "all") loadAll();
+    if (tab === "all") allProjects.load();
   }
 
   /** Trigger a JSON file download with given filename and data */
@@ -134,7 +120,7 @@
     onclick={() => selectTab("all")}
   >
     All Projects
-    {#if allData}
+    {#if allProjects.data}
       <span class="tab-count">{allHooks.length}</span>
     {/if}
   </button>
@@ -217,14 +203,14 @@
   <!-- All Projects tab -->
   {:else if activeTab === "all"}
     <div class="tab-actions">
-      <button class="btn-dl" onclick={downloadAllHooks} disabled={allHooks.length === 0 || allLoading}>
+      <button class="btn-dl" onclick={downloadAllHooks} disabled={allHooks.length === 0 || allProjects.loading}>
         Download JSON
       </button>
     </div>
-    {#if allLoading}
+    {#if allProjects.loading}
       <p class="muted">Loading…</p>
-    {:else if allError}
-      <p class="error-msg">{allError}</p>
+    {:else if allProjects.error}
+      <p class="error-msg">{allProjects.error}</p>
     {:else if allHooks.length === 0}
       <p class="muted">No hooks found across any known projects.</p>
     {:else}

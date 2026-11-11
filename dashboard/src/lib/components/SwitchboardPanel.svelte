@@ -5,7 +5,7 @@
 
   // -- State ------------------------------------------------------------------
 
-  let sw: Switchboard | null = $state(null);
+  let sw = $state<Switchboard | null>(null);
   let loading = $state(true);
   let error: string | null = $state(null);
 
@@ -164,6 +164,9 @@
           <button
             class="toggle-btn"
             class:on={isEffective(sub.key)}
+            role="switch"
+            aria-checked={isEffective(sub.key)}
+            aria-label={sub.label}
             disabled={!sw.all}
             onclick={() => toggleSubsystem(sub.key)}
           >
@@ -196,6 +199,9 @@
             <button
               class="toggle-btn"
               class:on={isAgentEffective(name)}
+              role="switch"
+              aria-checked={isAgentEffective(name)}
+              aria-label={`Agent ${name}`}
               disabled={!sw.all}
               onclick={() => toggleAgent(name)}
             >

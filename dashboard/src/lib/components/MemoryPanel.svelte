@@ -2,6 +2,7 @@
   import { fetchMemories, searchMemories, createMemory, deleteMemory, decayMemories } from "$lib/api";
   import type { MemoryRecord, MemoryCategory } from "$lib/types";
   import { store } from "$lib/store.svelte";
+  import { untrack } from "svelte";
 
   interface Props {
     projectPath?: string;
@@ -25,7 +26,9 @@
   });
 
   /** Selected project path (prop overrides selector) */
-  let selectedPath = $state(propPath ?? "");
+  // Seeded once from the prop on purpose: while the prop is set it wins via
+  // `projectPath` below, so this only matters for the user's own selection.
+  let selectedPath = $state(untrack(() => propPath ?? ""));
 
   /** Resolve active path — prop takes priority, then user selection */
   const projectPath = $derived(propPath ?? selectedPath);

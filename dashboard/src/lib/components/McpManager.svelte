@@ -10,6 +10,8 @@
     onrefresh: () => void;
   }
   let { servers, onrefresh }: Props = $props();
+  /** Per-instance prefix for form control ids (label for= association) */
+  const uid = $props.id();
 
   // Expand/collapse state
   let expandedItem: string | null = $state(null);
@@ -140,19 +142,19 @@
       <p class="error-msg">{formError}</p>
     {/if}
     <div class="form-field">
-      <label>Name</label>
-      <input type="text" bind:value={formName} disabled={formMode === "edit"} placeholder="my-server" />
+      <label for="{uid}-name">Name</label>
+      <input id="{uid}-name" type="text" bind:value={formName} disabled={formMode === "edit"} placeholder="my-server" />
     </div>
     <div class="form-field">
-      <label>Command</label>
-      <input type="text" bind:value={formCommand} placeholder="node" />
+      <label for="{uid}-command">Command</label>
+      <input id="{uid}-command" type="text" bind:value={formCommand} placeholder="node" />
     </div>
     <div class="form-field">
-      <label>Args <span class="hint">(space-separated)</span></label>
-      <input type="text" bind:value={formArgs} placeholder="/path/to/server.js --flag" />
+      <label for="{uid}-args">Args <span class="hint">(space-separated)</span></label>
+      <input id="{uid}-args" type="text" bind:value={formArgs} placeholder="/path/to/server.js --flag" />
     </div>
     <div class="form-field">
-      <label>Environment</label>
+      <span class="field-label">Environment</span>
       {#each formEnvRows as row, idx (idx)}
         <div class="env-row">
           <input type="text" bind:value={row.key} placeholder="KEY" class="env-key" />
@@ -396,7 +398,7 @@
   .form-field {
     margin-bottom: 0.5rem;
   }
-  .form-field label {
+  .form-field label, .form-field .field-label {
     display: block;
     font-size: 0.5625rem;
     font-weight: 500;
