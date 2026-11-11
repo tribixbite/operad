@@ -8,19 +8,63 @@
  *   - Auto-stop package list (persist / toggle / apply on memory pressure)
  *   - Android app listing + management via `adb shell`
  *
- * Receives OrchestratorContext for shared deps (config, state, log).
- * Uses detectPlatform() directly for platform-specific helpers.
+ * Receives OrchestratorContext for shared deps (config, state, log). Process
+ * spawning, platform helpers and the local boot_id read are injectable via
+ * AndroidEngineDeps (defaults: spawnSync, detectPlatform(), /proc).
  */
 
 import { spawnSync, spawn } from "node:child_process";
+import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { detectPlatform } from "./platform/platform.js";
+import type { Platform } from "./platform/platform.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Resolve ADB binary path at module load time — same pattern as daemon.ts */
 const ADB_BIN = detectPlatform().resolveAdbPath() ?? "adb";
+
+/** The fields of a synchronous child result the engine actually reads. */
+export type SyncRunResult = Pick<SpawnSyncReturns<string>, "status" | "stdout" | "stderr">;
+
+/** spawnSync-compatible runner — injectable so tests never touch a real adb. */
+export type SyncRunner = (
+  command: string,
+  args: string[],
+  options: SpawnSyncOptionsWithStringEncoding,
+) => SyncRunResult;
+
+/**
+ * External effects the engine performs, injectable for unit tests. Every
+ * synchronous child process (adb, am) goes through `run`, so a test can see
+ * exactly which device each command was addressed to.
+ */
+export interface AndroidEngineDeps {
+  /** Synchronous process runner (default: node's spawnSync). */
+  run: SyncRunner;
+  /** Platform helpers: notify, local IP, `am` path + env. */
+  platform: Platform;
+  /** This device's kernel boot UUID, or null if unreadable. */
+  readLocalBootId: () => string | null;
+  /** adb binary to invoke. */
+  adbBin: string;
+}
+
+/**
+ * /proc/sys/kernel/random/boot_id — world-readable on Android (unlike
+ * ro.serialno, empty to unprivileged callers since Android 10, and
+ * /proc/uptime, permission-denied to apps). Regenerated every boot and
+ * different between machines, so it is an exact identity check.
+ */
+function readKernelBootId(): string | null {
+  try {
+    const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+    return id || null;
+  } catch {
+    return null;
+  }
+}
 
 // -- Pure helpers (exported for unit tests) ------------------------------------
 
@@ -178,7 +222,40 @@ export class AndroidEngine {
     "com.google.android.providers.media.module": "Media Storage",
   };
 
-  constructor(private ctx: OrchestratorContext) {}
+  private readonly deps: AndroidEngineDeps;
+
+  constructor(private ctx: OrchestratorContext, deps: Partial<AndroidEngineDeps> = {}) {
+    this.deps = {
+      run: deps.run ?? spawnSync,
+      platform: deps.platform ?? detectPlatform(),
+      readLocalBootId: deps.readLocalBootId ?? readKernelBootId,
+      adbBin: deps.adbBin ?? ADB_BIN,
+    };
+  }
+
+  /** Run adb synchronously with the given argv (captured utf-8 output). */
+  private runAdb(args: string[], timeoutMs: number): SyncRunResult {
+    return this.deps.run(this.deps.adbBin, args, {
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+
+  /**
+   * Run this device's `am` directly (no adb). Uses the resolved binary path
+   * and amEnv(), as createTerminalTab does: under Termux, `am` without
+   * libtermux-exec-ld-preload.so exits 0 and does nothing, so a bare
+   * spawnSync("am") reported launches that never happened.
+   */
+  private runLocalAm(args: string[]): SyncRunResult {
+    return this.deps.run(this.deps.platform.resolveBinaryPath("am"), args, {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: this.deps.platform.amEnv(),
+    });
+  }
 
   // -- ADB helpers ------------------------------------------------------------
 
@@ -186,7 +263,7 @@ export class AndroidEngine {
   getLocalIp(): string | null {
     const now = Date.now();
     if (this.localIp && now < this.localIpExpiry) return this.localIp;
-    this.localIp = detectPlatform().resolveLocalIp();
+    this.localIp = this.deps.platform.resolveLocalIp();
     this.localIpExpiry = now + AndroidEngine.LOCAL_IP_TTL_MS;
     if (this.localIp) this.ctx.log.debug(`Local IP resolved: ${this.localIp}`);
     return this.localIp;
@@ -202,11 +279,7 @@ export class AndroidEngine {
     const now = Date.now();
     if (this.adbSerial && now < this.adbSerialExpiry) return this.adbSerial;
     try {
-      const result = spawnSync(ADB_BIN, ["devices"], {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const result = this.runAdb(["devices"], 5000);
       if (result.status !== 0 || !result.stdout) return null;
 
       const { online, stale } = parseAdbDevicesOutput(result.stdout);
@@ -214,7 +287,7 @@ export class AndroidEngine {
       // Auto-disconnect stale entries to prevent "more than one device" errors
       for (const serial of stale) {
         this.ctx.log.debug(`Disconnecting stale ADB device: ${serial}`);
-        spawnSync(ADB_BIN, ["disconnect", serial], { timeout: 3000, stdio: "ignore" });
+        this.runAdb(["disconnect", serial], 3000);
       }
 
       if (online.length === 0) {
@@ -245,13 +318,16 @@ export class AndroidEngine {
     }
   }
 
-  /** Build ADB shell args with serial selection for multi-device environments */
-  adbShellArgs(...shellArgs: string[]): string[] {
-    const serial = this.resolveAdbSerial();
-    const args: string[] = [];
-    if (serial) args.push("-s", serial);
-    args.push("shell", ...shellArgs);
-    return args;
+  /**
+   * ADB shell argv addressed to an explicit, already-verified serial.
+   *
+   * Device-acting paths use this instead of re-resolving per command: the
+   * serial cache expires every 30s, so a run of ~17 commands could resolve a
+   * different device half-way through, or null — and a null resolution
+   * produced a bare `adb shell` that adb routes to whichever device it likes.
+   */
+  static adbShellArgsFor(serial: string, ...shellArgs: string[]): string[] {
+    return ["-s", serial, "shell", ...shellArgs];
   }
 
   /** Invalidate cached ADB serial — call after ADB connect/disconnect */
@@ -307,23 +383,35 @@ export class AndroidEngine {
 
     const { connect_script, connect_timeout_s, phantom_fix } = this.ctx.config.adb;
 
+    /** Common failure path: record, notify, and keep retrying. */
+    const fail = (reason: string, detail: Record<string, unknown> = {}): false => {
+      this.ctx.log.warn(reason, detail);
+      this.ctx.state.setAdbFixed(false);
+      this.deps.platform.notify("operad boot", "ADB fix failed — processes may be killed", "operad-boot");
+      this.startAdbRetryTimer();
+      return false;
+    };
+
     try {
-      const result = await this.runConnectScript(connect_script, connect_timeout_s);
-
-      if (result.status !== 0) {
-        this.ctx.log.warn("ADB connection failed", { stderr: result.stderr.trim() });
-        this.ctx.state.setAdbFixed(false);
-        detectPlatform().notify("operad boot", "ADB fix failed — processes may be killed", "operad-boot");
-
-        // Set up retry timer
-        this.startAdbRetryTimer();
-        return false;
+      if (connect_script.trim() === "") {
+        // The default config has no connect script. Running it anyway meant
+        // `timeout 45 ""` → exit 127 on every attempt, so the phantom fix was
+        // never reached even when adb was already connected (e.g. a pinned
+        // `adb tcpip` loopback). Skip the step and use whatever is online.
+        this.ctx.log.info("No adb.connect_script configured — using the existing ADB connection");
+        this.invalidateAdbSerial();
+        if (!this.resolveAdbSerial()) {
+          return fail("ADB fix skipped: no adb.connect_script configured and no ADB device online");
+        }
+      } else {
+        const result = await this.runConnectScript(connect_script, connect_timeout_s);
+        if (result.status !== 0) {
+          return fail("ADB connection failed", { stderr: result.stderr.trim() });
+        }
+        this.ctx.log.info("ADB connected");
+        // Clear cached serial so it's re-resolved with the new connection
+        this.invalidateAdbSerial();
       }
-
-      this.ctx.log.info("ADB connected");
-      // Clear cached serial so it's re-resolved with the new connection
-      this.adbSerial = null;
-      this.adbSerialExpiry = 0;
 
       if (phantom_fix) {
         this.applyPhantomFix();
@@ -339,32 +427,15 @@ export class AndroidEngine {
     }
   }
 
-  /**
-   * The kernel's per-boot UUID for THIS device, or null if unreadable.
-   *
-   * /proc/sys/kernel/random/boot_id is world-readable on Android (unlike
-   * ro.serialno, which returns empty to unprivileged callers since Android 10,
-   * and /proc/uptime, which is permission-denied to apps). It is regenerated
-   * every boot and differs between machines, which makes it an exact identity
-   * check rather than a heuristic.
-   */
+  /** The kernel's per-boot UUID for THIS device (see readKernelBootId). */
   private localBootId(): string | null {
-    try {
-      const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
-      return id || null;
-    } catch {
-      return null;
-    }
+    return this.deps.readLocalBootId();
   }
 
   /** The same UUID read over ADB from `serial`, or null if unreadable. */
   private remoteBootId(serial: string): string | null {
     try {
-      const r = spawnSync(
-        ADB_BIN,
-        ["-s", serial, "shell", "cat", "/proc/sys/kernel/random/boot_id"],
-        { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] },
-      );
+      const r = this.runAdb(["-s", serial, "shell", "cat", "/proc/sys/kernel/random/boot_id"], 5000);
       if (r.status !== 0) return null;
       // adb shell returns CRLF line endings.
       const id = (r.stdout ?? "").replace(/\r/g, "").trim();
@@ -391,15 +462,29 @@ export class AndroidEngine {
    * worse than skipping the optimisation.
    */
   isLocalAdbDevice(): boolean {
-    const serial = this.resolveAdbSerial();
-    if (!serial) return false;
+    return this.resolveLocalAdbSerial() !== null;
+  }
 
-    // A loopback connection can only be this device.
-    if (
-      serial.startsWith("127.0.0.1:") ||
-      serial.startsWith("localhost:") ||
-      serial.startsWith("emulator-")
-    ) return true;
+  /**
+   * Resolve the adb serial ONCE and return it only if it is verified to be
+   * this device; null otherwise (no device, or an external one). Callers that
+   * act on the device pass the returned serial explicitly to every command
+   * (see adbShellArgsFor), so the device that was verified is the device that
+   * receives the commands.
+   */
+  resolveLocalAdbSerial(): string | null {
+    const serial = this.resolveAdbSerial();
+    if (!serial) return null;
+    return this.isLocalSerial(serial) ? serial : null;
+  }
+
+  /** Is `serial` the machine operad is running on? Fails closed. */
+  private isLocalSerial(serial: string): boolean {
+    // A loopback connection can only be this device. `emulator-*` is NOT
+    // trusted by name: an emulator attached to this host is a different
+    // (virtual) device. The boot_id comparison below decides, and says yes
+    // only when operad is itself running inside that emulator.
+    if (serial.startsWith("127.0.0.1:") || serial.startsWith("localhost:")) return true;
 
     // Exact check: same kernel boot UUID means same running kernel.
     const local = this.localBootId();
@@ -434,9 +519,7 @@ export class AndroidEngine {
     if (!serial) return { serial: null, is_local: false, model: null };
     let model: string | null = null;
     try {
-      const r = spawnSync(ADB_BIN, ["-s", serial, "shell", "getprop", "ro.product.model"], {
-        encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"],
-      });
+      const r = this.runAdb(["-s", serial, "shell", "getprop", "ro.product.model"], 5000);
       if (r.status === 0) model = (r.stdout ?? "").replace(/\r/g, "").trim() || null;
     } catch { /* best effort */ }
     return { serial, is_local: this.isLocalAdbDevice(), model };
@@ -451,10 +534,13 @@ export class AndroidEngine {
    * 4. Background execution allow for Termux + Edge
    */
   applyPhantomFix(): void {
-    // Safety check: only apply settings to this device, not external phones
-    if (!this.isLocalAdbDevice()) {
-      const serial = this.resolveAdbSerial();
-      this.ctx.log.warn(`Skipping phantom fix — ADB device '${serial}' may not be this device`);
+    // Safety check: only apply settings to this device, not external phones.
+    // Resolve + verify once; every command below is addressed to `serial`.
+    const serial = this.resolveLocalAdbSerial();
+    if (!serial) {
+      this.ctx.log.warn(
+        `Skipping phantom fix — ADB device '${this.resolveAdbSerial() ?? "none"}' is not verified as this device`,
+      );
       return;
     }
 
@@ -478,11 +564,7 @@ export class AndroidEngine {
     ): { ok: boolean; stdout: string; stderr: string; status: number | null } => {
       let result;
       try {
-        result = spawnSync(ADB_BIN, this.adbShellArgs(...args), {
-          encoding: "utf-8",
-          timeout: 10_000,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
+        result = this.runAdb(AndroidEngine.adbShellArgsFor(serial, ...args), 10_000);
       } catch (err) {
         failures.push(`${label}: spawn failed (${err})`);
         if (severity === "warn") this.ctx.log.warn(`${label} failed`, { error: String(err) });
@@ -673,7 +755,8 @@ export class AndroidEngine {
     // Same local-target guard as forceStopApp: this fires automatically on
     // memory pressure, so without it a second attached device gets its apps
     // killed by pressure on this one.
-    if (!this.isLocalAdbDevice()) {
+    const serial = this.resolveLocalAdbSerial();
+    if (!serial) {
       this.ctx.log.warn("Skipping auto-stop: adb target is not this device");
       return;
     }
@@ -686,11 +769,7 @@ export class AndroidEngine {
         continue;
       }
       try {
-        const result = spawnSync(ADB_BIN, this.adbShellArgs("am", "force-stop", pkg), {
-          encoding: "utf-8",
-          timeout: 5000,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
+        const result = this.runAdb(AndroidEngine.adbShellArgsFor(serial, "am", "force-stop", pkg), 5000);
         if (result.status === 0) stopped.push(pkg);
       } catch {
         // Best-effort — skip failures
@@ -714,22 +793,20 @@ export class AndroidEngine {
     // one entry and it is not this machine — so this list silently showed the
     // wrong device's memory usage, and the kill button next to each row acted
     // on it.
-    if (!this.isLocalAdbDevice()) {
+    const serial = this.resolveLocalAdbSerial();
+    if (!serial) {
       this.ctx.log.debug("Skipping app list — ADB target is not this device");
       return [];
     }
+    const psArgs = AndroidEngine.adbShellArgsFor(serial, "ps", "-A", "-o", "PID,RSS,NAME");
     try {
-      const result = spawnSync(ADB_BIN, this.adbShellArgs("ps", "-A", "-o", "PID,RSS,NAME"), {
-        encoding: "utf-8",
-        timeout: 8000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const result = this.runAdb(psArgs, 8000);
       if (result.status !== 0 || !result.stdout) {
         this.ctx.log.warn("adb ps failed", {
           status: result.status,
           stderr: result.stderr?.trim().slice(0, 200),
           hasStdout: !!result.stdout,
-          args: this.adbShellArgs("ps", "-A", "-o", "PID,RSS,NAME").join(" "),
+          args: psArgs.join(" "),
         });
         return [];
       }
@@ -821,9 +898,7 @@ export class AndroidEngine {
     }
     if (slash !== -1) {
       // Caller provided an explicit component spec.
-      const result = spawnSync("am", ["start", "-n", target], {
-        encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"],
-      });
+      const result = this.runLocalAm(["start", "-n", target]);
       if (result.status === 0) {
         this.ctx.log.info(`Launched ${target} via am start`);
         return { status: 200, data: { ok: true, target, via: "am" } };
@@ -838,12 +913,16 @@ export class AndroidEngine {
 
     // Preferred path: monkey via ADB resolves the launcher activity and
     // delivers the intent as the shell user, which works for apps that
-    // reject intents from the Termux uid.
-    if (this.resolveAdbSerial()) {
+    // reject intents from the Termux uid. Same local-target check as
+    // forceStopApp — without it a second attached handset got the launch.
+    // A non-local target is not an error here: the `am` fallback below runs
+    // on this device by construction, so it is used instead of adb.
+    const serial = this.resolveLocalAdbSerial();
+    if (serial) {
       try {
-        const result = spawnSync(ADB_BIN, this.adbShellArgs(
-          "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1",
-        ), { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+        const result = this.runAdb(AndroidEngine.adbShellArgsFor(
+          serial, "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1",
+        ), 5000);
         if (result.status === 0 && !(result.stderr ?? "").includes("Error")) {
           this.ctx.log.info(`Launched ${pkg} via adb monkey`);
           return { status: 200, data: { ok: true, target: pkg, via: "monkey" } };
@@ -857,9 +936,7 @@ export class AndroidEngine {
     // Fallback: assume <pkg>/.MainActivity. Works for the common case where
     // the launcher activity follows the standard naming convention.
     const fallback = `${pkg}/.MainActivity`;
-    const result = spawnSync("am", ["start", "-n", fallback], {
-      encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"],
-    });
+    const result = this.runLocalAm(["start", "-n", fallback]);
     if (result.status === 0) {
       this.ctx.log.info(`Launched ${pkg} via am ${fallback} fallback`);
       return { status: 200, data: { ok: true, target: pkg, via: "am-fallback" } };
@@ -896,16 +973,22 @@ export class AndroidEngine {
    * to the first online device, so with a second phone attached over USB,
    * memory pressure here issued `am force-stop` on THAT phone.
    */
-  private assertLocalTarget(action: string): { status: number; data: unknown } | null {
-    if (this.isLocalAdbDevice()) return null;
+  private assertLocalTarget(
+    action: string,
+  ): { serial: string } | { refused: { status: number; data: unknown } } {
+    // Return the verified serial so the caller addresses exactly that device.
+    const serial = this.resolveLocalAdbSerial();
+    if (serial) return { serial };
     // Name the device — "not this device" alone leaves the user guessing which
     // handset was about to be acted on.
     const info = this.adbTargetInfo();
     const who = info.model ?? info.serial ?? "unknown device";
     this.ctx.log.warn(`Refusing ${action}: adb target '${who}' is not this device`);
     return {
-      status: 409,
-      data: { error: `Refusing ${action} — adb is connected to '${who}', not the device running operad` },
+      refused: {
+        status: 409,
+        data: { error: `Refusing ${action} — adb is connected to '${who}', not the device running operad` },
+      },
     };
   }
 
@@ -916,15 +999,11 @@ export class AndroidEngine {
     if (AndroidEngine.SYSTEM_PACKAGES.has(pkg)) {
       return { status: 403, data: { error: `Cannot stop system package: ${pkg}` } };
     }
-    const notLocal = this.assertLocalTarget(`force-stop ${pkg}`);
-    if (notLocal) return notLocal;
+    const target = this.assertLocalTarget(`force-stop ${pkg}`);
+    if ("refused" in target) return target.refused;
 
     try {
-      const result = spawnSync(ADB_BIN, this.adbShellArgs("am", "force-stop", pkg), {
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const result = this.runAdb(AndroidEngine.adbShellArgsFor(target.serial, "am", "force-stop", pkg), 5000);
       if (result.status !== 0) {
         return { status: 500, data: { error: result.stderr?.trim() || "force-stop failed" } };
       }

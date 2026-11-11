@@ -91,6 +91,12 @@ describe("parseProcStatTicks", () => {
     expect(parseProcStatTicks("1234 bash S 1 0 0")).toBeNull();
   });
 
+  test("ignores cutime/cstime (own time only)", () => {
+    const filler = "0 0 0 0 0 0 0 0 0";
+    const line = `7 (sh) S 1 ${filler} 10 5 300 200 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`;
+    expect(parseProcStatTicks(line)).toBe(15);
+  });
+
   test("truncated line (not enough fields) returns null", () => {
     // Only provides pid+comm, no fields after
     expect(parseProcStatTicks("1234 (bash) S")).toBeNull();
@@ -110,6 +116,21 @@ describe("parseProcStatTicks", () => {
     // Ticks can be large on long-running processes
     const line = makeStatLine(99, "longrunner", "S", 2, 999999, 888888);
     expect(parseProcStatTicks(line)).toBe(1_888_887);
+  });
+});
+
+describe("parseProcStatTicks(line, { includeChildren: true })", () => {
+  const filler = "0 0 0 0 0 0 0 0 0";
+
+  test("adds reaped children's cutime + cstime (fields 16-17)", () => {
+    // utime=10 stime=5 cutime=300 cstime=200 — a shell whose build children exited
+    const line = `7 (sh) S 1 ${filler} 10 5 300 200 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`;
+    expect(parseProcStatTicks(line, { includeChildren: true })).toBe(515);
+  });
+
+  test("missing cutime/cstime returns null rather than a partial sum", () => {
+    const line = `7 (sh) S 1 ${filler} 10 5`;
+    expect(parseProcStatTicks(line, { includeChildren: true })).toBeNull();
   });
 });
 

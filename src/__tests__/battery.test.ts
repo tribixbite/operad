@@ -15,9 +15,14 @@
  */
 
 import { describe, test, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-import { batteryActionDecision } from "../battery.js";
-import type { BatteryStatus } from "../battery.js";
+import { batteryActionDecision, BatteryMonitor } from "../battery.js";
+import type { BatteryStatus, BatteryPlatform } from "../battery.js";
+import { StateManager } from "../state.js";
+import type { Logger } from "../log.js";
 import { parseTermuxBatteryStatus } from "../platform/android.js";
 
 function makeStatus(overrides: Partial<BatteryStatus> = {}): BatteryStatus {
@@ -195,5 +200,63 @@ describe("batteryActionDecision — clear", () => {
   test("custom threshold 20%: applied, charging, 26% → clear; 25% → none", () => {
     expect(batteryActionDecision(makeStatus({ percentage: 26, charging: true }), 20, true)).toBe("clear");
     expect(batteryActionDecision(makeStatus({ percentage: 25, charging: true }), 20, true)).toBe("none");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Radio-disable state survives a daemon restart
+// ---------------------------------------------------------------------------
+
+describe("BatteryMonitor — restart while radios are disabled", () => {
+  /** Fake platform: scripted battery reading, records radio calls. */
+  function fakePlatform(status: BatteryStatus) {
+    const calls: string[] = [];
+    const platform: BatteryPlatform = {
+      getBatteryStatus: () => ({ ...status }),
+      disableRadios: () => { calls.push("disable"); },
+      enableRadios: () => { calls.push("enable"); },
+      sendBatteryAlert: () => { calls.push("alert"); },
+    };
+    return { platform, calls };
+  }
+  const log = { debug() {}, info() {}, warn() {}, error() {} } as unknown as Logger;
+
+  test("a monitor restored with radios disabled re-enables them once charging past hysteresis", () => {
+    const { platform, calls } = fakePlatform(makeStatus({ percentage: 80, charging: true }));
+    const mon = new BatteryMonitor(log, 10, platform, true);
+    expect(mon.actionsActive).toBe(true);
+    mon.checkAndAct();
+    expect(calls).toEqual(["enable"]);
+    expect(mon.actionsActive).toBe(false);
+  });
+
+  test("a restored monitor does not re-disable radios (no duplicate alert) while still low", () => {
+    const { platform, calls } = fakePlatform(makeStatus({ percentage: 8, charging: false }));
+    const mon = new BatteryMonitor(log, 10, platform, true);
+    mon.checkAndAct();
+    expect(calls).toEqual([]);
+    expect(mon.actionsActive).toBe(true);
+  });
+
+  test("default (nothing restored) keeps the fresh-start behaviour", () => {
+    const { platform, calls } = fakePlatform(makeStatus({ percentage: 80, charging: true }));
+    const mon = new BatteryMonitor(log, 10, platform);
+    mon.checkAndAct();
+    expect(calls).toEqual([]);
+    expect(mon.actionsActive).toBe(false);
+  });
+
+  test("StateManager persists radios_disabled so the next daemon can read it back", () => {
+    const dir = mkdtempSync(join(tmpdir(), "operad-bat-state-"));
+    try {
+      const path = join(dir, "state.json");
+      const sm = new StateManager(path, log);
+      sm.updateBattery({ percentage: 8, charging: false, temperature: 30, radios_disabled: true });
+      // A fresh StateManager is what a restarted daemon constructs.
+      const reloaded = new StateManager(path, log);
+      expect(reloaded.getState().battery?.radios_disabled).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

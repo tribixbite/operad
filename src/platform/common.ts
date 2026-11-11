@@ -78,18 +78,35 @@ export function readProcStatCpuTicks(pid: number): number | null {
   }
 }
 
-/** Parse utime + stime from a /proc/PID/stat line */
-export function parseProcStatTicks(statLine: string): number | null {
+/**
+ * Parse utime + stime from a /proc/PID/stat line.
+ *
+ * With `includeChildren`, also adds cutime + cstime (fields 16-17): the CPU
+ * time of children this process has waited for. Process-tree sums need it —
+ * when a build step exits and is reaped, its ticks leave the live tree and
+ * reappear only in the parent's cutime. Summing utime+stime alone made the
+ * tree total DROP at every child exit, which read as "no CPU used" and let an
+ * active build be classified idle (and SIGSTOPped under memory pressure).
+ */
+export function parseProcStatTicks(
+  statLine: string,
+  opts: { includeChildren?: boolean } = {},
+): number | null {
   const closeParen = statLine.lastIndexOf(")");
   if (closeParen === -1) return null;
 
   const fields = statLine.slice(closeParen + 2).split(" ");
-  // After ')' and space: index 11=utime (field 14), 12=stime (field 15)
+  // After ')' and space: index 11=utime (field 14), 12=stime (field 15),
+  // 13=cutime (field 16), 14=cstime (field 17)
   const utime = parseInt(fields[11], 10);
   const stime = parseInt(fields[12], 10);
-
   if (isNaN(utime) || isNaN(stime)) return null;
-  return utime + stime;
+  if (!opts.includeChildren) return utime + stime;
+
+  const cutime = parseInt(fields[13], 10);
+  const cstime = parseInt(fields[14], 10);
+  if (isNaN(cutime) || isNaN(cstime)) return null;
+  return utime + stime + cutime + cstime;
 }
 
 /**
@@ -113,6 +130,9 @@ export function parseProcStatPpid(statLine: string): number | null {
 /**
  * Build process tree from /proc: maps ppid → children with CPU ticks.
  * Scans all numeric entries in /proc, reads each stat file.
+ *
+ * `ticks` is utime+stime+cutime+cstime, so a tree's sum keeps the time of
+ * descendants that already exited and were reaped inside the tree.
  */
 export function buildProcTree(): Map<number, { pid: number; ticks: number }[]> {
   const childrenOf = new Map<number, { pid: number; ticks: number }[]>();
@@ -125,7 +145,7 @@ export function buildProcTree(): Map<number, { pid: number; ticks: number }[]> {
         const pid = parseInt(entry, 10);
         const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
         const ppid = parseProcStatPpid(stat);
-        const ticks = parseProcStatTicks(stat);
+        const ticks = parseProcStatTicks(stat, { includeChildren: true });
         if (ppid === null || ticks === null) continue;
 
         let children = childrenOf.get(ppid);
