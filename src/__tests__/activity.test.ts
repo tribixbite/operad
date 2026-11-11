@@ -341,3 +341,57 @@ describe("ActivityDetector — invalidateProcCache()", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// classifyTree over several panes
+// ---------------------------------------------------------------------------
+// A session's work can run in any of its tmux windows. Measuring only the
+// first pane let a build in window 2 read as an idle session — and an idle
+// session is what memory-pressure auto-suspend SIGSTOPs (every window).
+
+describe("ActivityDetector.classifyTree — a session with more than one pane", () => {
+  function twoPanes() {
+    let poll = 0;
+    return {
+      next() { poll++; },
+      platform: {
+        // Pane 10 (the agent) is idle; pane 20 (a build) burns 50 ticks/poll.
+        readProcessCpuTicks: (pid: number) => (pid === 10 ? 100 : pid === 20 ? 100 + poll * 50 : null),
+        buildProcessTree: () => new Map([
+          [1, [{ pid: 10, ticks: 100 }, { pid: 20, ticks: 100 + poll * 50 }]],
+        ]),
+      },
+    };
+  }
+
+  test("activity in any pane makes the session active", () => {
+    const { logger, tmpDir } = makeLogger();
+    try {
+      const s = twoPanes();
+      const detector = new ActivityDetector(logger, s.platform);
+      const states: ActivityState[] = [];
+      for (let i = 0; i < IDLE_THRESHOLD + 2; i++) {
+        detector.invalidateProcCache();
+        states.push(detector.classifyTree("multi", [10, 20]));
+        s.next();
+      }
+      expect(states.slice(1).every((st) => st === "active")).toBe(true);
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  test("a session is stopped only when none of its panes can be read", () => {
+    const { logger, tmpDir } = makeLogger();
+    try {
+      const detector = new ActivityDetector(logger, {
+        readProcessCpuTicks: (pid: number) => (pid === 20 ? 5 : null),
+        buildProcessTree: () => new Map(),
+      });
+      expect(detector.classifyTree("half", [10, 20])).toBe("unknown");
+      expect(detector.classifyTree("none", [10, 11])).toBe("stopped");
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+});

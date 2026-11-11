@@ -6,9 +6,10 @@
  * Defines pressure levels for dashboard display.
  */
 
-import { execSync, spawnSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import type { Logger } from "./log.js";
 import { detectPlatform } from "./platform/platform.js";
+import { getSessionPanePids } from "./session.js";
 
 /** Memory pressure levels based on MemAvailable thresholds */
 export type MemoryPressure = "normal" | "warning" | "critical" | "emergency";
@@ -63,15 +64,6 @@ interface PsEntry {
   rss_kb: number;
 }
 
-/** Per-session memory stats */
-export interface SessionMemoryInfo {
-  /** Session name */
-  name: string;
-  /** Total RSS of session process tree in MB */
-  rss_mb: number;
-  /** Number of processes in the tree */
-  process_count: number;
-}
 
 export class MemoryMonitor {
   private log: Logger;
@@ -82,7 +74,17 @@ export class MemoryMonitor {
   private psCache: { entries: PsEntry[]; ts: number } | null = null;
   private static readonly PS_CACHE_TTL_MS = 5_000;
 
-  constructor(log: Logger, warningMb = 2000, criticalMb = 1200, emergencyMb = 800) {
+  /** Process-list source; `ps` unless a test substitutes one. */
+  private listProcesses: (() => PsEntry[]) | null;
+
+  constructor(
+    log: Logger,
+    warningMb = 2000,
+    criticalMb = 1200,
+    emergencyMb = 800,
+    opts: { listProcesses?: () => PsEntry[] } = {},
+  ) {
+    this.listProcesses = opts.listProcesses ?? null;
     this.log = log;
     this.warningMb = warningMb;
     this.criticalMb = criticalMb;
@@ -136,65 +138,33 @@ export class MemoryMonitor {
   }
 
   /**
-   * Get the total RSS for a process tree rooted at the given PID.
-   * Sums RSS of the process and all descendants using ps output.
+   * Total RSS of the process trees rooted at `roots` (a session's panes):
+   * each root and all its descendants, every process counted once even when
+   * roots repeat or one lies inside another's tree.
    */
-  getProcessTreeRss(rootPid: number): { rss_mb: number; process_count: number } {
+  getProcessTreeRss(roots: number | readonly number[]): { rss_mb: number; process_count: number } {
     const entries = this.getAllProcesses();
-    const descendants = this.findDescendants(rootPid, entries);
-    // Include the root process itself
-    const root = entries.find((e) => e.pid === rootPid);
-    if (root) descendants.push(root);
-
-    const totalKb = descendants.reduce((sum, e) => sum + e.rss_kb, 0);
+    const counted = new Map<number, PsEntry>();
+    for (const rootPid of typeof roots === "number" ? [roots] : roots) {
+      const root = entries.find((e) => e.pid === rootPid);
+      if (root) counted.set(root.pid, root);
+      for (const d of this.findDescendants(rootPid, entries)) counted.set(d.pid, d);
+    }
+    const totalKb = [...counted.values()].reduce((sum, e) => sum + e.rss_kb, 0);
     return {
       rss_mb: Math.round(totalKb / 1024),
-      process_count: descendants.length,
+      process_count: counted.size,
     };
   }
 
   /**
-   * Get memory stats for named sessions given their tmux pane PIDs.
-   * @param sessions Map of session name → shell PID inside the tmux pane
+   * PIDs of every pane in a tmux session, across all its windows (empty when
+   * there is no such session). Delegates to session.ts, the one place that
+   * talks to tmux — this used to run its own `list-panes` against only the
+   * CURRENT window, so processes in other windows went unmeasured.
    */
-  getSessionMemory(sessions: Map<string, number>): SessionMemoryInfo[] {
-    const entries = this.getAllProcesses();
-    const results: SessionMemoryInfo[] = [];
-
-    for (const [name, pid] of sessions) {
-      const descendants = this.findDescendants(pid, entries);
-      const root = entries.find((e) => e.pid === pid);
-      if (root) descendants.push(root);
-
-      const totalKb = descendants.reduce((sum, e) => sum + e.rss_kb, 0);
-      results.push({
-        name,
-        rss_mb: Math.round(totalKb / 1024),
-        process_count: descendants.length,
-      });
-    }
-
-    return results;
-  }
-
-  /** Get PID of the shell inside a tmux session pane */
-  getSessionPid(sessionName: string): number | null {
-    try {
-      // Use spawnSync to avoid shell injection via session names.
-      // `=name:` is tmux's exact-match target sigil for pane/window targets
-      // — bare `=name` only resolves for target-session subcommands. The
-      // trailing colon turns it into a target-window which then resolves
-      // to the session's current pane.
-      const result = spawnSync("tmux", ["list-panes", "-t", `=${sessionName}:`, "-F", "#{pane_pid}"], {
-        encoding: "utf-8",
-        timeout: 5000,
-      });
-      const output = (result.stdout ?? "").trim();
-      const pid = parseInt(output.split("\n")[0], 10);
-      return isNaN(pid) ? null : pid;
-    } catch {
-      return null;
-    }
+  getSessionPids(sessionName: string): number[] {
+    return getSessionPanePids(sessionName);
   }
 
   /** Invalidate ps cache (call at the start of each poll cycle) */
@@ -204,6 +174,7 @@ export class MemoryMonitor {
 
   /** Parse ps output to get all processes with pid, ppid, rss (cached for 5s) */
   private getAllProcesses(): PsEntry[] {
+    if (this.listProcesses) return this.listProcesses();
     const now = Date.now();
     if (this.psCache && now - this.psCache.ts < MemoryMonitor.PS_CACHE_TTL_MS) {
       return this.psCache.entries;

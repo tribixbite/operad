@@ -5,7 +5,7 @@
  * Gracefully skips if dist/tmx.js hasn't been built yet.
  */
 
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect } from "bun:test";
 import { existsSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { spawnSync as spawn } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -13,13 +13,23 @@ import { join } from "node:path";
 
 const DAEMON_BIN = join(process.cwd(), "dist/tmx.js");
 
-let skipReason: string | null = null;
+/**
+ * Decided at module load. `describe.skipIf` reads its condition while tests
+ * are being collected — before any `beforeAll` runs — so the flag used to be
+ * set too late and these suites ran (and failed) against a missing build.
+ *
+ * Locally a missing build is a skip, announced on stderr. Under CI it is a
+ * hard failure: CI builds first, so a missing bundle there means the build
+ * broke, and skipping would report that as green.
+ */
+const skipReason: string | null = existsSync(DAEMON_BIN)
+  ? null
+  : `dist/tmx.js not found — run 'bun run build' first`;
 
-beforeAll(() => {
-  if (!existsSync(DAEMON_BIN)) {
-    skipReason = `dist/tmx.js not found — run 'bun run build' first`;
-  }
-});
+if (skipReason !== null) {
+  if (process.env.CI) throw new Error(`cli-smoke: ${skipReason}`);
+  console.warn(`[cli-smoke] skipped: ${skipReason}`);
+}
 
 describe.skipIf(skipReason !== null)("CLI — operad --version", () => {
   test("exits 0 and prints version string matching package.json", () => {

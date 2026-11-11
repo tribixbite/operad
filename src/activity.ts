@@ -140,8 +140,15 @@ export class ActivityDetector {
    * @param pid Root PID
    * @returns Activity state
    */
-  classifyTree(name: string, pid: number): ActivityState {
-    const ticks = this.readTreeCpuTicks(pid);
+  classifyTree(name: string, roots: number | readonly number[]): ActivityState {
+    // Every pane of the session counts: work can run in any tmux window, and
+    // judging by the first pane alone let a build in window 2 read as idle —
+    // which is what memory-pressure auto-suspend stops.
+    let ticks: number | null = null;
+    for (const root of new Set(typeof roots === "number" ? [roots] : roots)) {
+      const t = this.readTreeCpuTicks(root);
+      if (t !== null) ticks = (ticks ?? 0) + t;
+    }
     if (ticks === null) {
       this.snapshots.delete(name);
       return "stopped";

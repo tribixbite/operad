@@ -1221,4 +1221,19 @@ export class AndroidPlatform implements Platform {
     // Last resort — use process.argv[0] and hope for the best
     return process.argv[0];
   }
+  deviceTimeZone(): string | null {
+    // Absolute path: under bun on Termux a bare `getprop` is routed through
+    // a shell that cannot find it ("cannot open getprop"), so the lookup
+    // silently failed in exactly the runtime that needs it. Bounded so a
+    // wedged property service can't stall startup.
+    try {
+      const r = spawnSync("/system/bin/getprop", ["persist.sys.timezone"], {
+        encoding: "utf-8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"],
+      });
+      const zone = (r.stdout ?? "").trim();
+      return r.status === 0 && zone ? zone : null;
+    } catch {
+      return null;
+    }
+  }
 }

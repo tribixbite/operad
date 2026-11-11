@@ -18,6 +18,7 @@ import type { DaemonStatusData, SessionDetailData, ConfigSessionRow, MemoryData 
 import { parseRecentProjects } from "./registry.js";
 import type { RecentProject } from "./registry.js";
 import { detectPlatform } from "./platform/platform.js";
+import { applyLocalTimezone } from "./timezone.js";
 import { listRuntimes } from "./runtimes/index.js";
 
 /** Agent runtime ids accepted by `operad open --runtime`. */
@@ -86,6 +87,11 @@ main().catch((err) => {
 });
 
 async function main(): Promise<void> {
+  // Before anything computes a date: "local time" (cron schedules, daily
+  // token/cost buckets) must be the device's zone, not bun's UTC fallback
+  // on Termux. See timezone.ts.
+  applyLocalTimezone(process.env, () => detectPlatform().deviceTimeZone());
+
   switch (command) {
     case "daemon":
       return runDaemon();

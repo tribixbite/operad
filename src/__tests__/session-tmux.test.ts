@@ -108,6 +108,12 @@ describe.skipIf(!HAS_TMUX)("agent tmux sessions (isolated server)", () => {
     expect(rows.split("\n").map((r) => r.split("|")[1])).toEqual(["on", "on"]);
   });
 
+  test("getSessionPanePids returns every window's pane, not just the current one", () => {
+    // Memory and activity monitoring root a session's process trees here; a
+    // window left out was work operad could not see (and could SIGSTOP).
+    expect(getSessionPanePids("t-opt").length).toBe(2);
+  });
+
   test("later windows run under the exit recorder as well", () => {
     expect(t("show-options", "-v", "-t", "=t-opt:", "default-command")).toContain("operad-exit-recorder");
   });

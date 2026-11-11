@@ -217,6 +217,14 @@ export interface Platform {
    * Others: process.argv[0] or `which bun/node`.
    */
   resolveRuntimePath(): string;
+
+  /**
+   * The device's IANA time zone when the JS runtime cannot see it itself,
+   * else null. Android: `persist.sys.timezone` — bun on Termux ignores it
+   * and runs in UTC. Desktop runtimes read the OS zone, so they return null.
+   * Applied at startup by timezone.ts.
+   */
+  deviceTimeZone(): string | null;
 }
 
 // -- Detection & singleton ---------------------------------------------------

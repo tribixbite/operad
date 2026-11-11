@@ -233,9 +233,10 @@ export class MonitoringEngine {
         continue;
       }
 
-      // Get PID: prefer adopted bare PID, fall back to tmux pane PID
+      // Process roots: the adopted bare PID, else every tmux pane of the
+      // session (all windows — work in any of them counts).
       const adoptedPid = this.ctx.adoptedPids.get(session.name);
-      let pid: number | null = null;
+      let pids: number[] = [];
       if (adoptedPid !== undefined) {
         // Verify adopted PID is still alive.
         //
@@ -247,7 +248,7 @@ export class MonitoringEngine {
         // made bare sessions unusable off Linux. The platform layer has a
         // working implementation for each OS.
         if (detectPlatform().isProcessAlive(adoptedPid)) {
-          pid = adoptedPid;
+          pids = [adoptedPid];
         } else {
           // Bare process died — remove from adopted, mark stopped
           this.ctx.log.info(`Adopted session '${session.name}' PID ${adoptedPid} exited`, { session: session.name });
@@ -257,18 +258,16 @@ export class MonitoringEngine {
           continue;
         }
       } else {
-        pid = this.memory.getSessionPid(session.name);
+        pids = this.memory.getSessionPids(session.name);
       }
-      if (pid === null) {
+      if (pids.length === 0) {
         this.ctx.state.updateSessionMetrics(session.name, null, "stopped");
         continue;
       }
 
-      // Get RSS for the full process tree
-      const { rss_mb } = this.memory.getProcessTreeRss(pid);
-
-      // Classify activity based on CPU ticks
-      const activityState = this.activity.classifyTree(session.name, pid);
+      // RSS and CPU activity over every pane's process tree
+      const { rss_mb } = this.memory.getProcessTreeRss(pids);
+      const activityState = this.activity.classifyTree(session.name, pids);
 
       // Capture pane output + detect Claude prompt state for non-service sessions
       let lastOutput: string | null = null;
@@ -291,7 +290,9 @@ export class MonitoringEngine {
       // look under, and a service has no runtime to get wrong.
       if (getRuntime(session.type) && !session.bare && adoptedPid === undefined) {
         if (procSnapshot === null) procSnapshot = snapshotProcesses();
-        this.reconcileSessionRuntime(session, pid, procSnapshot);
+        // The session's agent runs in its first pane (the one operad opened);
+        // other windows are the user's own shells.
+        this.reconcileSessionRuntime(session, pids[0], procSnapshot);
       }
 
       this.ctx.state.updateSessionMetrics(session.name, rss_mb, activityState, lastOutput, claudeStatus);
@@ -322,10 +323,9 @@ export class MonitoringEngine {
    */
   private treeContainsPid(sessionName: string, pid: number): boolean {
     try {
-      const rootPid = this.memory.getSessionPid(sessionName);
-      if (rootPid == null) return false;
-      if (rootPid === pid) return true;
-      return findProcessTree(rootPid).includes(pid);
+      // Any pane's tree: suspension stops every window of the session.
+      return this.memory.getSessionPids(sessionName)
+        .some((rootPid) => rootPid === pid || findProcessTree(rootPid).includes(pid));
     } catch {
       return false;
     }

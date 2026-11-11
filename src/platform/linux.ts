@@ -428,4 +428,8 @@ export class LinuxPlatform implements Platform {
     // Last resort: the current process binary
     return process.argv[0];
   }
+  deviceTimeZone(): string | null {
+    // The runtime reads the OS time zone itself here.
+    return null;
+  }
 }

@@ -495,4 +495,8 @@ export class WindowsPlatform implements Platform {
 
     return process.argv[0];
   }
+  deviceTimeZone(): string | null {
+    // The runtime reads the OS time zone itself here.
+    return null;
+  }
 }
