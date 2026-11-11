@@ -2,16 +2,21 @@
  * opencode.ts — OpenCode adapter.
  *
  * OpenCode (https://opencode.ai) is a project-directory-scoped TUI agent.
- * Unlike Claude Code it has no UUID-based session resumption: re-entering
- * the project directory and running `opencode` resumes whatever
- * conversation lives in that project's `.opencode/` artifacts.
+ * It resumes with `--continue` (the project's last session) or
+ * `--session <id>` (a specific one) — read from the flag table of the
+ * installed 0.5.7 binary.
  *
- * The `session_id` field on `SessionConfig` is therefore ignored here —
- * resumption is implicit by cwd, which tmux already inherits via
- * `new-session -c <path>` in session.ts.
+ * This adapter used to claim plain `opencode` resumed by cwd and ignored
+ * `session_id`. It does not: plain `opencode` starts a new session, so every
+ * restart left the previous conversation behind.
+ *
+ * TODO: add a `latestConversationId` locator once OpenCode's session store
+ * can be observed — the binary installed on the development device is a
+ * glibc build that won't run under bionic, so its on-disk format has not
+ * been inspected, and guessing it would be worse than `--continue`.
  */
 
-import type { SessionRuntime } from "./runtime.js";
+import { isSafeConversationId, type SessionRuntime } from "./runtime.js";
 import type { SessionConfig } from "../types.js";
 
 /**
@@ -42,16 +47,16 @@ export const opencodeRuntime: SessionRuntime = {
   readyTimeoutMs: 90_000,
 
   /**
-   * OpenCode resumes by cwd — the launcher needs no resume flag, just
-   * the binary name. tmux already starts the pane with the project
-   * directory as cwd via `new-session -c`.
+   * - With a usable `session_id`: `opencode --session <id>`.
+   * - Otherwise: `opencode --continue`, the project's last session.
    *
-   * We intentionally ignore `config.session_id` here: OpenCode has no
-   * UUID-keyed resume API. If users want to "fork" a project they
-   * should `tmx open <path> --new` to create a parallel suffixed
-   * session, and OpenCode will treat both panes as independent.
+   * An id that fails validation falls through to `--continue` rather than
+   * being escaped and passed on (see `isSafeConversationId`).
    */
-  startupCommand(_config: SessionConfig): string {
-    return "opencode";
+  startupCommand(config: SessionConfig): string {
+    if (config.session_id && isSafeConversationId(config.session_id)) {
+      return `opencode --session ${config.session_id}`;
+    }
+    return "opencode --continue";
   },
 };

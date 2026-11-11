@@ -27,6 +27,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSy
 import { join, resolve, dirname, basename, extname, sep } from "node:path";
 import { homedir } from "node:os";
 import type { MemoryDb } from "./memory-db.js";
+import { shellQuote } from "./shell-quote.js";
 import type { Logger } from "./log.js";
 import type { AutonomyLevel, ProtectedCheckpoints } from "./types.js";
 
@@ -148,18 +149,6 @@ export interface TomlToolConfig {
 }
 
 /** Category privilege ordering (lower = safer) */
-/**
- * Single-quote a value for POSIX `sh`.
- *
- * `JSON.stringify` was used for this in several places, which produces a
- * *double*-quoted word — and `sh` still performs `$(…)`, backtick and `$VAR`
- * expansion inside double quotes, so a value of `$(id)` executed. Single
- * quotes suppress every expansion; the only character needing care is the
- * quote itself, closed and reopened around an escaped literal.
- */
-export function shellQuote(value: string): string {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
 
 /**
  * Reject a git ref that could be read as an option or smuggle shell syntax.

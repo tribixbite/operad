@@ -12,6 +12,7 @@ import type { TmxConfig, SessionConfig } from "./types.js";
 import type { Registry } from "./registry.js";
 import { parseRecentProjects, findNamedSessions, deriveName, isValidName, nextSuffix } from "./registry.js";
 import type { StateManager } from "./state.js";
+import { TranscriptTitleCache } from "./title-cache.js";
 import type { Logger } from "./log.js";
 
 /**
@@ -117,9 +118,15 @@ export function resolveBootSessions(
   // Path to Claude's history.jsonl. Defaults to the real per-user file; tests
   // pass a fixture so they don't read (and aren't slowed by) the real history.
   historyPath: string = join(homedir(), ".claude", "history.jsonl"),
+  // Where to persist the rename-scan cache (title-cache.ts) between boots,
+  // or null to keep it in memory. The daemon passes a file beside its state;
+  // the default keeps tests and library callers from writing anywhere.
+  titleCachePath: string | null = null,
 ): void {
   const recentProjects = parseRecentProjects(historyPath, 1000);
-  const namedSessions = findNamedSessions(historyPath, 7);
+  const titles = new TranscriptTitleCache(titleCachePath);
+  const namedSessions = findNamedSessions(historyPath, 7, titles);
+  titles.save();
   const { auto_start, visible } = config.boot;
 
   /**

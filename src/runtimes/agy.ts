@@ -14,23 +14,9 @@
  * an Antigravity session as was Claude Code.
  */
 
-import type { SessionRuntime } from "./runtime.js";
+import { isSafeConversationId, type SessionRuntime } from "./runtime.js";
 import type { SessionConfig } from "../types.js";
-
-/**
- * Antigravity conversation ids are opaque — unlike Claude's, they are not
- * UUIDs — so this validator admits any plausible id while still refusing
- * anything that could break out of the command we build. The value is
- * interpolated into a string handed to `tmux send-keys`, which a shell then
- * parses, so quoting characters, whitespace and separators are all rejected
- * rather than escaped.
- */
-const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-
-/** True when `id` is safe to pass as `--conversation <id>`. */
-export function isValidAgyConversationId(id: string): boolean {
-  return CONVERSATION_ID_PATTERN.test(id);
-}
+import { latestAgyConversation } from "./conversations.js";
 
 /**
  * Readiness patterns for Antigravity's TUI.
@@ -67,9 +53,11 @@ export const agyRuntime: SessionRuntime = {
    * this is the last layer before the string reaches a shell.
    */
   startupCommand(config: SessionConfig): string {
-    if (config.session_id && isValidAgyConversationId(config.session_id)) {
+    if (config.session_id && isSafeConversationId(config.session_id)) {
       return `agy --conversation ${config.session_id}`;
     }
     return "agy --continue";
   },
+
+  latestConversationId: (projectPath, sinceMs) => latestAgyConversation(projectPath, sinceMs),
 };

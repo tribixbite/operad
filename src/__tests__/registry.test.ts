@@ -19,7 +19,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, statSync, readFileSync, utimesSync } from "node:fs";
+import { TranscriptTitleCache } from "../title-cache.js";
 
 import {
   Registry,
@@ -313,6 +314,32 @@ describe("Registry.toSessionConfigs", () => {
 });
 
 describe("Registry — session_id sanitisation on load", () => {
+  /** Write a one-entry registry file and load it back. */
+  const loadOne = (file: string, extra: Record<string, unknown>) => {
+    const filePath = join(tmpDir, file);
+    const now = new Date().toISOString();
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      sessions: [{ name: "one", path: "/one", priority: 10, auto_go: false, opened_at: now, last_active: now, ...extra }],
+    }) + "\n", "utf8");
+    return new Registry(filePath).find("one");
+  };
+
+  test("a non-UUID conversation id survives for runtimes that issue them", () => {
+    // OpenCode ids look like `ses_…`; requiring a Claude UUID for every
+    // runtime silently dropped them, so the restore fell back to --continue.
+    expect(loadOne("oc.json", { type: "opencode", session_id: "ses_01JABcd-9" })?.session_id).toBe("ses_01JABcd-9");
+  });
+
+  test("a Claude entry still requires a UUID", () => {
+    expect(loadOne("cl.json", { type: "claude", session_id: "ses_01JABcd-9" })?.session_id).toBeUndefined();
+    expect(loadOne("cl2.json", { session_id: "ses_01JABcd-9" })?.session_id).toBeUndefined();
+  });
+
+  test("shell text is dropped whatever the runtime", () => {
+    expect(loadOne("ev.json", { type: "agy", session_id: "x; rm -rf /" })?.session_id).toBeUndefined();
+  });
+
   test("invalid session_id in JSON is cleared on load", () => {
     const filePath = join(tmpDir, "dirty.json");
     const data = {
@@ -471,6 +498,44 @@ describe("findNamedSessions", () => {
     );
     const results = findNamedSessions(histPath, 7);
     expect(results).toEqual([]);
+  });
+
+  test("uses a supplied title cache, so an unchanged transcript is not re-read", () => {
+    const histPath = join(tmpDir, "history.jsonl");
+    const sessionId = "aaaaaaaa-0000-0000-0000-00000000000c";
+    const projectPath = "/home/user/cached";
+    const sessionDir = join(tmpDir, "projects", projectPath.replace(/[^a-zA-Z0-9]/g, "-"));
+    writeFileSync(histPath, JSON.stringify({ display: "x", timestamp: Date.now(), project: projectPath, sessionId }) + "\n");
+    mkdirSync(sessionDir, { recursive: true });
+    const jsonl = join(sessionDir, `${sessionId}.jsonl`);
+    writeFileSync(jsonl, JSON.stringify({ type: "custom-title", customTitle: "aaaa" }) + "\n");
+
+    const cache = new TranscriptTitleCache(null);
+    expect(findNamedSessions(histPath, 7, cache)[0]?.title).toBe("aaaa");
+    // Same size, same mtime, different bytes: only a re-read would see it.
+    const st = statSync(jsonl);
+    writeFileSync(jsonl, readFileSync(jsonl, "utf-8").replace("aaaa", "bbbb"));
+    utimesSync(jsonl, st.atime, st.mtime);
+    expect(findNamedSessions(histPath, 7, cache)[0]?.title).toBe("aaaa");
+  });
+
+  test("history entries older than the window are not considered, wherever they sit", () => {
+    // history.jsonl is append-ordered, but a line or two out of order (two
+    // sessions writing at once) must not hide recent sessions behind it.
+    const histPath = join(tmpDir, "history.jsonl");
+    const now = Date.now();
+    const lines = [
+      { display: "a", timestamp: now - 30 * 86_400_000, project: "/old", sessionId: "aaaaaaaa-0000-0000-0000-0000000000d1" },
+      { display: "b", timestamp: now - 1000, project: "/new", sessionId: "aaaaaaaa-0000-0000-0000-0000000000d2" },
+      { display: "c", timestamp: now - 2000, project: "/new", sessionId: "aaaaaaaa-0000-0000-0000-0000000000d3" },
+    ];
+    writeFileSync(histPath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    for (const l of lines) {
+      const d = join(tmpDir, "projects", l.project.replace(/[^a-zA-Z0-9]/g, "-"));
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, `${l.sessionId}.jsonl`), JSON.stringify({ type: "custom-title", customTitle: l.display }) + "\n");
+    }
+    expect(findNamedSessions(histPath, 7).map((r) => r.title).sort()).toEqual(["b", "c"]);
   });
 
   test("recent session with custom-title JSONL is returned with title", () => {

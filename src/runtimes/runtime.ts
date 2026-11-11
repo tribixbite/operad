@@ -65,4 +65,32 @@ export interface SessionRuntime {
    * matching transient text.
    */
   readonly readyPollIntervalMs?: number;
+
+  /**
+   * The conversation this runtime most recently wrote for `projectPath` at
+   * or after `sinceMs`, or null. When present, operad records the answer
+   * while the session runs so a restart resumes that exact conversation
+   * (via `startupCommand`'s `session_id` branch) rather than whichever is
+   * newest at restore time. Omitted by runtimes whose store operad can't
+   * read.
+   */
+  latestConversationId?(projectPath: string, sinceMs: number): string | null;
+}
+
+/**
+ * Conversation ids accepted from a registry or a tool's own index before
+ * they are put into a startup command.
+ *
+ * The ids are opaque (UUIDs for Codex, `ses_…` for OpenCode, other shapes
+ * for Antigravity), so this admits any plausible token while refusing
+ * anything that could break out of the command: the value is interpolated
+ * into a string handed to `tmux send-keys`, which a shell then parses, so
+ * quoting characters, whitespace and separators are rejected rather than
+ * escaped.
+ */
+const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** True when `id` is safe to place, unquoted, in a startup command. */
+export function isSafeConversationId(id: string): boolean {
+  return CONVERSATION_ID_PATTERN.test(id);
 }

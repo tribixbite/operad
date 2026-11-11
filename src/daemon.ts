@@ -85,7 +85,9 @@ import {
   resumeSession,
   runScriptInTab,
   capturePane,
+  setExitRecordDir,
 } from "./session.js";
+import { exitRecordDirFor } from "./exit-record.js";
 import { getRuntime } from "./runtimes/index.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
@@ -266,6 +268,9 @@ export class Daemon {
       this.consumerTracker = new ConsumerTracker(this.log);
     }
     this.state = new StateManager(this.config.orchestrator.state_file, this.log);
+    // Agent shells record how they ended here, which is what lets the health
+    // check tell a user's `exit` from an OOM kill (see exit-record.ts).
+    setExitRecordDir(exitRecordDirFor(this.config.orchestrator.state_file));
     // Run state schema migrations on every boot — no-op if already at current version.
     // migrateState mutates the raw state object; flush() persists the updated schemaVersion.
     {
@@ -1515,7 +1520,11 @@ export class Daemon {
    */
   private resolveBootSessions(): void {
     // Delegated to session-resolver.ts (pure function, all deps passed in)
-    resolveBootSessions(this.config, this.registry, this.state, this.log);
+    resolveBootSessions(
+      this.config, this.registry, this.state, this.log,
+      undefined,
+      join(dirname(this.config.orchestrator.state_file), "title-cache.json"),
+    );
     // Apply persisted ⭐ autostart pins over the recency/TOML-resolved
     // `enabled` flags so the user's explicit choices win and survive
     // daemon restarts. A pin only takes effect for sessions that exist in

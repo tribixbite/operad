@@ -11,7 +11,9 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { basename, dirname, join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
-import { forEachJsonlLine } from "./claude-session.js";
+import { forEachJsonlLine } from "./jsonl-lines.js";
+import { isSafeConversationId } from "./runtimes/runtime.js";
+import { TranscriptTitleCache } from "./title-cache.js";
 
 /** A dynamically registered Claude session */
 export interface RegistryEntry {
@@ -238,16 +240,17 @@ export class Registry {
             return true;
           });
           for (const entry of clean) {
-            if (entry.session_id && !isValidSessionId(entry.session_id)) {
-              entry.session_id = undefined;
-            }
             // `type` selects a runtime adapter and, for service types, pairs
             // with a `command` that is sent to a shell. A hand-edited or
             // foreign registry must not be able to name a type operad doesn't
-            // know, nor smuggle a command in under an agent type.
+            // know, nor smuggle a command in under an agent type. Checked
+            // first, because it decides which session_id rule applies.
             if (entry.type !== undefined && !REGISTRY_SESSION_TYPES.includes(entry.type)) {
               this.log?.warn(`Dropping unknown type '${String(entry.type)}' from registry entry '${entry.name}'`);
               entry.type = undefined;
+            }
+            if (entry.session_id && !isValidSessionIdFor(entry.type, entry.session_id)) {
+              entry.session_id = undefined;
             }
             if (entry.command !== undefined && typeof entry.command !== "string") {
               entry.command = undefined;
@@ -292,17 +295,16 @@ export function parseRecentProjects(historyPath: string, maxLines = 1000): Array
   if (!existsSync(historyPath)) return [];
 
   try {
-    const content = readFileSync(historyPath, "utf-8");
-    const lines = content.trim().split("\n");
-    // Take last N lines
-    const tail = lines.slice(-maxLines);
-
-    // Deduplicate by project path, keeping latest timestamp
+    // Deduplicate by project path, keeping latest timestamp. Only the last
+    // `maxLines` lines count; they are read newest-first from the end of the
+    // file, so the rest of the history is never loaded.
     const byPath = new Map<string, { timestamp: number; sessionId: string }>();
-    for (const line of tail) {
+    let seen = 0;
+    forEachJsonlLine(historyPath, (line) => {
+      if (++seen > maxLines) return false;
       try {
         const entry = JSON.parse(line) as HistoryEntry;
-        if (!entry.project || !entry.timestamp) continue;
+        if (!entry.project || !entry.timestamp) return;
         const existing = byPath.get(entry.project);
         if (!existing || entry.timestamp > existing.timestamp) {
           byPath.set(entry.project, {
@@ -311,7 +313,7 @@ export function parseRecentProjects(historyPath: string, maxLines = 1000): Array
           });
         }
       } catch { /* skip malformed lines */ }
-    }
+    }, { reverse: true });
 
     // Convert to sorted array (most recent first)
     const results: Array<{
@@ -360,6 +362,16 @@ export function isValidSessionId(id: string): boolean {
   return UUID_PATTERN.test(id);
 }
 
+/**
+ * Validate a stored conversation id for the runtime that will resume it.
+ * Claude Code issues UUIDs, and an entry with no type is Claude; the other
+ * runtimes issue other shapes (OpenCode's `ses_…`), which only have to be
+ * safe to place in a startup command.
+ */
+export function isValidSessionIdFor(type: SessionType | undefined, id: string): boolean {
+  return type === undefined || type === "claude" ? isValidSessionId(id) : isSafeConversationId(id);
+}
+
 /** A named Claude session discovered from session JSONL custom-title entries */
 export interface NamedSession {
   /** User-assigned session title (from /rename) */
@@ -373,32 +385,48 @@ export interface NamedSession {
 }
 
 /**
+ * How far past the history window the newest-first walk keeps reading
+ * before it stops. history.jsonl is appended in time order, but concurrent
+ * sessions can interleave a line or two out of order.
+ */
+const HISTORY_ORDER_SLACK_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Find Claude sessions that have user-assigned names (via /rename).
  * Scans history.jsonl for recent sessions, then checks each session's JSONL
  * for `type: "custom-title"` entries. Only returns sessions with short titles
  * (< 30 chars) active within maxAgeDays — these are intentional named sessions.
  */
-export function findNamedSessions(historyPath: string, maxAgeDays = 7): NamedSession[] {
+export function findNamedSessions(
+  historyPath: string,
+  maxAgeDays = 7,
+  titles: TranscriptTitleCache = new TranscriptTitleCache(null),
+): NamedSession[] {
   if (!existsSync(historyPath)) return [];
 
   try {
-    const content = readFileSync(historyPath, "utf-8");
-    const lines = content.trim().split("\n");
     const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
 
-    // Collect recent sessions: sessionId → { path, timestamp }
+    // Collect recent sessions: sessionId → { path, timestamp }.
+    //
+    // Walked newest-first and stopped once well past the window, instead of
+    // reading the whole history (12k+ lines, years of prompts) into memory.
+    // The file is append-ordered but two sessions writing at once can leave
+    // a line slightly out of order, so the walk only stops after a day's
+    // margin beyond the cutoff, and each entry is still checked against it.
+    const stopBelow = cutoff - HISTORY_ORDER_SLACK_MS;
     const recentById = new Map<string, { path: string; timestamp: number }>();
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line) as HistoryEntry;
-        if (!entry.project || !entry.timestamp || !entry.sessionId) continue;
-        if (entry.timestamp < cutoff) continue;
-        const existing = recentById.get(entry.sessionId);
-        if (!existing || entry.timestamp > existing.timestamp) {
-          recentById.set(entry.sessionId, { path: entry.project, timestamp: entry.timestamp });
-        }
-      } catch { /* skip malformed */ }
-    }
+    forEachJsonlLine(historyPath, (line) => {
+      let entry: HistoryEntry;
+      try { entry = JSON.parse(line) as HistoryEntry; } catch { return; }
+      if (typeof entry.timestamp === "number" && entry.timestamp < stopBelow) return false;
+      if (!entry.project || !entry.timestamp || !entry.sessionId) return;
+      if (entry.timestamp < cutoff) return;
+      const existing = recentById.get(entry.sessionId);
+      if (!existing || entry.timestamp > existing.timestamp) {
+        recentById.set(entry.sessionId, { path: entry.project, timestamp: entry.timestamp });
+      }
+    }, { reverse: true });
 
     // Scan each session's JSONL for custom-title entries
     const claudeDir = dirname(historyPath); // ~/.claude
@@ -412,26 +440,10 @@ export function findNamedSessions(historyPath: string, maxAgeDays = 7): NamedSes
 
       if (!existsSync(sessionJsonl)) continue;
 
-      // Find the LAST custom-title entry (most recent rename).
-      //
-      // Walked backwards and stopped at the first hit, rather than reading
-      // the transcript into a string and splitting it: this runs at BOOT for
-      // every session active in the last 7 days, and transcripts here reach
-      // tens of megabytes each. Loading all of them to recover a handful of
-      // short titles was a memory spike in exactly the place that has to
-      // survive memory pressure.
-      const titleHit: string[] = [];
-      forEachJsonlLine(sessionJsonl, (sLine) => {
-        if (!sLine.includes("custom-title")) return;
-        try {
-          const entry = JSON.parse(sLine) as { type: string; customTitle?: string };
-          if (entry.type === "custom-title" && entry.customTitle) {
-            titleHit.push(entry.customTitle);
-            return false; // newest-first, so the first hit IS the last rename
-          }
-        } catch { /* skip */ }
-      }, { reverse: true });
-      const customTitle = titleHit[0] ?? null;
+      // The LAST custom-title entry (most recent rename). The cache answers
+      // unchanged transcripts without reading them and reads only appended
+      // bytes otherwise — see title-cache.ts for why this dominated boot.
+      const customTitle = titles.lastCustomTitle(sessionJsonl);
 
       // Only include sessions with short, meaningful titles
       if (customTitle && customTitle.length < 30 && !customTitle.includes("(Fork)")) {

@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { rmSync, mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import {
   resolveSessionName,
   resolveSessionPath,
@@ -599,5 +599,25 @@ describe("resolveBootSessions — manual closes", () => {
 
     expect(cfg.sessions.find((s) => s.path === resolve(closedPath))).toBeUndefined();
     expect(cfg.sessions.find((s) => s.path === resolve(openPath))).toBeDefined();
+  });
+});
+
+describe("resolveBootSessions — rename-scan cache", () => {
+  test("persists the transcript title cache where it is told to", () => {
+    const cfg = makeConfig([], { auto_start: 3, visible: 5 });
+    const reg = new Registry(join(tmpDir, "boot-reg-tc.json"));
+    const state = new StateManager(join(tmpDir, "boot-state-tc.json"), silentLog());
+    const historyPath = join(tmpDir, "history.jsonl");
+    const sessionId = "aaaaaaaa-0000-0000-0000-0000000000e1";
+    const projectPath = join(tmpDir, "renamed-proj");
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(historyPath, JSON.stringify({ display: "x", timestamp: Date.now(), project: projectPath, sessionId }) + "\n");
+    const transcriptDir = join(tmpDir, "projects", projectPath.replace(/[^a-zA-Z0-9]/g, "-"));
+    mkdirSync(transcriptDir, { recursive: true });
+    writeFileSync(join(transcriptDir, `${sessionId}.jsonl`), JSON.stringify({ type: "custom-title", customTitle: "rn" }) + "\n");
+
+    const cachePath = join(tmpDir, "title-cache.json");
+    resolveBootSessions(cfg, reg, state, silentLog(), historyPath, cachePath);
+    expect(existsSync(cachePath)).toBe(true);
   });
 });

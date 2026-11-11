@@ -192,3 +192,54 @@ describe("classifyPaneLiveness", () => {
     expect(classifyPaneLiveness("1|0|\n1||9").state).toBe("killed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// classifyPaneLiveness — panes run under the exit recorder
+// ---------------------------------------------------------------------------
+// Rows are `dead|status|signal|server_pid|pane_id`. A pane started under the
+// recorder has a record file: `running` while its shell runs, then the
+// shell's exit status. That record, when present, overrides tmux's own
+// status fields (which hold the wrapper's status, always 0). The lookup is
+// injected so no filesystem is involved.
+
+describe("classifyPaneLiveness with exit records", () => {
+  const row = (dead: 0 | 1, pane: string) => `${dead}|0||4436|${pane}`;
+  const records = (map: Record<string, number | "running">) => (key: string | null) =>
+    key !== null && key in map ? map[key] : null;
+
+  test("a recorded clean exit is an exit", () => {
+    expect(classifyPaneLiveness(row(1, "%5"), records({ "4436-5": 0 }))).toEqual({ state: "exited", status: 0 });
+  });
+
+  test("a recorded non-zero `exit 3` is still the user's exit", () => {
+    expect(classifyPaneLiveness(row(1, "%5"), records({ "4436-5": 3 }))).toEqual({ state: "exited", status: 3 });
+  });
+
+  test("a recorded SIGKILL is a crash — the case tmux could not report", () => {
+    expect(classifyPaneLiveness(row(1, "%5"), records({ "4436-5": 137 }))).toEqual({ state: "killed", status: 137, signal: 9 });
+  });
+
+  test("a dead pane whose record still says `running` lost its recorder too: a crash", () => {
+    // The wrapper only fails to overwrite `running` when it is killed
+    // itself, so that is evidence of a kill, never of an exit.
+    expect(classifyPaneLiveness(row(1, "%5"), records({ "4436-5": "running" })).state).toBe("killed");
+  });
+
+  test("a live pane is alive regardless of its record", () => {
+    expect(classifyPaneLiveness(row(0, "%5"), records({ "4436-5": 0 })).state).toBe("alive");
+  });
+
+  test("every pane is judged by its own record", () => {
+    const out = [row(1, "%5"), row(1, "%6")].join("\n");
+    expect(classifyPaneLiveness(out, records({ "4436-5": 0, "4436-6": 137 })).state).toBe("killed");
+    expect(classifyPaneLiveness(out, records({ "4436-5": 0, "4436-6": 0 })).state).toBe("exited");
+  });
+
+  test("a pane without any record (started before the recorder) keeps the tmux-field reading", () => {
+    // An adopted session's original pane has no recorder; its windows
+    // opened later do. Each is read its own way.
+    expect(classifyPaneLiveness("1|||4436|%5", records({})).state).toBe("exited");
+    expect(classifyPaneLiveness("1||9|4436|%5", records({})).state).toBe("killed");
+    expect(classifyPaneLiveness([row(1, "%5"), "1|||4436|%7"].join("\n"), records({ "4436-5": 0 })).state).toBe("exited");
+  });
+});

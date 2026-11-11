@@ -19,6 +19,8 @@ import { ActivityDetector } from "../activity.js";
 import { BatteryMonitor } from "../battery.js";
 import { makeFakeContext, silentLog, type FakeContext } from "./helpers/fake-context.js";
 import type { AndroidEngine } from "../android-engine.js";
+import { ConversationPinner } from "../conversation-pin.js";
+import { parseProcessSnapshot } from "../runtimes/detect.js";
 
 let fc: FakeContext;
 let eng: MonitoringEngine;
@@ -161,5 +163,56 @@ describe("MonitoringEngine — stopTimers", () => {
     expect(() => eng.stopTimers()).not.toThrow();
     // Idempotent
     expect(() => eng.stopTimers()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conversation pinning — a running agy/Codex session's conversation id is
+// recorded so a restart resumes that exact conversation.
+// ---------------------------------------------------------------------------
+
+describe("MonitoringEngine — conversation pinning", () => {
+  /** A pane (pid 200) running `args` under its shell. */
+  const paneRunning = (args: string) =>
+    parseProcessSnapshot(["  PID  PPID ARGS", "  200   100 -bash", `  300   200 ${args}`].join("\n"));
+
+  function engineWith(locate: (path: string, since: number) => string | null): MonitoringEngine {
+    const log = silentLog();
+    return new MonitoringEngine(
+      fc.ctx, new MemoryMonitor(log), new ActivityDetector(log), new BatteryMonitor(log), fakeAndroidEngine(),
+      {
+        pinner: new ConversationPinner(() => 1_000_000, 0),
+        runtimeFor: () => ({ latestConversationId: locate }),
+      },
+    );
+  }
+
+  test("records the conversation in the registry and the live config", async () => {
+    fc = await makeFakeContext();
+    fc.ctx.registry.add({ name: "ag", path: "/p", priority: 10, auto_go: false, type: "agy" });
+    const session = { ...fc.ctx.config.sessions[0], name: "ag", path: "/p", type: "agy" as const };
+    eng = engineWith(() => "conv-9");
+    eng.reconcileSessionRuntime(session, 200, paneRunning("agy --continue"));
+    expect(fc.ctx.registry.find("ag")?.session_id).toBe("conv-9");
+    expect(session.session_id).toBe("conv-9");
+  });
+
+  test("a TOML-declared session is not pinned", async () => {
+    fc = await makeFakeContext();
+    const session = { ...fc.ctx.config.sessions[0], name: "toml-only", path: "/p", type: "agy" as const };
+    eng = engineWith(() => "conv-9");
+    eng.reconcileSessionRuntime(session, 200, paneRunning("agy --continue"));
+    expect(session.session_id).toBeUndefined();
+  });
+
+  test("while a different tool runs, nothing is pinned to the session", async () => {
+    fc = await makeFakeContext();
+    fc.ctx.registry.add({ name: "ag", path: "/p", priority: 10, auto_go: false, type: "agy" });
+    const session = { ...fc.ctx.config.sessions[0], name: "ag", path: "/p", type: "agy" as const };
+    eng = engineWith(() => "conv-9");
+    // One poll of codex is not yet an adopted switch, and a codex
+    // conversation must never be recorded against an agy session.
+    eng.reconcileSessionRuntime(session, 200, paneRunning("codex"));
+    expect(fc.ctx.registry.find("ag")?.session_id).toBeUndefined();
   });
 });

@@ -19,6 +19,12 @@ import type {
 } from "./types.js";
 
 import { homedir } from "node:os";
+import { completeLinesEnd, forEachJsonlLine, readLinesBackward, readLinesForward } from "./jsonl-lines.js";
+import { TranscriptTitleCache } from "./title-cache.js";
+
+// Re-exported: the line readers lived here first, and callers import them
+// from this module.
+export { completeLinesEnd, forEachJsonlLine };
 
 // Resolve the Claude config locations LAZILY rather than capturing homedir()
 // at module load. A module-level `const HOME = homedir()` freezes whatever
@@ -30,7 +36,20 @@ import { homedir } from "node:os";
 // import order or $HOME relocation (same convention as tools.ts /
 // session-resolver.ts). homedir() doesn't change at runtime in production, so
 // this is behaviourally identical there.
-function claudeHome(): string { return process.env.HOME || homedir(); }
+function claudeHome(): string { return claudeHomeOverride ?? (process.env.HOME || homedir()); }
+
+/** Test seam: the home directory whose `.claude/` this module reads. */
+let claudeHomeOverride: string | null = null;
+
+/**
+ * Point this module at a different home directory (or back, with null).
+ * For tests: mutating `process.env.HOME` instead can poison bun's
+ * process-wide `os.homedir()` cache for every later test.
+ * @internal
+ */
+export function _setClaudeHome(home: string | null): void {
+  claudeHomeOverride = home;
+}
 function claudeDir(): string { return join(claudeHome(), ".claude"); }
 function projectsDir(): string { return join(claudeDir(), "projects"); }
 function historyPath(): string { return join(claudeDir(), "history.jsonl"); }
@@ -61,6 +80,13 @@ interface ModelRates {
    * 10% and 5% of input moves the total by more than any other term.
    */
   cacheRead?: number;
+  /**
+   * A higher tier for long prompts, for models priced by prompt length.
+   * Applies to a request whose prompt — every input token, cache reads and
+   * cache writes included — is OVER `overTokens`; cache rates within the
+   * tier follow the usual multiples of its input rate.
+   */
+  longPrompt?: { overTokens: number; rates: Omit<ModelRates, "longPrompt"> };
 }
 
 /**
@@ -94,11 +120,10 @@ const MODEL_RATES: Readonly<Record<string, ModelRates>> = {
   "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.20 },
   "claude-sonnet-5": { input: 2, output: 10 },
   "claude-sonnet-4-6": { input: 3, output: 15 },
-  // Haiku 5.5's published rate is for prompts up to 100K tokens; beyond that
-  // it is $0.50/$2.50. operad scans per-entry token counts and has no record
-  // of each request's prompt size, so the base rate is used and long-prompt
-  // Haiku traffic is under-counted rather than guessed at.
-  "claude-haiku-5-5": { input: 0.1, output: 0.5 },
+  // Priced by prompt length: $0.10/$0.50 up to 100,000 prompt tokens, then
+  // $0.50/$2.50 (cache hit $0.05, writes $0.625 / $1) — per the pricing page,
+  // 2026-11. Each request is priced on its own; see `pricingKey`.
+  "claude-haiku-5-5": { input: 0.1, output: 0.5, longPrompt: { overTokens: 100_000, rates: { input: 0.5, output: 2.5 } } },
   "claude-haiku-4-5": { input: 1, output: 5 },
 };
 
@@ -130,9 +155,35 @@ export function normalizeModelId(model: string): string {
   return model.replace(/-\d{8}$/, "");
 }
 
-/** Published rates for a model, or null when it has none. */
-function ratesFor(model: string): ModelRates | null {
+/**
+ * Suffix that marks a pricing key as a model's long-prompt tier. Not a real
+ * model id character sequence, so it cannot collide with one.
+ */
+const LONG_PROMPT_KEY_SUFFIX = "#long-prompt";
+
+/** Published rates for a model (or a model's tier key), or null when it has none. */
+function ratesFor(model: string): Omit<ModelRates, "longPrompt"> | null {
+  if (model.endsWith(LONG_PROMPT_KEY_SUFFIX)) {
+    const base = MODEL_RATES[normalizeModelId(model.slice(0, -LONG_PROMPT_KEY_SUFFIX.length))];
+    return base?.longPrompt?.rates ?? null;
+  }
   return MODEL_RATES[normalizeModelId(model)] ?? null;
+}
+
+/**
+ * The key a single request's usage is priced (and bucketed) under: the model
+ * id, or — for a model priced by prompt length whose prompt in THIS request
+ * crossed the threshold — that model's long-prompt tier.
+ *
+ * Must be decided per request, before usage is summed: once buckets from
+ * many requests are added together, which of them were long is gone. Output
+ * tokens are not part of the prompt and do not count.
+ */
+export function pricingKey(model: string, request: RateBuckets): string {
+  const tier = MODEL_RATES[normalizeModelId(model)]?.longPrompt;
+  if (!tier) return model;
+  const prompt = request.input + request.cacheRead + request.cacheWrite5m + request.cacheWrite1h;
+  return prompt > tier.overTokens ? normalizeModelId(model) + LONG_PROMPT_KEY_SUFFIX : model;
 }
 
 /** Token counts split the way pricing actually needs them. */
@@ -201,7 +252,7 @@ export function priceBuckets(byModel: Map<string, RateBuckets>): {
       cost += c;
     } else {
       unpricedTokens += bucketTotal(buckets);
-      unpriced.push(normalizeModelId(model));
+      unpriced.push(normalizeModelId(model.replace(LONG_PROMPT_KEY_SUFFIX, "")));
     }
   }
   return { cost_usd: cost, unpriced_tokens: unpricedTokens, unpriced_models: unpriced.sort() };
@@ -231,32 +282,14 @@ interface JsonlFileInfo {
 }
 
 /**
- * Extract the custom title (nickname) from a Claude session JSONL file.
- * Scans for the LAST `type: "custom-title"` entry (most recent rename).
- * Returns null if no title found or file unreadable.
+ * Titles (the last `/rename`) of the transcripts listed in a conversation
+ * page's session picker. The list covers every conversation in the project
+ * and is rebuilt on every page request, so titles are cached per transcript
+ * and only appended bytes are ever re-read (see title-cache.ts). It used to
+ * read every transcript in full, every request. In-memory only: entries are
+ * a few dozen bytes per transcript.
  */
-function extractSessionTitle(filePath: string): string | null {
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    // Quick bail if no custom-title anywhere in the file
-    if (!content.includes("custom-title")) return null;
-
-    let title: string | null = null;
-    const lines = content.split("\n");
-    for (const line of lines) {
-      if (!line.includes("custom-title")) continue;
-      try {
-        const entry = JSON.parse(line) as { type?: string; customTitle?: string };
-        if (entry.type === "custom-title" && entry.customTitle) {
-          title = entry.customTitle;
-        }
-      } catch { /* skip malformed lines */ }
-    }
-    return title;
-  } catch {
-    return null;
-  }
-}
+const conversationTitles = new TranscriptTitleCache(null);
 
 /**
  * Depth limit for the walk under a session's `subagents/` directory.
@@ -454,6 +487,9 @@ export function listClaudeProjects(): ClaudeProjectDir[] {
   return out;
 }
 
+/** How many of history.jsonl's newest lines `resolveActiveJsonl` considers. */
+const ACTIVE_HISTORY_LINES = 500;
+
 /**
  * Find the active JSONL file for a project by looking up the most recent
  * sessionId in history.jsonl. Falls back to most recently modified JSONL.
@@ -465,18 +501,21 @@ export function resolveActiveJsonl(projectPath: string): JsonlFileInfo | null {
   // Try to find the active session from history.jsonl
   if (existsSync(historyPath())) {
     try {
-      const content = readFileSync(historyPath(), "utf-8");
-      const lines = content.trim().split("\n");
-      // Read from end to find most recent entry for this project
-      for (let i = lines.length - 1; i >= Math.max(0, lines.length - 500); i--) {
+      // The most recent entry for this project, among the last 500 lines —
+      // read from the end of the file, not loaded whole.
+      let match: JsonlFileInfo | undefined;
+      let seen = 0;
+      forEachJsonlLine(historyPath(), (line) => {
+        if (++seen > ACTIVE_HISTORY_LINES) return false;
         try {
-          const entry = JSON.parse(lines[i]) as { project?: string; sessionId?: string };
+          const entry = JSON.parse(line) as { project?: string; sessionId?: string };
           if (entry.project === projectPath && entry.sessionId) {
-            const match = files.find(f => f.id === entry.sessionId);
-            if (match) return match;
+            match = files.find(f => f.id === entry.sessionId);
+            if (match) return false;
           }
         } catch { /* skip malformed lines */ }
-      }
+      }, { reverse: true });
+      if (match) return match;
     } catch { /* history unreadable */ }
   }
 
@@ -839,10 +878,10 @@ function applyLine(state: ScanState, line: string): void {
     // An entry with usage but no model cannot be priced against any rate. Bucket
     // it under a sentinel so its tokens surface as unpriced rather than being
     // silently attributed to whichever model happened to come last.
-    const model = entry.message?.model ?? "unknown";
     const perEntry: RateBuckets = {
       input, output, cacheRead, cacheWrite5m: write5m, cacheWrite1h: write1h,
     };
+    const model = pricingKey(entry.message?.model ?? "unknown", perEntry);
     let modelBuckets = state.byModel.get(model);
     if (!modelBuckets) {
       modelBuckets = emptyBuckets();
@@ -1445,136 +1484,6 @@ function parseConversationLine(line: string): RawConversationEntry | null {
   return null;
 }
 
-/** Chunk size for both line readers. */
-const LINE_CHUNK_SIZE = 65536;
-
-/**
- * Yield a file's non-empty lines newest-first, lazily.
- *
- * Splits on the `\n` BYTE and only decodes complete lines. Decoding each
- * 64 KB chunk independently — what the previous inline reader did — cuts
- * multi-byte UTF-8 sequences at the boundary and replaces them with U+FFFD,
- * silently corrupting one character every chunk.
- *
- * Laziness is the point: the caller stops when it has what it needs, so a
- * deep `beforeUuid` cursor keeps reading instead of giving up after a fixed
- * window (the old reader collected `limit * 10` lines and then searched them
- * for the cursor — once paging reached beyond that, every further page came
- * back empty with `has_more: true`, so the viewer could not page back more
- * than a few hundred entries no matter how long the conversation was).
- */
-function* readLinesBackward(fd: number, size: number): Generator<string> {
-  let offset = size;
-  // Bytes of a line whose start lies in a chunk we have not read yet.
-  // Explicitly typed: `subarray()` widens to Buffer<ArrayBufferLike>, which
-  // the Buffer<ArrayBuffer> inferred from `alloc()` would reject.
-  let carry: Buffer = Buffer.alloc(0);
-
-  while (offset > 0) {
-    const readSize = Math.min(LINE_CHUNK_SIZE, offset);
-    offset -= readSize;
-    const buf = Buffer.alloc(readSize);
-    readSync(fd, buf, 0, readSize, offset);
-    const combined = carry.length > 0 ? Buffer.concat([buf, carry]) : buf;
-
-    const segments: Buffer[] = [];
-    let start = 0;
-    for (let i = 0; i < combined.length; i++) {
-      if (combined[i] === 0x0a) {
-        segments.push(combined.subarray(start, i));
-        start = i + 1;
-      }
-    }
-    segments.push(combined.subarray(start));
-
-    // The first segment is only a complete line once we're at the file start.
-    carry = offset > 0 ? (segments.shift() ?? Buffer.alloc(0)) : Buffer.alloc(0);
-
-    for (let i = segments.length - 1; i >= 0; i--) {
-      const line = segments[i].toString("utf-8").trim();
-      if (line) yield line;
-    }
-  }
-
-  if (carry.length > 0) {
-    const line = carry.toString("utf-8").trim();
-    if (line) yield line;
-  }
-}
-
-/**
- * Yield a file's non-empty lines oldest-first, lazily. Byte-level split for
- * the same reason as `readLinesBackward`.
- */
-function* readLinesForward(fd: number, size: number): Generator<string> {
-  let offset = 0;
-  // Bytes of a line whose end lies in a chunk we have not read yet.
-  let carry: Buffer = Buffer.alloc(0);
-
-  while (offset < size) {
-    const readSize = Math.min(LINE_CHUNK_SIZE, size - offset);
-    const buf = Buffer.alloc(readSize);
-    readSync(fd, buf, 0, readSize, offset);
-    offset += readSize;
-    const combined = carry.length > 0 ? Buffer.concat([carry, buf]) : buf;
-
-    let start = 0;
-    for (let i = 0; i < combined.length; i++) {
-      if (combined[i] === 0x0a) {
-        const line = combined.subarray(start, i).toString("utf-8").trim();
-        start = i + 1;
-        if (line) yield line;
-      }
-    }
-    carry = combined.subarray(start);
-  }
-
-  if (carry.length > 0) {
-    const line = carry.toString("utf-8").trim();
-    if (line) yield line;
-  }
-}
-
-/**
- * Visit a JSONL file's non-empty lines without loading it into memory.
- *
- * `reverse` walks newest-first. `visit` returning `false` stops the walk, so
- * a caller that wants the last N of something reads only the tail.
- *
- * Transcripts here run to tens of megabytes (2.8 GB across 459 files on the
- * author's machine), and `readFileSync(...).split("\n")` costs the file
- * twice over in V8 strings. On a phone whose low-memory killer is already
- * taking processes, a boot-time scan that does that for every recently
- * active session is a self-inflicted memory spike.
- */
-export function forEachJsonlLine(
-  path: string,
-  visit: (line: string) => boolean | void,
-  opts: { reverse?: boolean } = {},
-): void {
-  if (!existsSync(path)) return;
-  let st;
-  try {
-    st = statSync(path);
-  } catch {
-    return;
-  }
-  if (!st.isFile() || st.size === 0) return;
-
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, "r");
-    const lines = opts.reverse
-      ? readLinesBackward(fd, st.size)
-      : readLinesForward(fd, st.size);
-    for (const line of lines) {
-      if (visit(line) === false) return;
-    }
-  } catch { /* unreadable — treat as empty */ } finally {
-    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
-  }
-}
-
 /**
  * Read conversation entries from the tail of a JSONL file.
  *
@@ -1833,7 +1742,7 @@ export function getConversationPage(
 ): ConversationPage {
   const files = resolveJsonlFiles(projectPath);
   const sessionList = files.map(f => {
-    const title = extractSessionTitle(f.path) ?? undefined;
+    const title = conversationTitles.lastCustomTitle(f.path) ?? undefined;
     return {
       id: f.id,
       last_modified: new Date(f.mtime).toISOString(),
@@ -1910,22 +1819,21 @@ export function readTimeline(
   // 1. Parse trace.log for session-related events
   if (existsSync(tracePath)) {
     try {
-      const content = readFileSync(tracePath, "utf-8");
-      const lines = content.split("\n");
       // Get file modification date for constructing full timestamps
       const traceStat = statSync(tracePath);
       const fileDate = new Date(traceStat.mtimeMs).toISOString().slice(0, 10);
 
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i];
-        if (!line.includes(sessionName)) continue;
+      // Newest-first and stopped at the limit, not read whole: the trace log
+      // runs to megabytes and only its tail can make the cut.
+      forEachJsonlLine(tracePath, (line) => {
+        if (!line.includes(sessionName)) return;
 
         // Parse HH:MM:SS.mmm prefix
         const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2}\.\d{3})\s+(.+)/);
-        if (!timeMatch) continue;
+        if (!timeMatch) return;
 
         const timestamp = `${fileDate}T${timeMatch[1]}Z`;
-        if (sinceDate && new Date(timestamp) < sinceDate) continue;
+        if (sinceDate && new Date(timestamp) < sinceDate) return;
 
         events.push({
           timestamp,
@@ -1933,8 +1841,8 @@ export function readTimeline(
           event: timeMatch[2].trim(),
         });
 
-        if (events.length >= limit * 2) break; // Collect extra for merge
-      }
+        if (events.length >= limit * 2) return false; // Collect extra for merge
+      }, { reverse: true });
     } catch { /* trace unreadable */ }
   }
 
@@ -2082,19 +1990,24 @@ export async function getDailyCostTimeline(
           // Priced against this entry's own model, like the main scanner.
           // An unpriced model contributes 0 rather than being charged an
           // unrelated model's rate.
-          const model = raw.message?.model ?? "unknown";
           const cc = usage.cache_creation;
-          const inputCost = calculateCost(model, {
-            ...emptyBuckets(), input: usage.input_tokens ?? 0,
-          });
-          const outputCost = calculateCost(model, {
-            ...emptyBuckets(), output: usage.output_tokens ?? 0,
-          });
-          const cacheCost = calculateCost(model, {
-            ...emptyBuckets(),
+          const request: RateBuckets = {
+            input: usage.input_tokens ?? 0,
+            output: usage.output_tokens ?? 0,
             cacheRead: usage.cache_read_input_tokens ?? 0,
             cacheWrite5m: cc ? (cc.ephemeral_5m_input_tokens ?? 0) : (usage.cache_creation_input_tokens ?? 0),
             cacheWrite1h: cc ? (cc.ephemeral_1h_input_tokens ?? 0) : 0,
+          };
+          // The tier is chosen from the whole request before it is split
+          // into input / output / cache columns.
+          const model = pricingKey(raw.message?.model ?? "unknown", request);
+          const inputCost = calculateCost(model, { ...emptyBuckets(), input: request.input });
+          const outputCost = calculateCost(model, { ...emptyBuckets(), output: request.output });
+          const cacheCost = calculateCost(model, {
+            ...emptyBuckets(),
+            cacheRead: request.cacheRead,
+            cacheWrite5m: request.cacheWrite5m,
+            cacheWrite1h: request.cacheWrite1h,
           });
 
           let day = dailyMap.get(dateKey);

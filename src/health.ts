@@ -72,34 +72,26 @@ export function checkSessionHealth(
  * when they aren't — whether they ended or were killed.
  *
  * `sessionExists` alone cannot answer the second question, and the answer
- * decides whether auto-restart should fire. Agent sessions are created with
- * `remain-on-exit on`, so a shell that exits leaves a dead pane behind to be
- * inspected instead of taking the whole tmux session down with it.
+ * decides whether auto-restart should fire. Agent sessions keep their dead
+ * panes (`remain-on-exit`, see `applyAgentSessionOptions`) and run their
+ * shell under the exit recorder (exit-record.ts), so a dead pane carries the
+ * shell's real exit status even on tmux builds — 3.5a under Termux — that
+ * report none themselves.
  *
  * `user_exited` is set for one case only: the tmux session is still there
- * and every pane in it is dead with nothing reporting a kill. That is the
- * shape a person typing `exit` leaves behind, and it is the only shape
- * operad can positively identify.
+ * and every pane in it is dead with nothing reporting a kill. Everything
+ * else keeps the crash handling:
  *
- * Everything else keeps the old crash handling:
- *
+ *  - A recorded SIGKILL (Android's low-memory killer), or a recorder that
+ *    died with its shell, is a crash and is restarted.
  *  - A MISSING session is not treated as an exit. It means something ran
- *    kill-session, and a pre-existing session created before operad started
- *    setting `remain-on-exit` also disappears on a clean exit, so the signal
- *    is not specific. (Those sessions get the option when they are next
- *    created, after which an exit is identifiable.)
- *  - On tmux builds that do report an exit status — this one does not; tmux
- *    3.5a under Termux leaves `pane_dead_status` and `pane_dead_signal`
- *    empty — a signal or a non-zero status is a crash.
+ *    kill-session (or a session predating `remain-on-exit` ended), so the
+ *    signal is not specific.
  *
- * The case this cannot separate is Android's low-memory killer taking just
- * the pane's shell while the tmux server survives: with no status reported,
- * that looks exactly like an exit and the session is retired rather than
- * restarted. The OOM failure that actually happens on this platform takes
- * the whole tmux server, which is handled separately (every session is
- * marked failed and restored on the next boot), and `boot.respect_manual_exit
- * = false` turns the new behaviour off for anyone who would rather have the
- * restart.
+ * Residual ambiguity, limited to panes started before the recorder existed
+ * (an adopted session's original pane, until its next restart): those have
+ * no record, so a dead one is read from tmux's empty fields as an exit.
+ * `boot.respect_manual_exit = false` turns exit handling off entirely.
  */
 function tmuxAliveCheck(sessionName: string, startMs: number): HealthResult {
   const liveness = paneLiveness(sessionName);

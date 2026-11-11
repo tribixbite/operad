@@ -7,13 +7,22 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
 import { detectPlatform } from "./platform/platform.js";
 import { getRuntime } from "./runtimes/index.js";
 import type { SessionRuntime } from "./runtimes/index.js";
+import {
+  buildRecorderArgv,
+  buildRecorderCommand,
+  exitRecordKey,
+  interpretRecordedStatus,
+  pruneStaleExitRecords,
+  readExitRecord,
+  type ExitRecord,
+} from "./exit-record.js";
 
 /** Lazy-resolved tmux binary path via platform abstraction.
  *  Module-load-time resolution would freeze a wrong path on systems where
@@ -25,6 +34,46 @@ function TMUX_BIN(): string {
     _tmuxBin = detectPlatform().resolveBinaryPath("tmux");
   }
   return _tmuxBin;
+}
+
+/**
+ * Server-selection arguments prepended to every tmux invocation.
+ *
+ * Empty by default, so operad talks to the user's normal tmux server. When
+ * `OPERAD_TMUX_SOCKET` names a socket, every call gets `-L <name>` — a
+ * separate server — which lets a second operad instance, or the test suite,
+ * run without touching the sessions on the real one. Read on every call
+ * (not cached) so a test can set it before its first tmux call.
+ */
+export function tmuxServerArgs(): string[] {
+  const socket = process.env.OPERAD_TMUX_SOCKET;
+  return socket ? ["-L", socket] : [];
+}
+
+/** spawnSync tmux on the selected server. The single path every call goes through. */
+function spawnTmux(
+  args: string[],
+  opts: { timeout: number; capture: boolean },
+): ReturnType<typeof spawnSync> {
+  return spawnSync(TMUX_BIN(), [...tmuxServerArgs(), ...args], {
+    encoding: "utf-8",
+    timeout: opts.timeout,
+    stdio: opts.capture ? ["ignore", "pipe", "pipe"] : "ignore",
+    env: getCleanEnv(),
+  });
+}
+
+/**
+ * Where agent panes record how their shell ended (see exit-record.ts), or
+ * null to start agent shells without a recorder. The daemon sets this at
+ * startup from its state directory; library callers and tests that never set
+ * it get plain shells and the tmux-field reading of dead panes.
+ */
+let exitRecordDir: string | null = null;
+
+/** Configure (or, with null, disable) the exit-record directory. */
+export function setExitRecordDir(dir: string | null): void {
+  exitRecordDir = dir;
 }
 
 /** Default readiness polling timeout if a runtime adapter doesn't override (ms). */
@@ -48,14 +97,9 @@ function getCleanEnv(): NodeJS.ProcessEnv {
  */
 function tmux(...args: string[]): string | null {
   try {
-    const result = spawnSync(TMUX_BIN(),args, {
-      encoding: "utf-8",
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: getCleanEnv(),
-    });
+    const result = spawnTmux(args, { timeout: 10_000, capture: true });
     if (result.status !== 0) return null;
-    return (result.stdout ?? "").trim();
+    return String(result.stdout ?? "").trim();
   } catch {
     return null;
   }
@@ -174,11 +218,7 @@ export function findBareServicePid(pattern: RegExp): number | null {
 
 /** Check if the tmux server is alive */
 export function isTmuxServerAlive(): boolean {
-  const result = spawnSync(TMUX_BIN(), ["start-server"], {
-    timeout: 5000,
-    stdio: "ignore",
-    env: getCleanEnv(),
-  });
+  const result = spawnTmux(["start-server"], { timeout: 5000, capture: false });
   // Surface ENOENT so a missing tmux binary is visible rather than silently
   // returning false and being mistaken for a simple "server not running" case.
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -207,11 +247,7 @@ export function listTmuxSessions(): string[] {
  * ([a-z0-9-]+) so prefixing `=` is always safe.
  */
 export function sessionExists(name: string): boolean {
-  const result = spawnSync(TMUX_BIN(),["has-session", "-t", formatTmuxTarget(name)], {
-    timeout: 5000,
-    stdio: "ignore",
-    env: getCleanEnv(),
-  });
+  const result = spawnTmux(["has-session", "-t", formatTmuxTarget(name)], { timeout: 5000, capture: false });
   return result.status === 0;
 }
 
@@ -219,12 +255,13 @@ export function sessionExists(name: string): boolean {
  * Why a session's panes are no longer running anything.
  *
  *  - `alive`      — at least one pane still has a live process.
- *  - `exited`     — every pane is dead and none was killed by a signal: the
- *                   shell was exited. That is a person typing `exit`, not a
- *                   failure, and must not be answered with a restart.
- *  - `killed`     — a pane died on a signal (SIGKILL from Android's lmkd is
- *                   the case that matters here) or with a non-zero status.
- *                   This is exactly what auto-restart exists for.
+ *  - `exited`     — every pane is dead and none was killed: the shell was
+ *                   exited. That is a person typing `exit`, not a failure,
+ *                   and must not be answered with a restart.
+ *  - `killed`     — a pane's shell died on a signal (SIGKILL from Android's
+ *                   lmkd is the case that matters here) or, on tmux builds
+ *                   that report it, with a non-zero status. This is exactly
+ *                   what auto-restart exists for.
  *  - `missing`    — no such tmux session.
  *  - `unknown`    — tmux could not be asked (server down, timeout).
  */
@@ -238,11 +275,12 @@ export type PaneLiveness =
 /**
  * Inspect a session's panes to tell a deliberate exit from a crash.
  *
- * Only meaningful for sessions created with `remain-on-exit on` (see
- * `createSession`): without it tmux destroys the session the instant its
- * last pane's process exits, and the exit status dies with it — leaving
- * "session is gone" as the only signal, which a clean exit and an
- * OOM-killed shell produce identically.
+ * Only meaningful for sessions with `remain-on-exit on` (see
+ * `applyAgentSessionOptions`): without it tmux destroys the session the
+ * instant its last pane's process exits, leaving "session is gone" as the
+ * only signal, which a clean exit and an OOM-killed shell produce
+ * identically. Panes started under the exit recorder are judged by their
+ * record; others by tmux's own status fields.
  */
 export function paneLiveness(name: string): PaneLiveness {
   const output = tmux(
@@ -254,56 +292,84 @@ export function paneLiveness(name: string): PaneLiveness {
     // doesn't treat a dead tmux server as every session having been closed.
     return sessionExists(name) ? { state: "unknown" } : { state: "missing" };
   }
-  return classifyPaneLiveness(output);
+  const dir = exitRecordDir;
+  return classifyPaneLiveness(output, dir === null ? () => null : (key) => readExitRecord(dir, key));
 }
 
 /**
- * tmux format for `paneLiveness`.
+ * tmux format for `paneLiveness`: `dead|status|signal|server_pid|pane_id`.
  *
  * Pipe-separated, not space-separated: `pane_dead_status` and
  * `pane_dead_signal` are EMPTY on some builds (tmux 3.5a under Termux is
  * one), and with spaces an empty middle field collapses into its neighbours
  * — a pane killed by signal 9 arrives as "1  9" and reads as "exited with
- * status 9", which is both wrong and the opposite decision.
+ * status 9", which is both wrong and the opposite decision. The server pid
+ * and pane id locate the pane's exit record.
  */
-const PANE_LIVENESS_FORMAT = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";
+const PANE_LIVENESS_FORMAT = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}|#{pid}|#{pane_id}";
+
+/** Verdict for one dead pane. */
+type PaneVerdict = { state: "exited"; status: number } | { state: "killed"; status?: number; signal?: number };
+
+/**
+ * Judge a dead pane from tmux's own fields — the reading for panes with no
+ * exit record. A reported signal, or a non-zero status, is a crash.
+ * Everything else is an exit: the status fields come back empty on some
+ * builds, so "exited" is the honest reading of "dead, and nothing says it
+ * was killed" — not a claim that a status was seen and was zero.
+ */
+function verdictFromTmuxFields(statusRaw: string, signalRaw: string): PaneVerdict {
+  const status = Number(statusRaw);
+  const signal = Number(signalRaw);
+  // `pane_dead_signal` is a name on some builds ("KILL") and a number on
+  // others; either way a non-empty value means it was killed.
+  if (signalRaw !== "") {
+    return {
+      state: "killed",
+      ...(Number.isFinite(signal) && signal > 0 ? { signal } : {}),
+      ...(statusRaw !== "" && Number.isFinite(status) ? { status } : {}),
+    };
+  }
+  if (statusRaw !== "" && Number.isFinite(status) && status !== 0) {
+    return { state: "killed", status };
+  }
+  return { state: "exited", status: statusRaw !== "" && Number.isFinite(status) ? status : 0 };
+}
 
 /**
  * Classify `list-panes -F PANE_LIVENESS_FORMAT` output. Split out from the
- * tmux call so the decision is testable.
+ * tmux call (with the record lookup injected) so the decision is testable.
  *
- * Any live pane means the session is alive. Otherwise a reported signal, or
- * a non-zero status, is a crash; everything else is an exit. Note that the
- * status fields come back empty on some builds, so "exited" is the honest
- * reading of "dead, and nothing says it was killed" — not a claim that a
- * status was seen and was zero.
+ * Any live pane means the session is alive. Otherwise each dead pane is
+ * judged by its exit record when it has one — the shell's real status, or
+ * `running` if the recorder died with it, which is a kill — and by tmux's
+ * fields when it has none. Any killed pane makes the session killed.
+ *
+ * Rows with only the first three fields (no pid/pane id) are accepted and
+ * read from tmux's fields alone.
  */
-export function classifyPaneLiveness(output: string): PaneLiveness {
+export function classifyPaneLiveness(
+  output: string,
+  readRecord: (key: string | null) => ExitRecord | null = () => null,
+): PaneLiveness {
   const rows = output.split("\n").map((l) => l.replace(/\r/g, "").trim()).filter(Boolean);
   if (rows.length === 0) return { state: "missing" };
 
-  let cleanStatus = 0;
+  const verdicts: PaneVerdict[] = [];
   for (const row of rows) {
-    const [dead = "", statusRaw = "", signalRaw = ""] = row.split("|");
+    const [dead = "", statusRaw = "", signalRaw = "", serverPid = "", paneId = ""] = row.split("|");
     if (dead.trim() !== "1") return { state: "alive" };
-    const status = Number(statusRaw);
-    const signal = Number(signalRaw);
-    // `pane_dead_signal` is a name on some builds ("KILL") and a number on
-    // others; either way a non-empty value means it was killed.
-    if (signalRaw !== "") {
-      return {
-        state: "killed",
-        ...(Number.isFinite(signal) && signal > 0 ? { signal } : {}),
-        ...(statusRaw !== "" && Number.isFinite(status) ? { status } : {}),
-      };
-    }
-    if (statusRaw !== "" && Number.isFinite(status) && status !== 0) {
-      return { state: "killed", status };
-    }
-    if (statusRaw !== "" && Number.isFinite(status)) cleanStatus = status;
+    const record = readRecord(exitRecordKey(serverPid, paneId));
+    if (record === "running") verdicts.push({ state: "killed" });
+    else if (record !== null) verdicts.push(interpretRecordedStatus(record));
+    else verdicts.push(verdictFromTmuxFields(statusRaw, signalRaw));
   }
 
-  return { state: "exited", status: cleanStatus };
+  const killed = verdicts.find((v) => v.state === "killed");
+  if (killed) return killed;
+  // All exited: report the last non-zero status, if any, else 0.
+  const status = verdicts.reduce((acc, v) => (v.state === "exited" && v.status !== 0 ? v.status : acc), 0);
+  return { state: "exited", status };
 }
 
 /** Capture the current pane content for a session */
@@ -376,9 +442,81 @@ export function ensureTmuxLdPreload(log: Logger): void {
   detectPlatform().ensureTmuxLdPreload();
 }
 
+/**
+ * The shell tmux would start in a new pane: the server's `default-shell`,
+ * falling back to `$SHELL`, then `sh`. Asked of the server (starting it if
+ * needed) because that, not operad's environment, is what tmux runs.
+ */
+function tmuxDefaultShell(): string {
+  const shell = tmux("start-server", ";", "show-options", "-gv", "default-shell");
+  return shell || process.env.SHELL || "sh";
+}
+
+/**
+ * Create a detached tmux session.
+ *
+ * With `recordExit`, and an exit-record directory configured, the session's
+ * first pane runs its login shell under the exit recorder (exit-record.ts),
+ * so how that shell ends can be told apart later; stale records from
+ * previous tmux servers are pruned on the way. Otherwise the pane runs
+ * tmux's default shell, as before.
+ */
+export function openTmuxSession(name: string, path: string | undefined, recordExit: boolean): boolean {
+  const createArgs = ["new-session", "-d", "-s", name];
+  if (path) createArgs.push("-c", path);
+
+  const dir = recordExit ? exitRecordDir : null;
+  if (dir !== null) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      // `--` then argv: tmux execs it directly, no extra shell in between.
+      createArgs.push("--", ...buildRecorderArgv(dir, tmuxDefaultShell()));
+    } catch {
+      // An unusable record dir costs exit detection for this session, not
+      // the session itself.
+    }
+  }
+
+  const result = spawnTmux(createArgs, { timeout: 10_000, capture: false });
+  if (result.status !== 0) return false;
+
+  if (dir !== null) {
+    const serverPid = tmux("display-message", "-p", "-t", formatTmuxTarget(name, true), "#{pid}");
+    if (serverPid) pruneStaleExitRecords(dir, serverPid);
+  }
+  return true;
+}
+
+/**
+ * Make an agent session keep its dead panes, so an exit can be inspected
+ * instead of the session vanishing (see `paneLiveness`).
+ *
+ * Idempotent, and applied to sessions operad adopts as well as ones it
+ * creates — a session started before this existed gets it from now on.
+ *
+ *  - `remain-on-exit` is a WINDOW option. It is set on the current window,
+ *    and an `after-new-window` hook sets it on windows opened later; without
+ *    the hook, closing the original window would leave one that vanishes.
+ *  - With an exit-record directory, the session's `default-command` becomes
+ *    the recorder, so later windows' shells are recorded too.
+ *
+ * All targets use the `=name:` form: on tmux 3.5a `set-option`/`set-hook`
+ * with a bare `=name` fails with "no such window"/"no such session", and
+ * that failure used to be silently ignored.
+ */
+export function applyAgentSessionOptions(name: string): void {
+  const target = formatTmuxTarget(name, true);
+  tmux("set-option", "-t", target, "remain-on-exit", "on");
+  tmux("set-hook", "-t", target, "after-new-window", "set-option -w remain-on-exit on");
+  if (exitRecordDir !== null) {
+    tmux("set-option", "-t", target, "default-command", buildRecorderCommand(exitRecordDir, tmuxDefaultShell()));
+  }
+}
+
 /** Create and start a new tmux session */
 export function createSession(config: SessionConfig, log: Logger): boolean {
   const { name, type, path, command, env } = config;
+  const runtime = getRuntime(type);
 
   // Build environment prefix for tmux commands
   const envPrefix = Object.entries(env)
@@ -388,25 +526,18 @@ export function createSession(config: SessionConfig, log: Logger): boolean {
   // Check if session already exists
   if (sessionExists(name)) {
     log.info(`Session '${name}' already exists in tmux, skipping create`, { session: name });
+    // Adopt it: an agent session created by an older operad (or by hand)
+    // gets the same exit handling as one created now.
+    if (runtime) applyAgentSessionOptions(name);
     return true;
   }
 
   // Ensure tmux global env has LD_PRELOAD for termux-exec
   ensureTmuxLdPreload(log);
 
-  // Create detached session with optional working directory
-  const createArgs = ["new-session", "-d", "-s", name];
-  if (path) {
-    createArgs.push("-c", path);
-  }
-
-  const result = spawnSync(TMUX_BIN(),createArgs, {
-    timeout: 10_000,
-    stdio: "ignore",
-    env: getCleanEnv(),
-  });
-
-  if (result.status !== 0) {
+  // Agent sessions record how their shell ends; services keep the old
+  // fire-and-forget behaviour.
+  if (!openTmuxSession(name, path, runtime !== null)) {
     log.error(`Failed to create tmux session '${name}'`, { session: name });
     return false;
   }
@@ -417,28 +548,23 @@ export function createSession(config: SessionConfig, log: Logger): boolean {
   tmux("set-option", "-g", "set-titles", "on");
   tmux("set-option", "-g", "set-titles-string", "#S");
 
-  // Keep the pane (and so its exit status) around after its shell exits, for
-  // agent sessions only — services keep the old fire-and-forget behaviour.
-  //
-  // Without this, tmux tears the session down the moment the shell ends and
-  // operad sees only "the session is gone", which a person typing `exit` and
-  // Android's low-memory killer produce identically. Restarting both meant
-  // reopening sessions the user had just closed; restarting neither would
-  // give up the OOM resilience that is the point of the supervisor. The
-  // status is the only thing that tells them apart. Session-scoped, so a
-  // user's own tmux sessions are untouched.
-  if (getRuntime(type)) {
-    tmux("set-option", "-t", formatTmuxTarget(name), "remain-on-exit", "on");
-  }
+  // Keep the pane (and so how its shell ended) around after its shell
+  // exits, for agent sessions only. Without this, tmux tears the session
+  // down the moment the shell ends and operad sees only "the session is
+  // gone", which a person typing `exit` and Android's low-memory killer
+  // produce identically. Restarting both meant reopening sessions the user
+  // had just closed; restarting neither would give up the OOM resilience
+  // that is the point of the supervisor. Session-scoped, so a user's own
+  // tmux sessions are untouched.
+  if (runtime) applyAgentSessionOptions(name);
 
   // Start the appropriate process inside the session.
   //
-  // Coding-agent runtimes (claude/opencode/codex) dispatch through the
+  // Coding-agent runtimes (claude/opencode/codex/agy) dispatch through the
   // SessionRuntime registry — each adapter knows how to assemble its own
   // startup command (resume flags, auth flags, etc). daemon/service stay
   // verbatim because they're the catch-all for arbitrary commands with
   // no readiness contract.
-  const runtime = getRuntime(type);
   if (runtime) {
     const cmd = runtime.startupCommand(config);
     if (cmd !== null) {

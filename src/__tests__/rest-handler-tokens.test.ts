@@ -19,7 +19,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RestHandler } from "../rest-handler.js";
 import { ToolEngine } from "../tool-engine.js";
-import { manglePath, resetTokenCache } from "../claude-session.js";
+import { manglePath, resetTokenCache, _setClaudeHome } from "../claude-session.js";
 import {
   makeFakeContext,
   fakeAgentEngine,
@@ -30,7 +30,6 @@ import type { TokenRangeSummary, ProjectTokenUsage } from "../types.js";
 
 let fc: FakeContext;
 let h: RestHandler;
-let originalHome: string | undefined;
 
 /** The project path the fixture session points at. */
 const PROJECT_PATH = "/work/alpha";
@@ -90,10 +89,10 @@ path = "${PROJECT_PATH}"
 `,
   });
 
-  // Point claude-session.ts's lazily-resolved home at the context temp dir.
-  // claudeHome() reads process.env.HOME at call time precisely so this works.
-  originalHome = process.env.HOME;
-  process.env.HOME = fc.dir;
+  // Point claude-session.ts at the context temp dir through its seam.
+  // Mutating $HOME instead can poison bun's cached os.homedir() for later
+  // tests in the same process.
+  _setClaudeHome(fc.dir);
 
   const projDir = join(fc.dir, ".claude", "projects", manglePath(PROJECT_PATH));
   mkdirSync(projDir, { recursive: true });
@@ -122,8 +121,7 @@ path = "${PROJECT_PATH}"
 });
 
 afterEach(() => {
-  if (originalHome != null) process.env.HOME = originalHome;
-  else delete process.env.HOME;
+  _setClaudeHome(null);
   resetTokenCache();
   fc.cleanup();
 });

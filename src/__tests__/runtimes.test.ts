@@ -16,7 +16,8 @@ import { getRuntime, listRuntimes } from "../runtimes/index.js";
 import { claudeRuntime } from "../runtimes/claude.js";
 import { opencodeRuntime } from "../runtimes/opencode.js";
 import { codexRuntime } from "../runtimes/codex.js";
-import { agyRuntime, isValidAgyConversationId } from "../runtimes/agy.js";
+import { agyRuntime } from "../runtimes/agy.js";
+import { isSafeConversationId } from "../runtimes/runtime.js";
 import {
   detectRuntimeFromArgs,
   detectRuntimeForPane,
@@ -123,6 +124,10 @@ describe("claude adapter", () => {
   });
 });
 
+/** True when any of a runtime's readiness patterns matches the pane capture. */
+const isReady = (rt: { readyPatterns: readonly RegExp[] }, pane: string): boolean =>
+  rt.readyPatterns.some((p) => p.test(pane));
+
 /**
  * Readiness is matched against a WHOLE tmux pane capture, not a single line.
  *
@@ -136,8 +141,6 @@ describe("claude adapter", () => {
  * The fixtures below are trimmed from real `tmux capture-pane` output.
  */
 describe("readiness detection against realistic pane captures", () => {
-  const isReady = (rt: { readyPatterns: readonly RegExp[] }, pane: string): boolean =>
-    rt.readyPatterns.some((p) => p.test(pane));
 
   // Real Claude Code TUI: box rule, U+276F prompt row, mode footer, blank lines.
   const CLAUDE_IDLE_PANE = [
@@ -195,16 +198,23 @@ describe("readiness detection against realistic pane captures", () => {
 });
 
 describe("opencode adapter", () => {
-  test("startup command is just `opencode` — resumption is by cwd", () => {
-    expect(opencodeRuntime.startupCommand(makeConfig({ type: "opencode" }))).toBe("opencode");
+  test("with no recorded session, continues the project's last one", () => {
+    // Plain `opencode` starts a NEW session — the old adapter's claim that
+    // resumption happens by cwd was wrong, so every restore lost the
+    // conversation. `--continue` / `--session` are OpenCode's own flags.
+    expect(opencodeRuntime.startupCommand(makeConfig({ type: "opencode" }))).toBe("opencode --continue");
   });
 
-  test("ignores session_id (OpenCode has no UUID resume)", () => {
+  test("resumes a recorded session by id", () => {
     expect(
-      opencodeRuntime.startupCommand(
-        makeConfig({ type: "opencode", session_id: "11a565bd-b74e-4e5c-a563-7032963954bf" }),
-      ),
-    ).toBe("opencode");
+      opencodeRuntime.startupCommand(makeConfig({ type: "opencode", session_id: "ses_01JABcd-9" })),
+    ).toBe("opencode --session ses_01JABcd-9");
+  });
+
+  test("an id that could break out of the command falls back to --continue", () => {
+    expect(
+      opencodeRuntime.startupCommand(makeConfig({ type: "opencode", session_id: "x; rm -rf /" })),
+    ).toBe("opencode --continue");
   });
 
   test("readyTimeoutMs is bumped above the operad default", () => {
@@ -213,16 +223,41 @@ describe("opencode adapter", () => {
 });
 
 describe("codex adapter", () => {
-  test("startup command is just `codex` — resumption is by cwd", () => {
-    expect(codexRuntime.startupCommand(makeConfig({ type: "codex" }))).toBe("codex");
+  test("with no recorded session, resumes the project's most recent one", () => {
+    // Plain `codex` starts a NEW session. `codex resume --last` is filtered
+    // to the cwd and starts fresh when the project has none (observed with
+    // codex 0.160.0), so it is a safe default.
+    expect(codexRuntime.startupCommand(makeConfig({ type: "codex" }))).toBe("codex resume --last");
   });
 
-  test("ignores session_id (Codex has no UUID resume)", () => {
+  test("resumes a recorded session by id", () => {
     expect(
       codexRuntime.startupCommand(
-        makeConfig({ type: "codex", session_id: "11a565bd-b74e-4e5c-a563-7032963954bf" }),
+        makeConfig({ type: "codex", session_id: "01a1c359-163c-7d31-841e-d88f64282a8e" }),
       ),
-    ).toBe("codex");
+    ).toBe("codex resume 01a1c359-163c-7d31-841e-d88f64282a8e");
+  });
+
+  test("an id that could break out of the command falls back to --last", () => {
+    expect(codexRuntime.startupCommand(makeConfig({ type: "codex", session_id: "$(id)" })))
+      .toBe("codex resume --last");
+  });
+
+  test("is ready on the real Codex 0.160 input screen", () => {
+    // Captured from a live pane: the prompt row carries placeholder text, so
+    // a prompt-alone pattern never matched and readiness always timed out.
+    const pane = [
+      "  >_ OpenAI Codex (v0.160.0)",
+      "  To get started, describe a task or try one of these commands:",
+      "› Ask Codex to do anything",
+      "  GPT-6.1-Sol medium · ~/git/project",
+      "  ? for shortcuts                                         ⚠ 1 warning · f2 to view",
+    ].join("\n");
+    expect(isReady(codexRuntime, pane)).toBe(true);
+  });
+
+  test("the update banner alone is not ready", () => {
+    expect(isReady(codexRuntime, "│ ✨ Update available! 0.160.0 -> 0.167.2 │\n")).toBe(false);
   });
 
   test("readyTimeoutMs is bumped to cover first-run OAuth pause", () => {
@@ -248,7 +283,7 @@ describe("agy adapter", () => {
     // The value is interpolated into a string a shell will parse, so a
     // hand-edited registry must not be able to append a second command.
     for (const bad of ["x; rm -rf /", "a b", "`id`", "$(id)", "'x'", "", "x".repeat(200)]) {
-      expect(isValidAgyConversationId(bad)).toBe(false);
+      expect(isSafeConversationId(bad)).toBe(false);
       expect(agyRuntime.startupCommand(makeConfig({ type: "agy", session_id: bad })))
         .toBe("agy --continue");
     }
@@ -256,7 +291,7 @@ describe("agy adapter", () => {
 
   test("accepts the id shapes Antigravity actually emits", () => {
     for (const ok of ["abc123", "conv_01JAB-CD", "A-B_C", "0"]) {
-      expect(isValidAgyConversationId(ok)).toBe(true);
+      expect(isSafeConversationId(ok)).toBe(true);
     }
   });
 });

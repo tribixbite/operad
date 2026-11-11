@@ -35,6 +35,8 @@ import type { BatteryMonitor } from "./battery.js";
 import type { AndroidEngine } from "./android-engine.js";
 import type { SessionConfig, SessionType } from "./types.js";
 import { getRuntime } from "./runtimes/index.js";
+import type { SessionRuntime } from "./runtimes/runtime.js";
+import { ConversationPinner } from "./conversation-pin.js";
 import {
   detectRuntimeForPane,
   snapshotProcesses,
@@ -83,13 +85,25 @@ export class MonitoringEngine {
   /** Last known conversation UUID per session — for delta detection */
   private lastConversationUuids = new Map<string, string>();
 
+  /** Records which conversation a running agy/Codex session is on. */
+  private pinner: ConversationPinner;
+  /** Runtime lookup for pinning — `getRuntime` unless a test substitutes one. */
+  private runtimeFor: (type: SessionType) => Pick<SessionRuntime, "latestConversationId"> | null;
+
   constructor(
     private ctx: OrchestratorContext,
     private memory: MemoryMonitor,
     private activity: ActivityDetector,
     private battery: BatteryMonitor,
     private androidEngine: AndroidEngine,
-  ) {}
+    opts: {
+      pinner?: ConversationPinner;
+      runtimeFor?: (type: SessionType) => Pick<SessionRuntime, "latestConversationId"> | null;
+    } = {},
+  ) {
+    this.pinner = opts.pinner ?? new ConversationPinner();
+    this.runtimeFor = opts.runtimeFor ?? getRuntime;
+  }
 
   // -- Memory monitoring -------------------------------------------------------
 
@@ -129,20 +143,32 @@ export class MonitoringEngine {
    * overrule it. Only registry-backed (dynamically opened or discovered)
    * sessions are reconciled.
    */
-  private reconcileSessionRuntime(
+  /** @internal — called once per poll per running session; exposed for tests. */
+  reconcileSessionRuntime(
     session: SessionConfig,
     panePid: number,
     snapshot: ProcessSnapshot,
   ): void {
-    if (!this.ctx.registry.find(session.name)) {
+    const entry = this.ctx.registry.find(session.name);
+    if (!entry) {
       this.pendingRuntime.delete(session.name);
+      this.pinner.forget(session.name);
       return; // TOML-declared — the user said what this is.
     }
 
     const detected = detectRuntimeForPane(panePid, snapshot);
-    if (detected === null || detected === session.type) {
-      // Nothing running yet (the pane is at a shell between agents), or it
-      // matches. Either way there is nothing to switch to.
+    if (detected === session.type) {
+      // Running what it should be: keep its conversation id current.
+      this.pendingRuntime.delete(session.name);
+      this.pinConversation(session, entry);
+      return;
+    }
+    // Not running its own agent this poll (a shell, or another tool that has
+    // not yet been adopted): the current run, if any, has ended.
+    this.pinner.forget(session.name);
+    if (detected === null) {
+      // Nothing running yet (the pane is at a shell between agents). There
+      // is nothing to switch to.
       this.pendingRuntime.delete(session.name);
       return;
     }
@@ -157,19 +183,32 @@ export class MonitoringEngine {
 
     const previous = session.type;
     session.type = detected;
-    const entry = this.ctx.registry.find(session.name);
-    if (entry) {
-      entry.type = detected;
-      // A conversation id belongs to the runtime that issued it; carrying a
-      // Claude UUID into `agy --conversation` would resume nothing.
-      entry.session_id = undefined;
-      this.ctx.registry.flush();
-    }
+    entry.type = detected;
+    // A conversation id belongs to the runtime that issued it; carrying a
+    // Claude UUID into `agy --conversation` would resume nothing.
+    entry.session_id = undefined;
+    session.session_id = undefined;
+    this.ctx.registry.flush();
     this.ctx.log.info(
       `Session '${session.name}' is running ${detected}, not ${previous} — ` +
       `recorded so a restart brings ${detected} back`,
       { session: session.name },
     );
+  }
+
+  /**
+   * Record which conversation a registry-backed session's agent is on, for
+   * runtimes that can say (see conversation-pin.ts). Written to the registry
+   * — the durable record a boot restores from — and to the live config, so
+   * an auto-restart within this daemon run resumes it too.
+   */
+  private pinConversation(session: SessionConfig, entry: { session_id?: string }): void {
+    const id = this.pinner.observe(session.name, this.runtimeFor(session.type), session.path, entry.session_id);
+    if (id === null) return;
+    entry.session_id = id;
+    session.session_id = id;
+    this.ctx.registry.flush();
+    this.ctx.log.debug(`Session '${session.name}' is on ${session.type} conversation ${id}`, { session: session.name });
   }
 
   memoryPollAndShed(): void {

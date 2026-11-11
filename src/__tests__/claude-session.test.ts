@@ -10,17 +10,20 @@
  *   - streamTokenUsage: assistant-entry aggregation (pure JSONL content)
  *   - readConversationTail: entry parsing, ordering, pagination, edge content
  *   - readTimeline: trace.log + jsonl merge, since-filter, limit
- *   - extractSessionTitle / resolveJsonlFiles (via temp dirs)
+ *   - resolveJsonlFiles (via temp dirs)
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, appendFileSync, statSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
   manglePath,
   calculateCost,
+  pricingKey,
+  resolveActiveJsonl,
+  _setClaudeHome,
   readConversationStartTime,
   pairSessionsToConversations,
   streamTokenUsage,
@@ -285,6 +288,58 @@ describe("calculateCost", () => {
     const expected =
       (1000 * 5 + 200 * 25 + 500 * 0.5 + 100 * 6.25 + 400 * 10) / 1_000_000;
     expect(cost).toBeCloseTo(expected, 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Haiku 5.5 long-prompt tier
+// ---------------------------------------------------------------------------
+// Published pricing: a request whose prompt — ALL input tokens, cache reads
+// and cache writes included — is over 100,000 tokens pays $0.50 / $2.50 per
+// MTok instead of $0.10 / $0.50, with cache rates at the usual multiples of
+// that tier ($0.625 5m write, $1 1h write, $0.05 hit). Each request is priced
+// on its own, so the tier is chosen per entry, before buckets are summed.
+
+describe("Haiku 5.5 long-prompt pricing", () => {
+  const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
+  const H = "claude-haiku-5-5";
+
+  test("a prompt of exactly 100,000 tokens stays on the base tier", () => {
+    const req = { ...zero, input: 50_000, cacheRead: 50_000, output: 1_000 };
+    expect(calculateCost(pricingKey(H, req), req)).toBeCloseTo((50_000 * 0.1 + 50_000 * 0.01 + 1_000 * 0.5) / 1e6, 10);
+  });
+
+  test("over 100,000 — counted across input, cache reads and writes — is the long tier", () => {
+    const req = { ...zero, input: 1, cacheRead: 60_000, cacheWrite5m: 20_000, cacheWrite1h: 20_000, output: 1_000 };
+    const expected = (1 * 0.5 + 60_000 * 0.05 + 20_000 * 0.625 + 20_000 * 1 + 1_000 * 2.5) / 1e6;
+    expect(calculateCost(pricingKey(H, req), req)).toBeCloseTo(expected, 10);
+  });
+
+  test("output tokens do not count toward the threshold", () => {
+    const req = { ...zero, input: 100_000, output: 50_000 };
+    expect(pricingKey(H, req)).toBe(pricingKey(H, zero));
+  });
+
+  test("dated snapshots get the tier too", () => {
+    const req = { ...zero, input: 150_000 };
+    expect(calculateCost(pricingKey(`${H}-20261001`, req), req)).toBeCloseTo(150_000 * 0.5 / 1e6, 10);
+  });
+
+  test("models without a tier are never re-keyed", () => {
+    const req = { ...zero, input: 900_000 };
+    expect(pricingKey("claude-opus-5-5", req)).toBe("claude-opus-5-5");
+  });
+
+  test("the token scanner prices each request on its own tier", async () => {
+    const lines = [
+      // 150K-token prompt: long tier. 20K-token prompt: base tier.
+      assistantLine({ uuid: "big", model: H, input: 150_000, output: 1_000 }),
+      assistantLine({ uuid: "small", model: H, input: 20_000, output: 1_000 }),
+    ].join("\n") + "\n";
+    const usage = await streamTokenUsage(write("haiku-tiers.jsonl", lines));
+    const expected = (150_000 * 0.5 + 1_000 * 2.5 + 20_000 * 0.1 + 1_000 * 0.5) / 1e6;
+    expect(usage.cost_usd).toBeCloseTo(expected, 10);
+    expect(usage.unpriced_models).toEqual([]);
   });
 });
 
@@ -1526,15 +1581,15 @@ describe("readConversationWindow — anchored reads", () => {
 describe("locateConversationEntry / getConversationPage", () => {
   /** Point $HOME at the temp dir so the project dir resolves under it. */
   function withTempHome<T>(fn: (projectPath: string) => T): T {
-    const realHome = process.env.HOME;
     const projectPath = join(tmpDir, "proj");
     mkdirSync(join(tmpDir, ".claude", "projects", manglePath(projectPath)), { recursive: true });
-    process.env.HOME = tmpDir;
+    // The module's seam, not $HOME: mutating HOME can poison bun's cached
+    // os.homedir() for later tests in the process.
+    _setClaudeHome(tmpDir);
     try {
       return fn(projectPath);
     } finally {
-      if (realHome === undefined) delete process.env.HOME;
-      else process.env.HOME = realHome;
+      _setClaudeHome(null);
     }
   }
 
@@ -1546,6 +1601,50 @@ describe("locateConversationEntry / getConversationPage", () => {
 
   const userLine = (uuid: string, ts: string, content: string) =>
     JSON.stringify({ type: "user", uuid, timestamp: ts, message: { role: "user", content } });
+
+  test("session-list titles come from the title cache, not a fresh read of every transcript", () => {
+    // getConversationPage lists every conversation in the project with its
+    // title. It used to read EVERY transcript in full on every page request
+    // to find those titles.
+    withTempHome((projectPath) => {
+      const sid = "11111111-2222-3333-4444-5555555555aa";
+      seed(projectPath, sid, [userLine("u1", "2026-11-01T10:00:00Z", "hello"),
+        JSON.stringify({ type: "custom-title", customTitle: "aaaa" })]);
+      const first = getConversationPage(projectPath, sid);
+      expect(first.session_list.find((x) => x.id === sid)?.title).toBe("aaaa");
+      const file = join(tmpDir, ".claude", "projects", manglePath(projectPath), `${sid}.jsonl`);
+      const st = statSync(file);
+      writeFileSync(file, readFileSync(file, "utf-8").replace("aaaa", "bbbb"));
+      utimesSync(file, st.atime, st.mtime);
+      expect(getConversationPage(projectPath, sid).session_list.find((x) => x.id === sid)?.title).toBe("aaaa");
+    });
+  });
+
+  test("resolveActiveJsonl follows the project's most recent history entry", () => {
+    withTempHome((projectPath) => {
+      const a = "11111111-2222-3333-4444-5555555555a1";
+      const b = "11111111-2222-3333-4444-5555555555b2";
+      seed(projectPath, a, [userLine("u1", "2026-11-01T10:00:00Z", "a")]);
+      seed(projectPath, b, [userLine("u2", "2026-11-01T11:00:00Z", "b")]);
+      const hist = [
+        { project: projectPath, sessionId: b, timestamp: 1 },
+        { project: "/elsewhere", sessionId: b, timestamp: 2 },
+        { project: projectPath, sessionId: a, timestamp: 3 },
+        { project: "/elsewhere", sessionId: a, timestamp: 4 },
+      ].map((e) => JSON.stringify(e)).join("\n") + "\n";
+      writeFileSync(join(tmpDir, ".claude", "history.jsonl"), hist);
+      expect(resolveActiveJsonl(projectPath)?.id).toBe(a);
+    });
+  });
+
+  test("resolveActiveJsonl falls back to the newest transcript", () => {
+    withTempHome((projectPath) => {
+      const a = "11111111-2222-3333-4444-5555555555a1";
+      seed(projectPath, a, [userLine("u1", "2026-11-01T10:00:00Z", "a")]);
+      writeFileSync(join(tmpDir, ".claude", "history.jsonl"), JSON.stringify({ project: "/other", sessionId: a }) + "\n");
+      expect(resolveActiveJsonl(projectPath)?.id).toBe(a);
+    });
+  });
 
   test("finds the prompt's own conversation, not the newest one", () => {
     withTempHome((projectPath) => {
