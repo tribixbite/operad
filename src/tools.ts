@@ -9,7 +9,8 @@
  * remain model-agnostic — they output text, the daemon parses.
  */
 
-import { spawn, execFile } from "node:child_process";
+import { execFile } from "node:child_process";
+import { runBounded } from "./bounded-exec.js";
 import { promisify } from "node:util";
 
 /**
@@ -180,123 +181,17 @@ export function isSafeGitRef(ref: string): boolean {
 /** Byte cap for subprocess output buffers and for file-read. */
 const MAX_TOOL_OUTPUT_BYTES = 1024 * 1024;
 
-/** Grace between SIGTERM and SIGKILL when a shell tool's process group is killed. */
-const KILL_GRACE_MS = 500;
-
 /**
  * How long execute() waits, after aborting a tool's signal, for the tool to
- * settle on its own before abandoning it. Longer than KILL_GRACE_MS so a
- * shell tool reports its own (killed) outcome rather than the generic one.
+ * settle on its own before abandoning it. Longer than runBounded's 500 ms
+ * TERM→KILL grace so a shell tool reports its own (killed) outcome rather
+ * than the generic one.
  */
 const ABANDON_GRACE_MS = 1_000;
 
 /** Did this signal abort because the executor's timeout fired? */
 function isTimeoutAbort(signal: AbortSignal): boolean {
   return (signal.reason as { name?: unknown } | undefined)?.name === "TimeoutError";
-}
-
-/** Outcome of runShellCommand. `code` is null when the process was killed. */
-interface ShellResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  /** The signal aborted (executor timeout or caller cancel) and the group was killed. */
-  aborted: boolean;
-  /** stdout or stderr exceeded MAX_TOOL_OUTPUT_BYTES and the group was killed. */
-  overflow: boolean;
-  /** spawn itself failed (no shell, EAGAIN, …). */
-  spawnError?: Error;
-}
-
-/**
- * Run an operator-authored shell command in its own process group.
- *
- * TOML tools used promisified `exec`, whose timeout SIGTERMs only the `sh`
- * it spawned. Anything that shell forked — `sleep 30 & …; wait`, a pipeline,
- * a dev server — survived as an orphan; under Node the call also stayed open
- * until that grandchild released the stdout pipe, so the timeout bounded
- * nothing. The command now runs `detached` (new process group) and an abort
- * signals the whole group: SIGTERM, then SIGKILL after KILL_GRACE_MS. stdin
- * is /dev/null, so a command that reads stdin gets EOF instead of hanging.
- *
- * TODO: on Windows `detached` does not create a POSIX group; only the shell
- * itself is killed there (taskkill /T would be needed for the tree).
- */
-function runShellCommand(cmd: string, signal: AbortSignal): Promise<ShellResult> {
-  const isWin = process.platform === "win32";
-  return new Promise<ShellResult>((resolvePromise) => {
-    const child = spawn(cmd, { shell: true, detached: !isWin, stdio: ["ignore", "pipe", "pipe"] });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    let outBytes = 0;
-    let errBytes = 0;
-    let killRequested = false;
-    let overflow = false;
-    let exitCode: number | null = null;
-    let graceTimer: ReturnType<typeof setTimeout> | null = null;
-    let settled = false;
-
-    const signalGroup = (sig: NodeJS.Signals): void => {
-      if (child.pid === undefined) return;
-      try {
-        if (isWin) child.kill(sig);
-        else process.kill(-child.pid, sig); // negative pid = the whole group
-      } catch { /* group already gone */ }
-    };
-    const groupAlive = (): boolean => {
-      if (isWin || child.pid === undefined) return false;
-      try { process.kill(-child.pid, 0); return true; } catch { return false; }
-    };
-    const finish = (spawnError?: Error): void => {
-      if (settled) return;
-      settled = true;
-      if (graceTimer) clearTimeout(graceTimer);
-      signal.removeEventListener("abort", onAbort);
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      resolvePromise({
-        code: killRequested ? null : exitCode,
-        stdout: Buffer.concat(out).toString("utf-8"),
-        stderr: Buffer.concat(err).toString("utf-8"),
-        aborted: killRequested && !overflow,
-        overflow,
-        spawnError,
-      });
-    };
-    const killGroup = (): void => {
-      if (killRequested) return;
-      killRequested = true;
-      signalGroup("SIGTERM");
-      graceTimer = setTimeout(() => {
-        signalGroup("SIGKILL");
-        finish();
-      }, KILL_GRACE_MS);
-    };
-    function onAbort(): void { killGroup(); }
-
-    const collect = (chunks: Buffer[], add: (n: number) => number) => (chunk: Buffer): void => {
-      if (add(chunk.length) > MAX_TOOL_OUTPUT_BYTES) {
-        overflow = true;
-        killGroup();
-        return;
-      }
-      chunks.push(chunk);
-    };
-    child.stdout?.on("data", collect(out, (n) => (outBytes += n)));
-    child.stderr?.on("data", collect(err, (n) => (errBytes += n)));
-    child.on("error", (e) => finish(e));
-    child.on("close", (code) => {
-      exitCode = code;
-      // After a kill, survivors of SIGTERM may still be in the group (a
-      // grandchild that ignores TERM). Let the grace timer SIGKILL them
-      // before reporting, so the caller never returns with a live orphan.
-      if (killRequested && groupAlive()) return;
-      finish();
-    });
-
-    if (signal.aborted) killGroup();
-    else signal.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 /**
@@ -531,9 +426,16 @@ export class ToolExecutor {
               );
             }
 
-            // The executor aborts ctx.signal at this tool's timeout_ms (or on
-            // caller cancel); runShellCommand then kills the whole group.
-            const res = await runShellCommand(cmd, ctx.signal ?? new AbortController().signal);
+            // promisified `exec` was used here; its timeout SIGTERMed only
+            // `sh`, so anything the command forked survived as an orphan (and
+            // under Node kept the call open). runBounded runs the command as
+            // its own process group and kills the whole group when the
+            // executor aborts ctx.signal at timeout_ms or on caller cancel.
+            const res = await runBounded(cmd, [], {
+              shell: true,
+              signal: ctx.signal,
+              maxBytes: MAX_TOOL_OUTPUT_BYTES,
+            });
             const failure = (why: string) => ({
               success: false,
               data: null,
@@ -542,8 +444,8 @@ export class ToolExecutor {
               duration_ms: Date.now() - start,
             });
             if (res.spawnError) return failure(res.spawnError.message);
-            if (res.overflow) return failure(`output exceeded ${MAX_TOOL_OUTPUT_BYTES} bytes`);
-            if (res.aborted) {
+            if (res.killed === "overflow") return failure(`output exceeded ${MAX_TOOL_OUTPUT_BYTES} bytes`);
+            if (res.killed) {
               return failure(ctx.signal && isTimeoutAbort(ctx.signal)
                 ? `timed out after ${t.timeout_ms ?? 30_000}ms`
                 : "cancelled");

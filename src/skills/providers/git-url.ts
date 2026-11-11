@@ -16,8 +16,7 @@
  * primitives: commit SHA + `git ls-tree -r <sha>` digest).
  */
 
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -30,6 +29,23 @@ import {
   versionDirName,
 } from "../types.js";
 import { readSkillManifests } from "../adapter.js";
+import { runBounded } from "../../bounded-exec.js";
+
+/** Wall-clock cap for one git network operation (clone, ls-remote). */
+const DEFAULT_GIT_NETWORK_TIMEOUT_MS = 120_000;
+/** Cap for local git reads (rev-parse, ls-tree). */
+const GIT_LOCAL_TIMEOUT_MS = 30_000;
+/** Per-stream output cap for git (ls-tree of a large repo, many tags). */
+const GIT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+let gitNetworkTimeoutMs = DEFAULT_GIT_NETWORK_TIMEOUT_MS;
+
+/**
+ * Test-only: shorten the git network timeout (null restores the default).
+ * @internal
+ */
+export function _setGitTimeoutMs(ms: number | null): void {
+  gitNetworkTimeoutMs = ms ?? DEFAULT_GIT_NETWORK_TIMEOUT_MS;
+}
 
 export const gitUrlProvider: ProviderModule = {
   id: "git+url",
@@ -52,76 +68,64 @@ export const gitUrlProvider: ProviderModule = {
     const { url, requestedVersion } = parseLocator(locator, version);
     assertSafeGitUrl(url);
     const effectiveVersion = version === "latest" ? requestedVersion : version;
-    const resolvedVersion = await resolveVersion(url, effectiveVersion);
+    const { version: resolvedVersion, ref } = await resolveRef(url, effectiveVersion);
 
-    // resolvedVersion becomes a directory name below, and the rmSync a few
-    // lines down is recursive+force. Without this guard a version like
-    // `../../../../etc` escaped the operad-owned cache and deleted an
-    // arbitrary directory BEFORE the clone that would have failed.
+    // resolvedVersion becomes a directory name below, and an existing dir of
+    // that name is replaced. Without this guard a version like
+    // `../../../../etc` escaped the operad-owned cache.
     assertSafePathComponent(resolvedVersion, "version");
     // The directory name is derived, not the raw version: `commit:<sha>` is a
     // legal POSIX name but an NTFS alternate-data-stream on Windows, where the
     // clone would fail. store.cacheDir() applies the same mapping, so both
     // agree on where the bundle lives.
-    const targetDir = join(cacheParent, versionDirName(resolvedVersion));
+    const dirName = versionDirName(resolvedVersion);
+    const targetDir = join(cacheParent, dirName);
 
     mkdirSync(cacheParent, { recursive: true });
 
-    // If a previous install left this exact version on disk, blow it
-    // away — re-install paths (same locator + version, cross-tier,
-    // forced re-fetch) all need a clean target. The cache is operad-
-    // owned so this is safe; the prior commit SHA was already
-    // captured in SQLite if anyone cares.
-    if (existsSync(targetDir)) {
+    // Clone into a private staging dir and move it into place only once the
+    // clone and integrity reads succeeded. The previous code rmSync'd
+    // targetDir up front — when that version was already installed (a forced
+    // re-fetch, a cross-tier re-install) a failed clone deleted the LIVE
+    // install's files, and the install rollback then deleted them again.
+    const stagingDir = mkdtempSync(join(cacheParent, `.${dirName}.fetch-`));
+    let commitSha: string;
+    let archiveSha: string;
+    try {
       try {
-        rmSync(targetDir, { recursive: true, force: true });
+        if (ref.kind === "commit") {
+          // Shallow + commit SHA isn't universally supported across git
+          // versions; clone without checkout, then check out the SHA.
+          await runGit(["clone", "--no-checkout", "--", url, stagingDir], gitNetworkTimeoutMs);
+          await runGit(["-C", stagingDir, "checkout", ref.name], gitNetworkTimeoutMs);
+        } else {
+          // Shallow clone of the EXACT ref ls-remote reported. The canonical
+          // version (`v1.2.3`) is an id, not necessarily the tag's name — a
+          // repo tagging `1.2.3` has no `v1.2.3` ref to clone.
+          await runGit(
+            ["clone", "--depth", "1", "--branch", ref.name, "--", url, stagingDir],
+            gitNetworkTimeoutMs,
+          );
+        }
       } catch (err) {
         throw new SkillError(
           "PROVIDER_FETCH_FAILED",
-          `failed to clear pre-existing cache dir ${targetDir}: ${(err as Error).message}`,
+          `git clone failed: ${(err as Error).message}`,
+          { url, version: resolvedVersion },
         );
       }
-    }
 
-    try {
-      // `git clone --depth 1` with the resolved ref. For commit SHAs
-      // we need a full-ish clone since shallow + commit SHA isn't
-      // universally supported across git versions; use --no-checkout
-      // and then a hard reset to the SHA.
-      if (resolvedVersion.startsWith("commit:")) {
-        const sha = resolvedVersion.slice("commit:".length);
-        execFileSync("git", ["clone", "--no-checkout", url, targetDir], {
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        execFileSync("git", ["-C", targetDir, "checkout", sha], {
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-      } else {
-        // Semver tag — shallow clone of that tag.
-        execFileSync(
-          "git",
-          ["clone", "--depth", "1", "--branch", resolvedVersion, url, targetDir],
-          { stdio: ["ignore", "pipe", "pipe"] },
-        );
-      }
+      commitSha = (await runGit(["-C", stagingDir, "rev-parse", "HEAD"], GIT_LOCAL_TIMEOUT_MS)).trim();
+      // Integrity digest: sha256 of `git ls-tree -r <sha>` output. This
+      // is bit-stable across git versions (unlike `git archive`).
+      const lsTree = await runGit(["-C", stagingDir, "ls-tree", "-r", commitSha], GIT_LOCAL_TIMEOUT_MS);
+      archiveSha = createHash("sha256").update(lsTree).digest("hex");
+
+      swapIntoPlace(stagingDir, targetDir);
     } catch (err) {
-      throw new SkillError(
-        "PROVIDER_FETCH_FAILED",
-        `git clone failed: ${(err as Error).message}`,
-        { url, version: resolvedVersion },
-      );
+      try { rmSync(stagingDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      throw err;
     }
-
-    const commitSha = execFileSync("git", ["-C", targetDir, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-    }).trim();
-
-    // Integrity digest: sha256 of `git ls-tree -r <sha>` output. This
-    // is bit-stable across git versions (unlike `git archive`).
-    const lsTree = execFileSync("git", ["-C", targetDir, "ls-tree", "-r", commitSha], {
-      encoding: "utf8",
-    });
-    const archiveSha = createHash("sha256").update(lsTree).digest("hex");
 
     return {
       extracted_path: targetDir,
@@ -142,12 +146,12 @@ export const gitUrlProvider: ProviderModule = {
 
   async latest(locator: string): Promise<string> {
     const { url } = parseLocator(locator, "latest");
-    // Same guard as fetch(). resolveVersion shells out to `git ls-remote`,
+    // Same guard as fetch(). resolveRef shells out to `git ls-remote`,
     // so an unguarded `ext::sh -c ...` locator executes here too. fetch() was
     // hardened but this sibling entry point was not — any future update-check
     // route would have inherited the hole.
     assertSafeGitUrl(url);
-    return resolveVersion(url, "latest");
+    return (await resolveRef(url, "latest")).version;
   },
 };
 
@@ -170,8 +174,9 @@ export function _parseLocator(locator: string, fallbackVersion: string): {
  *
  * `ext::` and `-`-prefixed locators are the dangerous cases: `ext::sh -c …`
  * makes git execute an arbitrary command, and a locator starting with `-` is
- * consumed by git as an option (`--upload-pack=…`) rather than a URL. Using
- * execFileSync stops *shell* injection but not *git argument* injection, so
+ * consumed by git as an option (`--upload-pack=…`) rather than a URL. Running
+ * git with an argv array stops *shell* injection but not *git argument*
+ * injection (the `--` before the URL is a second line of defence), so
  * the transport has to be allow-listed. The CLI already did this in
  * `parseSkillLocator`; the REST and IPC paths bypassed it entirely.
  */
@@ -283,14 +288,28 @@ function parseLocator(locator: string, fallbackVersion: string): {
   };
 }
 
+/** The git ref a resolved version is fetched from. */
+interface ResolvedRef {
+  /** Canonical version (§3.11): the skill-id and cache-dir component. */
+  version: string;
+  /** What to clone: a tag/branch name exactly as the remote spells it, or a SHA. */
+  ref: { kind: "ref"; name: string } | { kind: "commit"; name: string };
+}
+
 /**
- * Resolve a requested version into the canonical form (§3.11).
- * - Semver tags get a `v` prefix added if missing.
- * - `commit:<40>` is left alone after validation.
- * - `latest` resolves via `git ls-remote --tags --sort=-v:refname` →
- *   highest semver tag; if no tags, falls back to `commit:<HEAD-sha>`.
+ * Resolve a requested version into its canonical form plus the exact ref to
+ * clone (§3.11).
+ * - `commit:<40>` is validated and cloned by SHA.
+ * - `latest` → highest tag by `git ls-remote --sort=-v:refname`; if the repo
+ *   has no tags, `commit:<HEAD-sha>`.
+ * - Anything else is a pinned tag, matched against the remote's tags with or
+ *   without a `v` prefix (then a branch of that exact name). The canonical
+ *   version gets a `v` prefix if it looks like semver; the clone uses the
+ *   remote's own spelling. canonSemver's output used to be passed straight to
+ *   `git clone --branch`, so `1.2.3` became `v1.2.3` and failed against a repo
+ *   tagging `1.2.3`.
  */
-async function resolveVersion(url: string, requested: string): Promise<string> {
+async function resolveRef(url: string, requested: string): Promise<ResolvedRef> {
   if (requested.startsWith("commit:")) {
     const sha = requested.slice("commit:".length);
     if (!/^[a-f0-9]{40}$/.test(sha)) {
@@ -300,39 +319,125 @@ async function resolveVersion(url: string, requested: string): Promise<string> {
         { sha },
       );
     }
-    return requested;
+    return { version: requested, ref: { kind: "commit", name: sha } };
   }
 
-  if (requested !== "latest") {
-    // Plain tag — canonicalise: add `v` prefix if it looks like semver
-    // without one. Doesn't validate that the tag exists — git clone
-    // will fail loudly if it doesn't.
-    return canonSemver(requested);
-  }
-
-  // requested === "latest": ls-remote to find the highest semver tag.
+  let refs: { tags: string[]; heads: string[] };
+  let headSha: string | null = null;
   try {
-    const out = execFileSync(
-      "git",
-      ["ls-remote", "--tags", "--sort=-v:refname", url],
-      { encoding: "utf8" },
-    );
-    const tagLine = out.split("\n").find((l) => l.includes("refs/tags/"));
-    if (tagLine) {
-      const tag = tagLine.split("refs/tags/")[1].replace(/\^\{\}$/, "");
-      return canonSemver(tag);
+    refs = parseLsRemote(await runGit(
+      ["ls-remote", "--tags", "--heads", "--sort=-v:refname", "--", url],
+      gitNetworkTimeoutMs,
+    ));
+    if (requested === "latest" && refs.tags.length === 0) {
+      const headOut = await runGit(["ls-remote", "--", url, "HEAD"], gitNetworkTimeoutMs);
+      const sha = headOut.split(/\s+/)[0];
+      headSha = /^[a-f0-9]{40}$/.test(sha) ? sha : null;
     }
-    // No tags — fall back to HEAD commit SHA.
-    const headOut = execFileSync("git", ["ls-remote", url, "HEAD"], { encoding: "utf8" });
-    const sha = headOut.split(/\s+/)[0];
-    if (/^[a-f0-9]{40}$/.test(sha)) return `commit:${sha}`;
-    throw new Error(`ls-remote returned no usable ref (output: ${out.slice(0, 200)})`);
   } catch (err) {
     throw new SkillError(
       "PROVIDER_FETCH_FAILED",
       `git ls-remote failed for ${url}: ${(err as Error).message}`,
       { url },
     );
+  }
+
+  if (requested === "latest") {
+    const top = refs.tags[0];
+    if (top !== undefined) return { version: canonSemver(top), ref: { kind: "ref", name: top } };
+    if (headSha) return { version: `commit:${headSha}`, ref: { kind: "commit", name: headSha } };
+    throw new SkillError(
+      "PROVIDER_FETCH_FAILED",
+      `git ls-remote returned no usable ref for ${url}`,
+      { url },
+    );
+  }
+
+  // Pinned: accept the tag as written, its canonical v-form, or v-stripped.
+  const candidates = [...new Set([requested, canonSemver(requested), requested.replace(/^v(?=\d)/, "")])];
+  const tag = candidates.find((c) => refs.tags.includes(c));
+  if (tag !== undefined) return { version: canonSemver(tag), ref: { kind: "ref", name: tag } };
+  if (refs.heads.includes(requested)) return { version: requested, ref: { kind: "ref", name: requested } };
+  // Fail here rather than letting `clone --branch` discover it: same error,
+  // and no clone (and no half-written staging dir) for a ref that is absent.
+  throw new SkillError(
+    "PROVIDER_FETCH_FAILED",
+    `no tag or branch '${requested}' in ${url}`,
+    { url, version: requested },
+  );
+}
+
+/**
+ * Parse `git ls-remote --tags --heads` output into ordered tag and branch
+ * names. Peeled `^{}` lines duplicate an annotated tag and are dropped;
+ * input order (the `--sort` order) is preserved.
+ */
+function parseLsRemote(out: string): { tags: string[]; heads: string[] } {
+  const tags: string[] = [];
+  const heads: string[] = [];
+  for (const line of out.split("\n")) {
+    const ref = line.split("\t")[1]?.trim();
+    if (!ref || ref.endsWith("^{}")) continue;
+    if (ref.startsWith("refs/tags/")) tags.push(ref.slice("refs/tags/".length));
+    else if (ref.startsWith("refs/heads/")) heads.push(ref.slice("refs/heads/".length));
+  }
+  return { tags, heads };
+}
+
+/**
+ * Environment for every git call: never prompt. Credential prompts go to the
+ * controlling terminal, not stdin, so ignoring stdin alone does not stop a
+ * daemon-side `git clone` of a private repo from waiting forever.
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GCM_INTERACTIVE: "never",
+    // ssh host-key / passphrase prompts. Respect an operator's own command.
+    GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes",
+  };
+}
+
+/**
+ * Run git asynchronously with a hard timeout; resolve with stdout or reject
+ * with git's stderr. These were execFileSync calls with no timeout — a
+ * stalled remote froze the daemon's event loop (every HTTP/IPC/health
+ * check) for as long as it stalled. runBounded runs git as its own process
+ * group so helpers (remote-https, upload-pack) die with it.
+ */
+async function runGit(args: string[], timeoutMs: number): Promise<string> {
+  const r = await runBounded("git", args, { env: gitEnv(), timeoutMs, maxBytes: GIT_MAX_OUTPUT_BYTES });
+  // Name the subcommand in errors, skipping a leading `-C <dir>`.
+  const what = `git ${args[0] === "-C" ? args[2] : args[0]}`;
+  if (r.spawnError) throw new Error(`${what}: ${r.spawnError.message}`);
+  if (r.killed === "timeout") throw new Error(`${what} timed out after ${timeoutMs}ms`);
+  if (r.killed) throw new Error(`${what} output exceeded ${GIT_MAX_OUTPUT_BYTES} bytes`);
+  if (r.code !== 0) throw new Error(`${what} exited ${r.code}: ${r.stderr.trim()}`);
+  return r.stdout;
+}
+
+/**
+ * Move a fully-fetched staging dir to `targetDir`, replacing any previous
+ * copy. The old copy is renamed aside first and restored if the final rename
+ * fails, so at no point is the version missing because of this function.
+ */
+function swapIntoPlace(stagingDir: string, targetDir: string): void {
+  const backup = existsSync(targetDir) ? `${stagingDir}.old` : null;
+  if (backup) renameSync(targetDir, backup);
+  try {
+    renameSync(stagingDir, targetDir);
+  } catch (err) {
+    if (backup) {
+      try { renameSync(backup, targetDir); } catch { /* left at backup path; reported below */ }
+    }
+    throw new SkillError(
+      "PROVIDER_FETCH_FAILED",
+      `failed to move fetched bundle into ${targetDir}: ${(err as Error).message}`,
+    );
+  }
+  if (backup) {
+    try { rmSync(backup, { recursive: true, force: true }); } catch { /* stale backup is harmless */ }
   }
 }
 
