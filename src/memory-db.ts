@@ -230,6 +230,9 @@ const BUSY_TIMEOUT_MS = 5000;
  */
 const TRUST_COMPACTION_REASON = "compacted history";
 
+/** Project-path wildcard: searchMemories(ALL_PROJECTS, …) searches every project. */
+export const ALL_PROJECTS = "*";
+
 /**
  * Schema statements — each string is one complete SQL statement.
  * Separated into an array because bun:sqlite's exec() only handles
@@ -1131,28 +1134,36 @@ export class MemoryDb {
     }
   }
 
-  /** Full-text search memories for a project */
+  /**
+   * Full-text search memories for a project, or across every project when
+   * `projectPath` is ALL_PROJECTS ("*").
+   *
+   * The memory-search tool has always passed "*" for a global search, but
+   * both queries filtered `project_path = '*'`, which matches nothing — every
+   * global search returned empty. The project clause is now skipped for "*".
+   */
   searchMemories(projectPath: string, queryText: string, limit = 10): MemoryRecord[] {
     const db = this.requireDb();
+    const all = projectPath === ALL_PROJECTS;
     try {
       // Try FTS5 MATCH first
       return db.prepare(
         `SELECT m.* FROM memories m
          JOIN memories_fts fts ON fts.rowid = m.id
-         WHERE m.project_path = ? AND fts.content MATCH ?
+         WHERE ${all ? "" : "m.project_path = ? AND "}fts.content MATCH ?
          AND (m.expires_at IS NULL OR m.expires_at > unixepoch())
          ORDER BY m.relevance_score DESC
          LIMIT ?`,
-      ).all(projectPath, queryText, limit) as unknown as MemoryRecord[];
+      ).all(...(all ? [] : [projectPath]), queryText, limit) as unknown as MemoryRecord[];
     } catch {
       // Fallback to LIKE if FTS5 query syntax is invalid
       return db.prepare(
         `SELECT * FROM memories
-         WHERE project_path = ? AND content LIKE ? ESCAPE '\\'
+         WHERE ${all ? "" : "project_path = ? AND "}content LIKE ? ESCAPE '\\'
          AND (expires_at IS NULL OR expires_at > unixepoch())
          ORDER BY relevance_score DESC
          LIMIT ?`,
-      ).all(projectPath, `%${escapeLike(queryText)}%`, limit) as unknown as MemoryRecord[];
+      ).all(...(all ? [] : [projectPath]), `%${escapeLike(queryText)}%`, limit) as unknown as MemoryRecord[];
     }
   }
 

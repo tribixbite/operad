@@ -9,24 +9,27 @@
  * remain model-agnostic — they output text, the daemon parses.
  */
 
-import { spawnSync, exec, execFile } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 /**
- * Async command runners.
+ * Async command runner.
  *
- * Every shelling tool used execSync, which blocks the daemon's event loop for
- * the whole call — up to 30s for a TOML tool. HTTP, SSE, WebSocket pings,
- * health checks, IPC and the memory poll all stalled behind a single tool
- * invocation. Every execute() here is already async, so awaiting costs
- * nothing and frees the loop.
+ * Every shelling tool used execSync (later spawnSync), which blocks the
+ * daemon's event loop for the whole call — up to 30s for a TOML tool. HTTP,
+ * SSE, WebSocket pings, health checks, IPC and the memory poll all stalled
+ * behind a single tool invocation. Every execute() here is already async, so
+ * awaiting costs nothing and frees the loop. Pass `signal: ctx.signal` so the
+ * executor's timeout and the caller's cancel reach the child.
  */
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, realpathSync,
+  openSync, readSync, closeSync,
+} from "node:fs";
 import { join, resolve, dirname, basename, extname, sep } from "node:path";
 import { homedir } from "node:os";
-import type { MemoryDb } from "./memory-db.js";
+import { ALL_PROJECTS, type MemoryDb } from "./memory-db.js";
 import type { Logger } from "./log.js";
 import type { AutonomyLevel, ProtectedCheckpoints } from "./types.js";
 
@@ -170,6 +173,140 @@ export function isSafeGitRef(ref: string): boolean {
   if (!ref || ref.length > 256) return false;
   if (ref.startsWith("-")) return false;
   return /^[A-Za-z0-9._/~^@{}-]+$/.test(ref) && !ref.includes("..");
+}
+
+// -- Execution bounds ---------------------------------------------------------
+
+/** Byte cap for subprocess output buffers and for file-read. */
+const MAX_TOOL_OUTPUT_BYTES = 1024 * 1024;
+
+/** Grace between SIGTERM and SIGKILL when a shell tool's process group is killed. */
+const KILL_GRACE_MS = 500;
+
+/**
+ * How long execute() waits, after aborting a tool's signal, for the tool to
+ * settle on its own before abandoning it. Longer than KILL_GRACE_MS so a
+ * shell tool reports its own (killed) outcome rather than the generic one.
+ */
+const ABANDON_GRACE_MS = 1_000;
+
+/** Did this signal abort because the executor's timeout fired? */
+function isTimeoutAbort(signal: AbortSignal): boolean {
+  return (signal.reason as { name?: unknown } | undefined)?.name === "TimeoutError";
+}
+
+/** Outcome of runShellCommand. `code` is null when the process was killed. */
+interface ShellResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** The signal aborted (executor timeout or caller cancel) and the group was killed. */
+  aborted: boolean;
+  /** stdout or stderr exceeded MAX_TOOL_OUTPUT_BYTES and the group was killed. */
+  overflow: boolean;
+  /** spawn itself failed (no shell, EAGAIN, …). */
+  spawnError?: Error;
+}
+
+/**
+ * Run an operator-authored shell command in its own process group.
+ *
+ * TOML tools used promisified `exec`, whose timeout SIGTERMs only the `sh`
+ * it spawned. Anything that shell forked — `sleep 30 & …; wait`, a pipeline,
+ * a dev server — survived as an orphan; under Node the call also stayed open
+ * until that grandchild released the stdout pipe, so the timeout bounded
+ * nothing. The command now runs `detached` (new process group) and an abort
+ * signals the whole group: SIGTERM, then SIGKILL after KILL_GRACE_MS. stdin
+ * is /dev/null, so a command that reads stdin gets EOF instead of hanging.
+ *
+ * TODO: on Windows `detached` does not create a POSIX group; only the shell
+ * itself is killed there (taskkill /T would be needed for the tree).
+ */
+function runShellCommand(cmd: string, signal: AbortSignal): Promise<ShellResult> {
+  const isWin = process.platform === "win32";
+  return new Promise<ShellResult>((resolvePromise) => {
+    const child = spawn(cmd, { shell: true, detached: !isWin, stdio: ["ignore", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    let killRequested = false;
+    let overflow = false;
+    let exitCode: number | null = null;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+
+    const signalGroup = (sig: NodeJS.Signals): void => {
+      if (child.pid === undefined) return;
+      try {
+        if (isWin) child.kill(sig);
+        else process.kill(-child.pid, sig); // negative pid = the whole group
+      } catch { /* group already gone */ }
+    };
+    const groupAlive = (): boolean => {
+      if (isWin || child.pid === undefined) return false;
+      try { process.kill(-child.pid, 0); return true; } catch { return false; }
+    };
+    const finish = (spawnError?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      signal.removeEventListener("abort", onAbort);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolvePromise({
+        code: killRequested ? null : exitCode,
+        stdout: Buffer.concat(out).toString("utf-8"),
+        stderr: Buffer.concat(err).toString("utf-8"),
+        aborted: killRequested && !overflow,
+        overflow,
+        spawnError,
+      });
+    };
+    const killGroup = (): void => {
+      if (killRequested) return;
+      killRequested = true;
+      signalGroup("SIGTERM");
+      graceTimer = setTimeout(() => {
+        signalGroup("SIGKILL");
+        finish();
+      }, KILL_GRACE_MS);
+    };
+    function onAbort(): void { killGroup(); }
+
+    const collect = (chunks: Buffer[], add: (n: number) => number) => (chunk: Buffer): void => {
+      if (add(chunk.length) > MAX_TOOL_OUTPUT_BYTES) {
+        overflow = true;
+        killGroup();
+        return;
+      }
+      chunks.push(chunk);
+    };
+    child.stdout?.on("data", collect(out, (n) => (outBytes += n)));
+    child.stderr?.on("data", collect(err, (n) => (errBytes += n)));
+    child.on("error", (e) => finish(e));
+    child.on("close", (code) => {
+      exitCode = code;
+      // After a kill, survivors of SIGTERM may still be in the group (a
+      // grandchild that ignores TERM). Let the grace timer SIGKILL them
+      // before reporting, so the caller never returns with a live orphan.
+      if (killRequested && groupAlive()) return;
+      finish();
+    });
+
+    if (signal.aborted) killGroup();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Text for a failed execFile call: the child's stderr when it wrote any,
+ * otherwise the error message (spawn failure, abort, maxBuffer).
+ */
+function execErrorText(err: unknown): string {
+  const e = err as { stderr?: unknown; message?: unknown };
+  const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
+  return stderr || String(e.message ?? err);
 }
 
 const CATEGORY_LEVEL: Record<ToolCategory, number> = {
@@ -368,7 +505,7 @@ export class ToolExecutor {
         parallelizable: true,
         source: "toml",
         sourceId: `toml:${t.name}`,
-        execute: async (input, _ctx) => {
+        execute: async (input, ctx) => {
           const start = Date.now();
           try {
             // Substitute {{param}} placeholders in the operator-authored
@@ -394,12 +531,27 @@ export class ToolExecutor {
               );
             }
 
-            const { stdout } = await execAsync(cmd, {
-              encoding: "utf-8",
-              timeout: t.timeout_ms ?? 30_000,
-              maxBuffer: 1024 * 1024,
+            // The executor aborts ctx.signal at this tool's timeout_ms (or on
+            // caller cancel); runShellCommand then kills the whole group.
+            const res = await runShellCommand(cmd, ctx.signal ?? new AbortController().signal);
+            const failure = (why: string) => ({
+              success: false,
+              data: null,
+              summary: `Command failed: ${why}`.slice(0, 2000),
+              sideEffects: [] as string[],
+              duration_ms: Date.now() - start,
             });
-            const output = stdout.trim();
+            if (res.spawnError) return failure(res.spawnError.message);
+            if (res.overflow) return failure(`output exceeded ${MAX_TOOL_OUTPUT_BYTES} bytes`);
+            if (res.aborted) {
+              return failure(ctx.signal && isTimeoutAbort(ctx.signal)
+                ? `timed out after ${t.timeout_ms ?? 30_000}ms`
+                : "cancelled");
+            }
+            if (res.code !== 0) {
+              return failure(`exit ${res.code}: ${res.stderr.trim() || res.stdout.trim()}`);
+            }
+            const output = res.stdout.trim();
 
             return {
               success: true,
@@ -602,7 +754,12 @@ export class ToolExecutor {
       // Execute with timeout via AbortSignal
       const timeoutMs = tool.timeout_ms;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      // Abort with a TimeoutError reason (as AbortSignal.timeout does) so tools
+      // can tell a timeout from a caller's cancel.
+      const timeout = setTimeout(
+        () => controller.abort(new DOMException(`timed out after ${timeoutMs}ms`, "TimeoutError")),
+        timeoutMs,
+      );
 
       // Merge the caller's signal with the timeout.
       //
@@ -627,10 +784,39 @@ export class ToolExecutor {
       }
       const mergedCtx: ToolContext = { ...ctx, signal: mergedSignal };
 
+      // Aborting the signal is only a request: a tool that never looks at it
+      // used to run to completion however long that took, so timeout_ms
+      // bounded nothing. Once the signal aborts, give the tool
+      // ABANDON_GRACE_MS to settle on its own (a tool that honours the signal
+      // reports its own outcome), then stop waiting for it. Work it already
+      // started may still finish in the background — JS cannot preempt it.
+      const pending = tool.execute(params, mergedCtx);
+      pending.catch(() => { /* an abandoned tool may reject later; not ours to surface */ });
+      let abandonTimer: ReturnType<typeof setTimeout> | null = null;
+      let onAbort: (() => void) | null = null;
+      const abandoned = new Promise<ToolResult>((resolveAbandon) => {
+        onAbort = () => {
+          abandonTimer = setTimeout(() => {
+            const why = isTimeoutAbort(mergedSignal) ? `timed out after ${timeoutMs}ms` : "cancelled";
+            this.log.warn(`Tool '${tool.name}' ${why} and did not stop; abandoning it`);
+            resolveAbandon({
+              success: false,
+              data: null,
+              summary: `Tool '${tool.name}' ${why}; it did not stop and was abandoned`,
+              sideEffects: [],
+              duration_ms: Date.now() - start,
+            });
+          }, ABANDON_GRACE_MS);
+        };
+        if (mergedSignal.aborted) onAbort();
+        else mergedSignal.addEventListener("abort", onAbort, { once: true });
+      });
       try {
-        result = await tool.execute(params, mergedCtx);
+        result = await Promise.race([pending, abandoned]);
       } finally {
         clearTimeout(timeout);
+        if (abandonTimer) clearTimeout(abandonTimer);
+        if (onAbort) mergedSignal.removeEventListener("abort", onAbort);
       }
     } catch (err) {
       const duration_ms = Date.now() - start;
@@ -786,12 +972,18 @@ export class ToolExecutor {
         }
 
         try {
-          const content = readFileSync(filePath, "utf-8");
-          let lines = content.split("\n");
           const lineSpec = input.lines ? String(input.lines) : "";
+          const lastMatch = lineSpec.match(/^last-(\d+)$/);
+          // Bounded read: readFileSync slurped the whole file, and this tool
+          // is auto-approved, so one model-emitted block naming a multi-GB
+          // log could exhaust the daemon's memory. Read at most
+          // MAX_TOOL_OUTPUT_BYTES — the tail of the file for `last-N`, the
+          // head otherwise — and say so when the file was larger.
+          const { text: content, bytesRead, fileBytes, byteTruncated } =
+            readBounded(filePath, MAX_TOOL_OUTPUT_BYTES, lastMatch ? "tail" : "head");
+          let lines = content.split("\n");
 
           if (lineSpec) {
-            const lastMatch = lineSpec.match(/^last-(\d+)$/);
             if (lastMatch) {
               const n = parseInt(lastMatch[1], 10);
               lines = lines.slice(-n);
@@ -810,11 +1002,16 @@ export class ToolExecutor {
           const truncated = lines.length > maxLines;
           const output = truncated ? lines.slice(0, maxLines) : lines;
           const summary = output.join("\n").slice(0, 2000);
+          const notes: string[] = [];
+          if (truncated) notes.push(`... (${lines.length - maxLines} more lines)`);
+          if (byteTruncated) {
+            notes.push(`... (file truncated: read the ${lastMatch ? "last" : "first"} ${bytesRead} of ${fileBytes} bytes)`);
+          }
 
           return {
             success: true,
-            data: { path: filePath, lineCount: lines.length, truncated },
-            summary: truncated ? `${summary}\n... (${lines.length - maxLines} more lines)` : summary,
+            data: { path: filePath, lineCount: lines.length, truncated, byteTruncated, bytesRead, fileBytes },
+            summary: [summary, ...notes].join("\n"),
             sideEffects: [],
             duration_ms: Date.now() - start,
           };
@@ -894,7 +1091,7 @@ export class ToolExecutor {
       ],
       timeout_ms: 10_000,
       parallelizable: true,
-      execute: async (input, _ctx) => {
+      execute: async (input, ctx) => {
         const start = Date.now();
         const repoPath = resolve(String(input.path));
 
@@ -906,8 +1103,8 @@ export class ToolExecutor {
           // argv arrays: these are fixed commands, so there is no reason to
           // involve a shell at all.
           const [branchRes, statusRes] = await Promise.all([
-            execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath, encoding: "utf-8", timeout: 5000 }),
-            execFileAsync("git", ["status", "--porcelain"], { cwd: repoPath, encoding: "utf-8", timeout: 5000 }),
+            execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath, encoding: "utf-8", timeout: 5000, signal: ctx.signal }),
+            execFileAsync("git", ["status", "--porcelain"], { cwd: repoPath, encoding: "utf-8", timeout: 5000, signal: ctx.signal }),
           ]);
           const branch = branchRes.stdout.trim();
           const status = statusRes.stdout.trim();
@@ -936,7 +1133,7 @@ export class ToolExecutor {
       ],
       timeout_ms: 10_000,
       parallelizable: true,
-      execute: async (input, _ctx) => {
+      execute: async (input, ctx) => {
         const start = Date.now();
         const repoPath = resolve(String(input.path));
         // Clamped at both ends: Math.min alone let -5 and NaN through, which
@@ -953,7 +1150,7 @@ export class ToolExecutor {
           const { stdout: logOut } = await execFileAsync(
             "git",
             ["log", "--oneline", `-${count}`, "--format=%h %s"],
-            { cwd: repoPath, encoding: "utf-8", timeout: 5000 },
+            { cwd: repoPath, encoding: "utf-8", timeout: 5000, signal: ctx.signal },
           );
           const log = logOut.trim();
 
@@ -1017,7 +1214,7 @@ export class ToolExecutor {
       ],
       timeout_ms: 30_000,
       parallelizable: true,
-      execute: async (input, _ctx) => {
+      execute: async (input, ctx) => {
         const start = Date.now();
         const searchPath = resolve(String(input.path));
         const pattern = String(input.pattern);
@@ -1038,13 +1235,17 @@ export class ToolExecutor {
             "*.ts", "*.js", "*.json", "*.md", "*.toml",
             "*.yaml", "*.yml", "*.py", "*.sh",
           ].map((g) => `--include=${g}`);
-          const gproc = spawnSync(
+          //
+          // Async with the executor's signal: spawnSync blocked the event loop
+          // for up to 15s and ignored cancellation. Its exit status was also
+          // never checked, so exit 2 (bad regex, unreadable path) read as
+          // "No matches found". grep exits 1 for no matches — handled below.
+          const { stdout: allRaw } = await execFileAsync(
             "grep",
             ["-rnI", ...includes, "--", pattern, searchPath],
-            { encoding: "utf-8", timeout: 15000, maxBuffer: 1024 * 1024 },
+            { encoding: "utf-8", timeout: 15000, maxBuffer: MAX_TOOL_OUTPUT_BYTES, signal: ctx.signal },
           );
-          if (gproc.error) throw gproc.error;
-          const allOut = (gproc.stdout ?? "").trim();
+          const allOut = allRaw.trim();
           // Replaces the `| head -N` pipe with an in-process slice.
           const lines = allOut ? allOut.split("\n").slice(0, limit) : [];
           const result = lines.join("\n");
@@ -1055,12 +1256,14 @@ export class ToolExecutor {
             sideEffects: [],
             duration_ms: Date.now() - start,
           };
-        } catch (err: any) {
-          // grep returns exit code 1 for no matches — that's not an error
-          if (err.status === 1) {
+        } catch (err) {
+          // grep returns exit code 1 for no matches — that's not an error.
+          // execFile reports the exit status as a numeric `code`; the old
+          // `err.status` check (a spawnSync field) could never match.
+          if ((err as { code?: unknown }).code === 1) {
             return { success: true, data: { pattern, path: searchPath, matchCount: 0 }, summary: "No matches found", sideEffects: [], duration_ms: Date.now() - start };
           }
-          return { success: false, data: null, summary: `Search failed: ${err}`, sideEffects: [], duration_ms: Date.now() - start };
+          return { success: false, data: null, summary: `Search failed: ${execErrorText(err)}`.slice(0, 2000), sideEffects: [], duration_ms: Date.now() - start };
         }
       },
     });
@@ -1080,10 +1283,10 @@ export class ToolExecutor {
         const start = Date.now();
         const query = String(input.query);
         const limit = typeof input.limit === "number" ? Math.min(input.limit, 50) : 10;
-        const project = input.project ? String(input.project) : "*";
+        const project = input.project ? String(input.project) : ALL_PROJECTS;
 
         try {
-          // searchMemories requires a project path; use "*" for global search
+          // No project → ALL_PROJECTS, which searchMemories treats as global.
           const results = ctx.db.searchMemories(project, query, limit);
           const summary = results
             .map((r: import("./memory-db.js").MemoryRecord) =>
@@ -1114,7 +1317,7 @@ export class ToolExecutor {
       ],
       timeout_ms: 10_000,
       parallelizable: true,
-      execute: async (input, _ctx) => {
+      execute: async (input, ctx) => {
         const start = Date.now();
         const repoPath = resolve(String(input.path));
         const ref1 = input.ref1 ? String(input.ref1) : "HEAD~1";
@@ -1137,13 +1340,15 @@ export class ToolExecutor {
         }
 
         try {
-          const dproc = spawnSync(
+          // execFile rejects on any non-zero exit. spawnSync's status was
+          // never checked, so exit 128 (not a repo, unknown ref) reported
+          // "No differences" as a success.
+          const { stdout } = await execFileAsync(
             "git",
             ["diff", `${ref1}..${ref2}`, "--stat"],
-            { cwd: repoPath, encoding: "utf-8", timeout: 5000, maxBuffer: 1024 * 1024 },
+            { cwd: repoPath, encoding: "utf-8", timeout: 5000, maxBuffer: MAX_TOOL_OUTPUT_BYTES, signal: ctx.signal },
           );
-          if (dproc.error) throw dproc.error;
-          const diff = (dproc.stdout ?? "").trim();
+          const diff = stdout.trim();
 
           return {
             success: true,
@@ -1153,7 +1358,7 @@ export class ToolExecutor {
             duration_ms: Date.now() - start,
           };
         } catch (err) {
-          return { success: false, data: null, summary: `Diff failed: ${err}`, sideEffects: [], duration_ms: Date.now() - start };
+          return { success: false, data: null, summary: `Diff failed: ${execErrorText(err)}`.slice(0, 2000), sideEffects: [], duration_ms: Date.now() - start };
         }
       },
     });
@@ -1306,12 +1511,12 @@ export class ToolExecutor {
           // Use termux-notification if available, otherwise log-only
           try {
             // argv form — JSON.stringify only double-quotes, which sh expands.
-            const nproc = spawnSync(
+            // Async so a slow termux-api round trip does not block the loop.
+            await execFileAsync(
               "termux-notification",
               ["--title", title, "--content", content],
-              { timeout: 3000, stdio: "ignore" },
+              { timeout: 3000, signal: ctx.signal },
             );
-            if (nproc.error) throw nproc.error;
           } catch {
             ctx.log.info(`[notify] ${title}: ${content}`);
           }
@@ -1367,6 +1572,55 @@ export class ToolExecutor {
   }
 }
 
+// -- Bounded file reading -----------------------------------------------------
+
+/** Result of readBounded. */
+interface BoundedRead {
+  text: string;
+  /** Bytes actually read from disk (≤ the cap). */
+  bytesRead: number;
+  /** Size of the file on disk. */
+  fileBytes: number;
+  /** The file was larger than the cap, so `text` is a window of it. */
+  byteTruncated: boolean;
+}
+
+/**
+ * Read at most `maxBytes` of a file as UTF-8 — the first bytes (`head`) or the
+ * last (`tail`). When the window cuts the file, the partial line at the cut
+ * is dropped so callers never see half a line (or half a UTF-8 sequence).
+ */
+function readBounded(filePath: string, maxBytes: number, from: "head" | "tail"): BoundedRead {
+  const fileBytes = statSync(filePath).size;
+  const want = Math.min(fileBytes, maxBytes);
+  const fd = openSync(filePath, "r");
+  let bytesRead = 0;
+  const buf = Buffer.alloc(want);
+  try {
+    const position = from === "tail" ? fileBytes - want : 0;
+    // readSync may return short counts; loop until the window is filled.
+    while (bytesRead < want) {
+      const n = readSync(fd, buf, bytesRead, want - bytesRead, position + bytesRead);
+      if (n === 0) break;
+      bytesRead += n;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  let text = buf.subarray(0, bytesRead).toString("utf-8");
+  const byteTruncated = fileBytes > maxBytes;
+  if (byteTruncated) {
+    if (from === "tail") {
+      const nl = text.indexOf("\n");
+      if (nl >= 0) text = text.slice(nl + 1);
+    } else {
+      const nl = text.lastIndexOf("\n");
+      if (nl >= 0) text = text.slice(0, nl);
+    }
+  }
+  return { text, bytesRead, fileBytes, byteTruncated };
+}
+
 // -- Path safety helpers ------------------------------------------------------
 
 /**
@@ -1408,6 +1662,16 @@ export function isAllowedPath(filePath: string): boolean {
     join(home, ".cargo", "credentials"),
     join(home, ".config", "gh"),
     join(home, ".config", "gcloud"),
+    // Locations whose contents run without the user typing them — a write
+    // here is code execution (or persistence) at the next trigger:
+    join(home, ".claude", "hooks"),      // Claude Code hook scripts
+    join(home, ".claude", "plugins"),    // plugin hooks.json + bundled scripts
+    join(home, ".termux", "boot"),       // Termux:Boot runs every file at boot
+    join(home, ".shortcuts"),            // Termux:Widget launchers
+    join(home, ".local", "bin"),         // on PATH: shadows git, node, …
+    join(home, ".config", "autostart"),  // XDG desktop autostart
+    join(home, ".config", "systemd"),    // systemd --user units
+    join(home, ".config", "fish"),       // fish config.fish / conf.d autoload
   ];
   const deniedFiles = [
     // Claude Code's own state and settings. settings.json carries `hooks`,
@@ -1421,12 +1685,15 @@ export function isAllowedPath(filePath: string): boolean {
     // Shell startup files — writing any of these is persistence.
     join(home, ".bashrc"), join(home, ".bash_profile"), join(home, ".profile"),
     join(home, ".zshrc"), join(home, ".zshenv"), join(home, ".zprofile"),
+    join(home, ".bash_login"), join(home, ".bash_logout"),
+    join(home, ".zlogin"), join(home, ".zlogout"),
     join(home, ".npmrc"), join(home, ".netrc"), join(home, ".git-credentials"),
     "/etc/shadow", "/etc/passwd", "/etc/sudoers",
   ];
 
   if (deniedFiles.some((f) => pathEquals(resolved, f))) return false;
   if (deniedDirs.some((d) => pathEquals(resolved, d) || isUnder(resolved, d))) return false;
+  if (isGitExecPath(resolved)) return false;
 
   const allowedRoots = [
     join(home, ".claude"),
@@ -1439,6 +1706,23 @@ export function isAllowedPath(filePath: string): boolean {
   ];
   if (allowedRoots.some((r) => isUnder(resolved, r))) return true;
   return isUnder(resolved, home);
+}
+
+/**
+ * Is this a repository's `.git/hooks/…` or `.git/config`?
+ *
+ * Repos sit under allowed roots (~/git, ~/projects, …), but a hook file runs
+ * on the user's next commit/checkout, and `.git/config` can name commands
+ * (core.hooksPath, core.fsmonitor, core.sshCommand, alias.* with `!`).
+ */
+function isGitExecPath(resolved: string): boolean {
+  const segs = samePathCase(resolved).split(/[/\\]+/);
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (segs[i] !== ".git") continue;
+    if (segs[i + 1] === "hooks") return true;
+    if (segs[i + 1] === "config" && i + 2 === segs.length) return true;
+  }
+  return false;
 }
 
 /**
