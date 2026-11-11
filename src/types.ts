@@ -410,6 +410,99 @@ export function defaultSwitchboard(): Switchboard {
   };
 }
 
+/**
+ * The boolean fields a switchboard patch may set.
+ *
+ * Listed explicitly so an unknown key in a client patch cannot be persisted
+ * as switchboard state. Kept in sync with the Switchboard interface above;
+ * `agents` is handled separately as a record.
+ */
+export const SWITCHBOARD_BOOLEAN_KEYS = [
+  "all",
+  "sdkBridge",
+  "cognitive",
+  "oodaAutoTrigger",
+  "memoryInjection",
+  "mindMeld",
+] as const satisfies ReadonlyArray<keyof Switchboard>;
+
+/** Result of {@link parseSwitchboardPatch}. */
+export interface SwitchboardPatchParse {
+  /** The validated patch — only whitelisted keys with boolean values. */
+  patch: Partial<Switchboard>;
+  /**
+   * Human-readable descriptions of everything that was dropped (unknown key,
+   * wrong-typed value, non-object body). Empty when the input was clean.
+   */
+  rejected: string[];
+}
+
+/**
+ * Validate an untrusted switchboard patch (REST PUT body / WS message).
+ *
+ * The single whitelist shared by both transports. Only the boolean keys in
+ * SWITCHBOARD_BOOLEAN_KEYS with real boolean values, plus an `agents` object
+ * of boolean values, survive. Everything else is reported in `rejected`, so
+ * the caller picks the policy: REST refuses the whole patch with a 400, WS
+ * (fire-and-forget, no per-message error contract) applies the clean part.
+ *
+ * Why it matters: updateSwitchboard Object.assigns the patch onto the live
+ * board and persists it. Unvalidated, a string "false" was stored truthy, an
+ * array body spread its indices in as keys, and invented keys were saved.
+ *
+ * `ignoreKeys` names envelope fields the caller carries alongside the patch
+ * (WS `type`) that are neither applied nor reported.
+ */
+export function parseSwitchboardPatch(
+  raw: unknown,
+  ignoreKeys: readonly string[] = [],
+): SwitchboardPatchParse {
+  const patch: Partial<Switchboard> = {};
+  const rejected: string[] = [];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    rejected.push("patch must be a JSON object");
+    return { patch, rejected };
+  }
+  const allowed = new Set<string>([...SWITCHBOARD_BOOLEAN_KEYS, "agents", ...ignoreKeys]);
+  // Object.keys reads own properties only, and JSON.parse makes `__proto__`
+  // an ordinary own key — so it lands here as "unknown", never a setter call.
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) rejected.push(`unknown key '${key}'`);
+  }
+  const obj = raw as Record<string, unknown>;
+  for (const key of SWITCHBOARD_BOOLEAN_KEYS) {
+    if (!(key in obj)) continue;
+    if (typeof obj[key] === "boolean") patch[key] = obj[key] as boolean;
+    else rejected.push(`'${key}' must be a boolean`);
+  }
+  if ("agents" in obj) {
+    const agents = obj.agents;
+    if (agents && typeof agents === "object" && !Array.isArray(agents)) {
+      const cleaned: Record<string, boolean> = {};
+      for (const [name, value] of Object.entries(agents)) {
+        // An own `__proto__` key assigned onto a plain {} would invoke the
+        // prototype setter instead of storing an entry, so refuse the name.
+        if (name === "__proto__") rejected.push("agent name '__proto__' is not allowed");
+        else if (typeof value === "boolean") cleaned[name] = value;
+        else rejected.push(`agents.${name} must be a boolean`);
+      }
+      patch.agents = cleaned;
+    } else {
+      rejected.push("'agents' must be an object of booleans");
+    }
+  }
+  return { patch, rejected };
+}
+
+/**
+ * Whether the switchboard currently permits SDK bridge use (attach/prompt).
+ * The master switch `all` gates everything; `sdkBridge` gates the bridge.
+ * Shared by the WS and REST transports so the kill-switch covers both.
+ */
+export function isSdkBridgeAllowed(sb: Switchboard): boolean {
+  return sb.all && sb.sdkBridge;
+}
+
 /** Full persisted state */
 export interface TmxState {
   /** Schema version for forward-compat migrations (added v0.4.0) */

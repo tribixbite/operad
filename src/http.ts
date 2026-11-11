@@ -73,6 +73,26 @@ const FALLBACK_URL_BASE = "http://localhost";
 /** HTTP methods whose request body is read and handed to the API handler. */
 const BODY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+/** Largest request body handleApi will buffer before answering 413. */
+const MAX_BODY_SIZE = 1024 * 1024; // 1MB
+
+/** Default time a request body may take to arrive before answering 408. */
+const DEFAULT_BODY_TIMEOUT_MS = 10_000;
+
+/**
+ * After a 413/408 the socket is closed gracefully (FIN once the reply has
+ * flushed). A client that keeps streaming regardless is cut off this long
+ * after the reply finished, so it cannot hold the connection open forever.
+ */
+const REJECTED_BODY_LINGER_MS = 2_000;
+
+/** A body read that ended in a reply other than the API handler's. */
+class BodyReadError extends Error {
+  constructor(readonly status: 408 | 413, message: string) {
+    super(message);
+  }
+}
+
 /**
  * Build the request URL without ever throwing.
  *
@@ -129,6 +149,8 @@ export class DashboardServer {
   private bindAddress: string;
   /** Extra origins allowed to make cross-origin API calls. */
   private allowedOrigins: Set<string>;
+  /** How long a request body may take to arrive before a 408. */
+  private bodyTimeoutMs: number;
 
   constructor(
     port: number,
@@ -139,8 +161,11 @@ export class DashboardServer {
       authToken: string;
       bindAddress?: string;
       allowedOrigins?: string[];
+      /** Request-body read timeout (ms) before answering 408. Default 10s. */
+      bodyTimeoutMs?: number;
     },
   ) {
+    this.bodyTimeoutMs = opts.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS;
     this.port = port;
     this.log = log;
     this.staticDir = staticDir;
@@ -670,33 +695,25 @@ export class DashboardServer {
     let body = "";
     if (BODY_METHODS.has(req.method ?? "GET")) {
       try {
-        body = await new Promise<string>((resolve, reject) => {
-          const chunks: Buffer[] = [];
-          let totalLength = 0;
-          const MAX_BODY_SIZE = 1024 * 1024; // 1MB
-
-          const timer = setTimeout(() => {
-            req.destroy();
-            reject(new Error("Request body timeout"));
-          }, 10_000);
-
-          req.on("data", (chunk: Buffer) => {
-            totalLength += chunk.length;
-            if (totalLength > MAX_BODY_SIZE) {
-              clearTimeout(timer);
-              req.destroy();
-              reject(new Error("Payload too large"));
-            } else {
-              chunks.push(chunk);
-            }
-          });
-          req.on("end", () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString()); });
-          req.on("error", (err) => { clearTimeout(timer); reject(err); });
-        });
+        body = await this.readBody(req);
       } catch (err) {
-        const status = (err as Error).message === "Payload too large" ? 413 : 408;
-        res.writeHead(status, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: (err as Error).message }));
+        // A socket-level error (client went away) has nobody to answer.
+        if (!(err instanceof BodyReadError)) return;
+        // Answer BEFORE tearing anything down. This used to req.destroy()
+        // first, which destroys the shared socket, so the 413/408 was
+        // written into a dead connection and the client saw a reset instead
+        // of the documented JSON error. Now: stop buffering, keep draining
+        // (unread bytes in the receive queue make the kernel answer close()
+        // with RST, which can discard the reply), reply with
+        // `Connection: close` so Node half-closes after the reply flushes,
+        // and only force-destroy a client that keeps streaming past a grace
+        // period.
+        req.resume();
+        res.on("finish", () => {
+          setTimeout(() => { if (!req.socket.destroyed) req.destroy(); }, REJECTED_BODY_LINGER_MS).unref();
+        });
+        res.writeHead(err.status, { "Content-Type": "application/json", Connection: "close" });
+        res.end(JSON.stringify({ error: err.message }));
         return;
       }
     }
@@ -709,6 +726,52 @@ export class DashboardServer {
     );
     res.writeHead(result.status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result.data));
+  }
+
+  /**
+   * Buffer a request body, bounded by MAX_BODY_SIZE and bodyTimeoutMs.
+   *
+   * Rejects with a BodyReadError (413 / 408) when a limit is hit, or the raw
+   * stream error if the socket fails. Never destroys the request: the caller
+   * still has to send the error reply over the same socket. Once a limit is
+   * hit, further chunks are discarded rather than buffered, so a client that
+   * keeps sending costs no memory while the reply goes out.
+   */
+  private readBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let totalLength = 0;
+      let settled = false;
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        chunks.length = 0;
+        reject(err);
+      };
+
+      const timer = setTimeout(
+        () => fail(new BodyReadError(408, "Request body timeout")),
+        this.bodyTimeoutMs,
+      );
+
+      req.on("data", (chunk: Buffer) => {
+        if (settled) return; // draining after a rejection — discard
+        totalLength += chunk.length;
+        if (totalLength > MAX_BODY_SIZE) {
+          fail(new BodyReadError(413, "Payload too large"));
+        } else {
+          chunks.push(chunk);
+        }
+      });
+      req.on("end", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(Buffer.concat(chunks).toString());
+      });
+      req.on("error", (err) => fail(err));
+    });
   }
 
   /** Serve static files from the dashboard dist directory */

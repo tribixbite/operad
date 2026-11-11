@@ -173,6 +173,34 @@ describe("WsHandler — SDK bridge messages", () => {
     );
   });
 
+  test("prompt throws when the switchboard disables the bridge mid-session", async () => {
+    fc.cleanup();
+    const sentPrompts: string[] = [];
+    fc = await makeFakeContext({
+      switchboard: { all: false },
+      sdkBridge: {
+        isAttached: true,
+        activeSessionName: "x",
+        send: async (p: string) => { sentPrompts.push(p); },
+      },
+    });
+    const h = new WsHandler(fc.ctx, fakeAgentEngine({}));
+    const { ws } = fakeWs();
+    await expect(h.handleWsMessage(ws, msg({ type: "prompt", prompt: "hi" }))).rejects.toThrow(
+      /disabled by switchboard/,
+    );
+    expect(sentPrompts).toEqual([]);
+  });
+
+  test("switchboard_update drops string booleans and keeps the valid keys", async () => {
+    const h = new WsHandler(fc.ctx, fakeAgentEngine({}));
+    const { ws } = fakeWs();
+    await h.handleWsMessage(ws, msg({ type: "switchboard_update", all: "false", cognitive: true }));
+    expect(fc.switchboard.all).toBe(true);
+    expect(fc.switchboard.cognitive).toBe(true);
+    expect("type" in fc.switchboard).toBe(false);
+  });
+
   test("attach resolves session path and sends attach_result", async () => {
     fc.cleanup();
     fc = await makeFakeContext({

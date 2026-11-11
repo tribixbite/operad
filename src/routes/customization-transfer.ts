@@ -212,6 +212,21 @@ export function isDocumentFile(name: string): boolean {
   return DOC_EXTENSIONS.some((e) => lower.endsWith(e));
 }
 
+/**
+ * Could the exporter have produced this bundle rel_path? The import-side
+ * mirror of collectDocuments' filter: the walk skips dot-entries at every
+ * depth and only emits isDocumentFile basenames, so anything else in a
+ * bundle (a script, a JSON config, `.git/…`, `.env`) is not a document and
+ * must not be written. Both separators are split so a Windows-built bundle
+ * cannot hide a dot-directory behind `\`.
+ */
+export function isDocumentRelPath(relPath: string): boolean {
+  const parts = relPath.split(/[\\/]/).filter((p) => p.length > 0);
+  if (parts.length === 0) return false;
+  if (parts.some((p) => p.startsWith("."))) return false;
+  return isDocumentFile(parts[parts.length - 1]);
+}
+
 // ── Collection scanning ─────────────────────────────────────────────────────
 
 /** Directories are walked this deep (skill dirs hold SKILL.md + references/). */
@@ -452,17 +467,73 @@ export function validateBundle(value: unknown): string | null {
   return null;
 }
 
+/** Result of {@link readJsonObjectFile}: the object, or why it is unusable. */
+export type JsonObjectFileRead =
+  | { ok: true; obj: Record<string, unknown> }
+  | { ok: false; error: string };
+
+/**
+ * Read a JSON file that must hold a plain object, for read-modify-write.
+ *
+ * An absent file reads as `{}` (the caller may create it). A file that exists
+ * but cannot be read, does not parse, or parses to a non-object is an ERROR,
+ * never `{}`: the callers write the result back, and these targets are
+ * `~/.claude.json` and `~/.claude/settings.json` — Claude Code's entire state
+ * (project history, MCP servers, account, onboarding) lives in the former.
+ * Falling back to `{}` there turned one unparseable byte (or a read racing
+ * Claude Code's own write) into a near-empty replacement of the whole file.
+ *
+ * Shared by the bundle importer (mergeJsonFile) and the MCP REST routes.
+ */
+export function readJsonObjectFile(path: string): JsonObjectFileRead {
+  if (!existsSync(path)) return { ok: true, obj: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (err) {
+    return {
+      ok: false,
+      error: `${path} is not valid JSON (${(err as Error).message}) — refusing to overwrite it; fix or move the file and retry`,
+    };
+  }
+  // `typeof [] === "object"`, and assigning a key to an array is dropped by
+  // JSON.stringify, so arrays must be rejected explicitly rather than
+  // adopted as the merge target.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: `${path} does not contain a JSON object — refusing to overwrite it` };
+  }
+  return { ok: true, obj: parsed as Record<string, unknown> };
+}
+
+/**
+ * Write a JSON value atomically: temp file in the same directory, then
+ * rename over the target. Claude Code writes these files concurrently, and a
+ * crash partway through a plain writeFileSync would truncate them. The temp
+ * name carries the pid so two operad processes cannot clobber each other's
+ * temp file.
+ *
+ * Returns null on success, or a human-readable reason the write failed (the
+ * temp file is removed and the target is left untouched).
+ */
+export function writeJsonFileAtomic(path: string, data: unknown): string | null {
+  const tmp = `${path}.operad-${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
+    renameSync(tmp, path);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    return `${path} could not be written: ${(err as Error).message}`;
+  }
+  return null;
+}
+
 /**
  * Merge into a JSON object file, creating it when absent.
  *
  * REFUSES to touch a file that exists but does not parse as a plain JSON
- * object. These targets are `~/.claude.json` and `~/.claude/settings.json` —
- * Claude Code's entire state (project history, MCP servers, account,
- * onboarding) lives in the former. An earlier version fell back to `{}` on a
- * parse error and then wrote it out, so a single unparseable byte anywhere in
- * ~/.claude.json silently replaced the whole file with just the imported keys.
- * Refusing and reporting is the only safe behaviour: an import must never be
- * able to destroy state it did not create.
+ * object (see readJsonObjectFile). Refusing and reporting is the only safe
+ * behaviour: an import must never be able to destroy state it did not create.
  *
  * Returns null on success, or a human-readable reason the merge was skipped.
  */
@@ -471,22 +542,9 @@ function mergeJsonFile(
   mutate: (obj: Record<string, unknown>) => void,
   dryRun: boolean,
 ): string | null {
-  let obj: Record<string, unknown> = {};
-  if (existsSync(path)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(path, "utf-8"));
-    } catch (err) {
-      return `${path} is not valid JSON (${(err as Error).message}) — refusing to overwrite it; fix or move the file and retry`;
-    }
-    // `typeof [] === "object"`, and assigning a key to an array is dropped by
-    // JSON.stringify, so arrays must be rejected explicitly rather than
-    // adopted as the merge target.
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return `${path} does not contain a JSON object — refusing to overwrite it`;
-    }
-    obj = parsed as Record<string, unknown>;
-  }
+  const read = readJsonObjectFile(path);
+  if (!read.ok) return read.error;
+  const obj = read.obj;
 
   try {
     mutate(obj);
@@ -497,18 +555,7 @@ function mergeJsonFile(
   }
 
   if (dryRun) return null;
-  mkdirSync(dirname(path), { recursive: true });
-  // Write atomically — Claude Code writes these files concurrently, and a
-  // crash partway through a plain writeFileSync would truncate them.
-  const tmp = `${path}.operad-import-${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`, "utf-8");
-    renameSync(tmp, path);
-  } catch (err) {
-    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
-    return `${path} could not be written: ${(err as Error).message}`;
-  }
-  return null;
+  return writeJsonFileAtomic(path, obj);
 }
 
 /**
@@ -581,6 +628,13 @@ export function importBundle(
       report.skipped.push({
         path: String(doc.rel_path),
         reason: "unsafe path (traversal or absolute path rejected)",
+      });
+      continue;
+    }
+    if (!isDocumentRelPath(doc.rel_path)) {
+      report.skipped.push({
+        path: doc.rel_path,
+        reason: `not a document (only ${DOC_EXTENSIONS.join("/")} files outside dot-directories are imported)`,
       });
       continue;
     }

@@ -72,6 +72,22 @@ describe("RestHandler — memories", () => {
     fc2.cleanup();
   });
 
+  // Same double-decode as agent-chat: the dispatcher already decoded the
+  // project path, so a path with a literal `%` 500'd or hit another project.
+  test("GET /api/memories/<project> decodes a %-bearing project path once", async () => {
+    const { fc2, h2 } = await withDb((f) => {
+      f.db!.createMemory("/proj%50", "discovery", "percent project");
+      f.db!.createMemory("/projP", "discovery", "wrong project");
+    });
+    const res = await h2.handleDashboardApi("GET", `/api/memories/${encodeURIComponent("/proj%50")}`, "");
+    expect(res.status).toBe(200);
+    const list = res.data as Array<{ content: string }>;
+    expect(list.map((m) => m.content)).toEqual(["percent project"]);
+    const raw = await h2.handleDashboardApi("GET", `/api/memories/${encodeURIComponent("/100%")}`, "");
+    expect(raw.status).toBe(200);
+    fc2.cleanup();
+  });
+
   test("POST /api/memories/<project> creates a memory and returns id", async () => {
     const { fc2, h2 } = await withDb();
     const res = await h2.handleDashboardApi(
@@ -187,6 +203,29 @@ describe("RestHandler — tools", () => {
     const res = await h2.handleDashboardApi("GET", "/api/tools/read", "");
     expect(res.status).toBe(200);
     expect((res.data as { name: string }).name).toBe("read");
+    fc2.cleanup();
+  });
+
+  // The stats branch sat after `if (name)` inside the GET block, so "stats"
+  // was looked up as a tool name and every call answered 404.
+  test("GET /api/tools/stats returns per-tool aggregates, not a 404", async () => {
+    const fakeTe = {
+      getAllTools: () => [],
+      getTool: (_n: string) => null,
+    };
+    const { fc2, h2 } = await withDb(undefined, { toolExecutor: fakeTe });
+    const res = await h2.handleDashboardApi("GET", "/api/tools/stats", "");
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.data)).toBe(true);
+    fc2.cleanup();
+  });
+
+  test("GET /api/tools/stats → 503 without a memory database", async () => {
+    const fakeTe = { getAllTools: () => [], getTool: (_n: string) => null };
+    const fc2 = await makeFakeContext({ toolExecutor: fakeTe });
+    const h2 = new RestHandler(fc2.ctx, fakeAgentEngine(), new ToolEngine(fc2.ctx));
+    const res = await h2.handleDashboardApi("GET", "/api/tools/stats", "");
+    expect(res.status).toBe(503);
     fc2.cleanup();
   });
 });

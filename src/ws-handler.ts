@@ -14,24 +14,8 @@
 import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { AgentEngine } from "./agent-engine.js";
 import type { WsClientMessage } from "./http.js";
-import type { Switchboard } from "./types.js";
+import { parseSwitchboardPatch, isSdkBridgeAllowed, type Switchboard } from "./types.js";
 import { buildMemoryPrompt } from "./memory-injector.js";
-
-/**
- * The boolean fields a `switchboard_update` message may set.
- *
- * Listed explicitly so an unknown key in a client message cannot be
- * persisted as switchboard state. Kept in sync with the Switchboard
- * interface in types.ts; `agents` is handled separately as a record.
- */
-const SWITCHBOARD_BOOLEAN_KEYS = [
-  "all",
-  "sdkBridge",
-  "cognitive",
-  "oodaAutoTrigger",
-  "memoryInjection",
-  "mindMeld",
-] as const satisfies ReadonlyArray<keyof Switchboard>;
 
 /**
  * WsHandler — handles inbound WebSocket messages and builds WS broadcast payloads.
@@ -129,7 +113,7 @@ export class WsHandler {
     switch (msg.type) {
       case "attach": {
         if (!sdkBridge) throw new Error("SDK bridge not initialized");
-        if (!this.ctx.getSwitchboard().all || !this.ctx.getSwitchboard().sdkBridge)
+        if (!isSdkBridgeAllowed(this.ctx.getSwitchboard()))
           throw new Error("SDK bridge disabled by switchboard");
         const sessionName = msg.sessionName;
         if (!sessionName) throw new Error("sessionName required");
@@ -143,6 +127,10 @@ export class WsHandler {
       }
 
       case "prompt": {
+        // Same kill-switch as attach: a session attached before the bridge
+        // was switched off must not keep accepting prompts.
+        if (!isSdkBridgeAllowed(this.ctx.getSwitchboard()))
+          throw new Error("SDK bridge disabled by switchboard");
         if (!sdkBridge?.isAttached) throw new Error("No active SDK session");
         const prompt = typeof msg.prompt === "string" ? msg.prompt : "";
         if (!prompt) throw new Error("prompt required");
@@ -223,20 +211,11 @@ export class WsHandler {
         // `type` stripped, so every other key the client sent — sessionName,
         // or anything a caller invented — was handed to updateSwitchboard and
         // persisted alongside the real settings. Build the patch explicitly
-        // from the known fields instead.
-        const patch: Partial<Switchboard> = {};
-        for (const key of SWITCHBOARD_BOOLEAN_KEYS) {
-          if (typeof msg[key] === "boolean") patch[key] = msg[key] as boolean;
-        }
-        // `agents` is a Record<string, boolean>; accept only that shape.
-        const agents = msg.agents;
-        if (agents && typeof agents === "object" && !Array.isArray(agents)) {
-          const cleaned: Record<string, boolean> = {};
-          for (const [name, value] of Object.entries(agents)) {
-            if (typeof value === "boolean") cleaned[name] = value;
-          }
-          patch.agents = cleaned;
-        }
+        // from the known fields instead, via the whitelist shared with REST
+        // PUT /api/switchboard. WS has no per-message error contract, so the
+        // clean part is applied and rejected keys are dropped (REST refuses
+        // the whole patch with a 400 instead).
+        const { patch } = parseSwitchboardPatch(msg, ["type"]);
         this.ctx.updateSwitchboard(patch);
         ws.send(JSON.stringify(this.buildSwitchboardPayload()));
         break;

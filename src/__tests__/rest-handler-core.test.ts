@@ -337,6 +337,113 @@ describe("RestHandler — switchboard route", () => {
     const res = await h.handleDashboardApi("DELETE", "/api/switchboard", "");
     expect(res.status).toBe(405);
   });
+
+  // PUT used to hand the raw parsed body to updateSwitchboard (Object.assign),
+  // so a string "false" persisted as a truthy value, an array body spread its
+  // indices in as keys, and any invented key was saved as switchboard state.
+  // It now shares the WS switchboard_update whitelist and rejects the patch
+  // whole (nothing applied) when any key or value is outside it.
+  test("PUT rejects a string boolean and leaves the board unchanged", async () => {
+    const res = await h.handleDashboardApi("PUT", "/api/switchboard", JSON.stringify({ all: "false" }));
+    expect(res.status).toBe(400);
+    expect((res.data as { error: string }).error).toContain("all");
+    expect(fc.switchboard.all).toBe(true);
+    expect(fc.calls.updateSwitchboard ?? []).toHaveLength(0);
+  });
+
+  test("PUT rejects unknown keys without applying the valid ones", async () => {
+    const res = await h.handleDashboardApi(
+      "PUT", "/api/switchboard", JSON.stringify({ cognitive: true, bogus: 1 }),
+    );
+    expect(res.status).toBe(400);
+    expect((res.data as { error: string }).error).toContain("bogus");
+    expect(fc.switchboard.cognitive).toBe(false);
+    expect("bogus" in fc.switchboard).toBe(false);
+  });
+
+  test("PUT rejects non-object bodies (array, string, null)", async () => {
+    for (const body of ["[true, false]", '"all"', "null"]) {
+      const res = await h.handleDashboardApi("PUT", "/api/switchboard", body);
+      expect(res.status).toBe(400);
+    }
+    expect("0" in fc.switchboard).toBe(false);
+  });
+
+  test("PUT rejects a non-boolean agents map / agents array", async () => {
+    for (const agents of [["alpha"], { alpha: "off" }]) {
+      const res = await h.handleDashboardApi("PUT", "/api/switchboard", JSON.stringify({ agents }));
+      expect(res.status).toBe(400);
+    }
+    expect(fc.switchboard.agents).toEqual({});
+  });
+
+  test("PUT with __proto__ cannot reach the prototype", async () => {
+    const res = await h.handleDashboardApi(
+      "PUT", "/api/switchboard", '{"__proto__": {"polluted": true}, "agents": {"__proto__": true}}',
+    );
+    expect(res.status).toBe(400);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(fc.switchboard)).toBe(Object.prototype);
+  });
+
+  test("PUT accepts a valid agents patch", async () => {
+    const res = await h.handleDashboardApi(
+      "PUT", "/api/switchboard", JSON.stringify({ mindMeld: false, agents: { alpha: false } }),
+    );
+    expect(res.status).toBe(200);
+    expect(fc.switchboard.mindMeld).toBe(false);
+    expect(fc.switchboard.agents.alpha).toBe(false);
+  });
+});
+
+// The WS attach path refuses when the switchboard has the SDK bridge (or the
+// master switch) off; the REST attach/prompt routes did not check at all, so
+// the kill-switch only covered half the transports.
+describe("RestHandler — sdk routes honour the switchboard", () => {
+  /** Fake SdkBridge recording attach/send; attached so prompt is reachable. */
+  function fakeBridge(calls: string[]) {
+    return {
+      isAttached: true,
+      isBusy: false,
+      activeSessionName: "sleepy",
+      attach: async (n: string) => { calls.push(`attach:${n}`); return { ok: true }; },
+      send: async (p: string) => { calls.push(`send:${p}`); },
+    };
+  }
+
+  for (const off of [{ sdkBridge: false }, { all: false }]) {
+    const label = Object.keys(off)[0];
+    test(`POST /api/sdk/attach/<name> → 403 when ${label} is off`, async () => {
+      const calls: string[] = [];
+      const fc2 = await makeFakeContext({ switchboard: off, sdkBridge: fakeBridge(calls) });
+      const h2 = new RestHandler(fc2.ctx, fakeAgentEngine(), new ToolEngine(fc2.ctx));
+      const res = await h2.handleDashboardApi("POST", "/api/sdk/attach/sleepy", JSON.stringify({ cwd: fc2.dir }));
+      expect(res.status).toBe(403);
+      expect((res.data as { error: string }).error).toContain("switchboard");
+      expect(calls).toEqual([]);
+      fc2.cleanup();
+    });
+
+    test(`POST /api/sdk/prompt → 403 when ${label} is off`, async () => {
+      const calls: string[] = [];
+      const fc2 = await makeFakeContext({ switchboard: off, sdkBridge: fakeBridge(calls) });
+      const h2 = new RestHandler(fc2.ctx, fakeAgentEngine(), new ToolEngine(fc2.ctx));
+      const res = await h2.handleDashboardApi("POST", "/api/sdk/prompt", JSON.stringify({ prompt: "hi" }));
+      expect(res.status).toBe(403);
+      expect(calls).toEqual([]);
+      fc2.cleanup();
+    });
+  }
+
+  test("attach + prompt still work when the switchboard allows them", async () => {
+    const calls: string[] = [];
+    const fc2 = await makeFakeContext({ sdkBridge: fakeBridge(calls) });
+    const h2 = new RestHandler(fc2.ctx, fakeAgentEngine(), new ToolEngine(fc2.ctx));
+    expect((await h2.handleDashboardApi("POST", "/api/sdk/attach/sleepy", JSON.stringify({ cwd: fc2.dir }))).status).toBe(200);
+    expect((await h2.handleDashboardApi("POST", "/api/sdk/prompt", JSON.stringify({ prompt: "hi" }))).status).toBe(202);
+    expect(calls).toEqual(["attach:sleepy", "send:hi"]);
+    fc2.cleanup();
+  });
 });
 
 describe("RestHandler — config-overrides route", () => {

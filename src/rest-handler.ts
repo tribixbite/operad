@@ -24,8 +24,9 @@ import type { OrchestratorContext } from "./orchestrator-context.js";
 import type { AgentEngine } from "./agent-engine.js";
 import type { ToolEngine } from "./tool-engine.js";
 import type {
-  Switchboard, SessionConfig, ProjectTokenUsage, TokenRange, TokenRangeSummary,
+  SessionConfig, ProjectTokenUsage, TokenRange, TokenRangeSummary,
 } from "./types.js";
+import { parseSwitchboardPatch, isSdkBridgeAllowed } from "./types.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
 import { buildOodaContext } from "./cognitive.js";
@@ -302,6 +303,10 @@ export class RestHandler {
     } catch {
       return { status: 400, data: { error: "Malformed percent-encoding in path" } };
     }
+    // `name` is DECODED from here on — routes must not decode it again.
+    // TODO: segments[2+] are still decoded ad hoc per route; a malformed `%`
+    // there throws inside the try below and surfaces as a 500, not a 400.
+    // Decode all segments once here and hand routes the decoded array.
 
     try {
       let resp;
@@ -1086,10 +1091,16 @@ export class RestHandler {
         case "sdk": {
           const subCmd = name;
           const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          // The switchboard kill-switch (all / sdkBridge) gates starting work
+          // on the bridge, exactly as the WS attach path does. Detach,
+          // interrupt and status stay open so a disabled bridge can still be
+          // wound down and inspected.
+          const sdkDisabled = { status: 403, data: { error: "SDK bridge disabled by switchboard" } };
 
           if (subCmd === "attach") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
             if (!sdkBridge) return { status: 503, data: { error: "SDK bridge not initialized" } };
+            if (!isSdkBridgeAllowed(this.ctx.getSwitchboard())) return sdkDisabled;
             if (!arg) return { status: 400, data: { error: "Session name required" } };
             try {
               const parsed = body ? JSON.parse(body) as { sessionId?: string; cwd?: string } : {};
@@ -1110,6 +1121,7 @@ export class RestHandler {
 
           if (subCmd === "prompt") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+            if (!isSdkBridgeAllowed(this.ctx.getSwitchboard())) return sdkDisabled;
             if (!sdkBridge?.isAttached) return { status: 400, data: { error: "No active SDK session" } };
             try {
               const parsed = JSON.parse(body) as { prompt: string; effort?: string; thinking?: unknown };
@@ -1170,13 +1182,20 @@ export class RestHandler {
             return { status: 200, data: this.ctx.getSwitchboard() };
           }
           if (method === "PUT") {
+            let raw: unknown;
             try {
-              const patch = JSON.parse(body) as Partial<Switchboard>;
-              const updated = this.ctx.updateSwitchboard(patch);
-              return { status: 200, data: updated };
+              raw = JSON.parse(body);
             } catch (err) {
               return { status: 400, data: { error: String(err) } };
             }
+            // Same whitelist as the WS switchboard_update message. REST has a
+            // response to report through, so a patch with any bad key/value
+            // is refused whole rather than half-applied.
+            const { patch, rejected } = parseSwitchboardPatch(raw);
+            if (rejected.length > 0) {
+              return { status: 400, data: { error: `Invalid switchboard patch: ${rejected.join("; ")}` } };
+            }
+            return { status: 200, data: this.ctx.updateSwitchboard(patch) };
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }
@@ -1414,7 +1433,9 @@ export class RestHandler {
         }
 
         case "agent-chat": {
-          const agentName = name ? decodeURIComponent(name) : undefined;
+          // `name` is already decoded once by the dispatcher above; decoding
+          // again threw URIError for a literal `%` and remapped `%2541` → "A".
+          const agentName = name;
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
           if (agentName && method === "GET") {
@@ -1449,7 +1470,8 @@ export class RestHandler {
           // (== agent1/`name`), so every conversation query compared an agent
           // to itself. Requiring segments[2] also stops `pairs` being shadowed.
           if (name && segments[2] && method === "GET") {
-            const agent1 = decodeURIComponent(name);
+            // `name` (agent1) is already decoded; only segments[2] is raw.
+            const agent1 = name;
             const agent2 = decodeURIComponent(segments[2]);
             const limit = parseLimit(queryParams, 50);
             return { status: 200, data: memoryDb.getConversation(agent1, agent2, limit) };
@@ -1671,7 +1693,9 @@ export class RestHandler {
 
         case "memories": {
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
-          const projectPath = name ? decodeURIComponent(name) : undefined;
+          // Already decoded by the dispatcher — a second decode broke paths
+          // containing a literal `%`.
+          const projectPath = name;
 
           if (method === "GET" && projectPath) {
             if (segments[2] === "search") {
@@ -1729,6 +1753,14 @@ export class RestHandler {
           const toolExec = this.ctx.getToolExecutor();
           if (!toolExec) return { status: 503, data: { error: "Tool executor not initialized" } };
 
+          // /api/tools/stats MUST be routed before the per-tool lookup below:
+          // it is a single path segment, so it used to be looked up as a tool
+          // named "stats" and every call answered 404.
+          if (method === "GET" && name === "stats") {
+            if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
+            return { status: 200, data: memoryDb.getToolStats() };
+          }
+
           if (method === "GET") {
             if (name) {
               const tool = toolExec.getTool(name);
@@ -1762,10 +1794,6 @@ export class RestHandler {
                 paramCount: t.params.length,
               })),
             };
-          }
-
-          if (method === "GET" && name === "stats" && memoryDb) {
-            return { status: 200, data: memoryDb.getToolStats() };
           }
 
           return { status: 405, data: { error: "Method not allowed" } };
