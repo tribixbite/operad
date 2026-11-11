@@ -549,3 +549,84 @@ describe("WorkflowEngine — run rows are always closed out", () => {
     db.close();
   });
 });
+
+// -- parallel edges and upsert ids -------------------------------------------
+
+describe("WorkflowEngine — parallel edges between one pair", () => {
+  // a→b on:success plus a→b on:error are two distinct edges (dedupeEdges keeps
+  // both), so b's in-degree is 2 — but the successor walk iterated the
+  // de-duplicated *target* list and decremented once. b never reached 0, never
+  // ran, and the run still reported success.
+  test("success+error edges from the same source still reach the target", async () => {
+    const db = freshDb();
+    const order: string[] = [];
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, order));
+    engine.upsert("pair", {
+      nodes: [
+        { id: "a", type: "task", command: "x" },
+        { id: "b", type: "task", command: "x", join: "any" },
+      ],
+      edges: [{ from: "a", to: "b", on: "success" }, { from: "a", to: "b", on: "error" }],
+    });
+    const result = await engine.run("pair");
+    expect(order).toEqual(["a", "b"]);
+    expect(result.nodes.b?.status).toBe("success");
+    expect(result.status).toBe("success");
+    db.close();
+  });
+
+  test("join=all over success+error parallel edges skips the target, not drops it", async () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, []));
+    engine.upsert("pair-all", {
+      nodes: [
+        { id: "a", type: "task", command: "x" },
+        { id: "b", type: "task", command: "x" },
+      ],
+      edges: [{ from: "a", to: "b", on: "success" }, { from: "a", to: "b", on: "error" }],
+    });
+    const result = await engine.run("pair-all");
+    // Exactly one of the two edges can fire, so join=all must skip b.
+    expect(result.nodes.b?.status).toBe("skipped");
+    db.close();
+  });
+
+  // Defence in depth: whatever leaves a node unreached (a spec written to the
+  // DB without going through validateSpec, a future scheduling bug) must not
+  // be reported as a successful run.
+  test("a node that never got a result fails the run", async () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, []));
+    // A cycle b⇄c bypassing validateSpec: neither ever reaches in-degree 0.
+    const spec: WorkflowSpec = {
+      nodes: [
+        { id: "a", type: "noop" },
+        { id: "b", type: "noop" },
+        { id: "c", type: "noop" },
+      ],
+      edges: [{ from: "a", to: "b" }, { from: "b", to: "c" }, { from: "c", to: "b" }],
+    };
+    db.prepare(`INSERT INTO agent_workflows (name, spec_json) VALUES (?, ?)`)
+      .run("raw-cycle", JSON.stringify(spec));
+    const result = await engine.run("raw-cycle");
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("b");
+    expect(result.message).toContain("c");
+    db.close();
+  });
+});
+
+describe("WorkflowEngine.upsert — id on the update branch", () => {
+  // On ON CONFLICT … DO UPDATE SQLite still reports the connection's last
+  // INSERT rowid — some other row — so the `> 0` shortcut returned it.
+  test("re-upserting an existing workflow returns its own id", () => {
+    const db = freshDb();
+    const engine = new WorkflowEngine(makeMemDb(db), log, makeFakeRunner({}, []));
+    const one = engine.upsert("one", { nodes: [{ id: "x", type: "noop" }], edges: [] });
+    const two = engine.upsert("two", { nodes: [{ id: "x", type: "noop" }], edges: [] });
+    expect(two).not.toBe(one);
+    const oneAgain = engine.upsert("one", { nodes: [{ id: "y", type: "noop" }], edges: [] });
+    expect(oneAgain).toBe(one);
+    db.close();
+  });
+});

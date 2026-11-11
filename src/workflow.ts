@@ -397,6 +397,19 @@ function reverseEdges(spec: WorkflowSpec): Map<string, WorkflowEdge[]> {
 }
 
 /**
+ * Forward edges (source id → list of outgoing edges), the mirror of
+ * reverseEdges over the same de-duplicated set. Kahn's decrement must walk
+ * this, not adjacencyList: the latter collapses parallel edges to one target
+ * entry (right for cycle detection, wrong for in-degree accounting).
+ */
+function outgoingEdges(spec: WorkflowSpec): Map<string, WorkflowEdge[]> {
+  const out = new Map<string, WorkflowEdge[]>();
+  for (const n of spec.nodes) out.set(n.id, []);
+  for (const e of dedupeEdges(spec.edges)) out.get(e.from)?.push(e);
+  return out;
+}
+
+/**
  * Decide whether an incoming edge "fires" based on the source's terminal
  * state. Skipped sources never fire any downstream edge — this matches
  * Operit's `isSkippedState(sourceState)` short-circuit.
@@ -444,12 +457,13 @@ export class WorkflowEngine {
       `INSERT INTO agent_workflows (name, spec_json, created_by) VALUES (?, ?, ?)
        ON CONFLICT(name) DO UPDATE SET spec_json = excluded.spec_json, enabled = 1`,
     ).run(name, json, createdBy);
-    // SQLite returns 0 for lastInsertRowid on UPDATE; look up the row instead.
-    if (result.lastInsertRowid && Number(result.lastInsertRowid) > 0) {
-      return Number(result.lastInsertRowid);
-    }
-    const row = db.prepare(`SELECT id FROM agent_workflows WHERE name = ?`).get(name) as { id: number } | undefined;
-    return row?.id ?? -1;
+    // On the ON CONFLICT … DO UPDATE branch SQLite reports the connection's
+    // last *insert* rowid — another workflow's, or a run row's — not 0, so a
+    // `lastInsertRowid > 0` shortcut returned a foreign id. Always read the
+    // real id back (same fix as ScheduleEngine.upsert). bun:sqlite's .get()
+    // yields null on no row.
+    const row = db.prepare(`SELECT id FROM agent_workflows WHERE name = ?`).get(name) as { id: number } | null;
+    return row ? row.id : Number(result.lastInsertRowid);
   }
 
   /** Hard-delete a workflow and all its run history (CASCADE). */
@@ -574,7 +588,7 @@ export class WorkflowEngine {
     const runId = Number(runIns.lastInsertRowid);
     this.log.info(`Workflow "${name}" run ${runId} starting (trigger=${triggeredBy})`);
 
-    const adj = adjacencyList(wf.spec);
+    const out = outgoingEdges(wf.spec);
     const rev = reverseEdges(wf.spec);
     const inDegree = new Map<string, number>();
     for (const n of wf.spec.nodes) inDegree.set(n.id, rev.get(n.id)?.length ?? 0);
@@ -669,21 +683,29 @@ export class WorkflowEngine {
       }
       results.set(currentId, nodeResult);
 
-      // Decrement successors' in-degree; enqueue when they hit 0.
-      for (const next of adj.get(currentId) ?? []) {
-        inDegree.set(next, (inDegree.get(next) ?? 0) - 1);
-        if ((inDegree.get(next) ?? 0) === 0) queue.push(next);
+      // Decrement once per outgoing EDGE, not per distinct target: in-degree
+      // counts edges, and a→b on:success plus a→b on:error are two of them.
+      // Walking the de-duplicated target list decremented b once, so it never
+      // reached 0 and silently never ran.
+      for (const edge of out.get(currentId) ?? []) {
+        const left = (inDegree.get(edge.to) ?? 0) - 1;
+        inDegree.set(edge.to, left);
+        if (left === 0) queue.push(edge.to);
       }
     }
 
     const finishedAt = Math.floor(Date.now() / 1000);
-    const anyFailed = [...results.values()].some((r) => r.status === "failed");
+    const failedIds = [...results.entries()].filter(([, r]) => r.status === "failed").map(([id]) => id);
+    // A node with no result after a non-cancelled run was never reached —
+    // Kahn's queue drained without its in-degree hitting 0. Reporting that
+    // run as `success` hid the dropped work; treat it as a failure.
+    const unreached = cancelled ? [] : wf.spec.nodes.map((n) => n.id).filter((id) => !results.has(id));
+    const anyFailed = failedIds.length > 0 || unreached.length > 0;
     const status: WorkflowRunResult["status"] = cancelled ? "cancelled" : anyFailed ? "failed" : "success";
-    const message = cancelled
-      ? "cancelled"
-      : anyFailed
-        ? `failed: ${[...results.entries()].filter(([, r]) => r.status === "failed").map(([id]) => id).join(", ")}`
-        : "ok";
+    const failureParts: string[] = [];
+    if (failedIds.length > 0) failureParts.push(`failed: ${failedIds.join(", ")}`);
+    if (unreached.length > 0) failureParts.push(`never reached: ${unreached.join(", ")}`);
+    const message = cancelled ? "cancelled" : anyFailed ? failureParts.join("; ") : "ok";
 
     db.prepare(
       `UPDATE agent_workflow_runs SET finished_at = ?, status = ?, message = ? WHERE id = ?`,
