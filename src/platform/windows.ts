@@ -369,11 +369,6 @@ export class WindowsPlatform implements Platform {
     return null;
   }
 
-  /** Apply Android phantom fix — no-op on Windows */
-  applyPhantomFix(_adbBin: string, _serialArgs: string[]): void {
-    // Android-specific; not applicable on Windows
-  }
-
   /**
    * Resolve local IP address via `ipconfig`.
    * Returns the first non-loopback IPv4 address found, or null.

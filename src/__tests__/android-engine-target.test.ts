@@ -84,9 +84,15 @@ interface Harness {
   notes: string[];
   warnings: string[];
   adbFixed: boolean[];
+  /** Connect scripts fixAdb ran (via the injected `connect` dep). */
+  connects: string[];
 }
 
-function makeEngine(dev: FakeDevice, opts: { connectScript?: string; phantomFix?: boolean } = {}): Harness {
+function makeEngine(
+  dev: FakeDevice,
+  opts: { connectScript?: string; phantomFix?: boolean; connectStatus?: number } = {},
+): Harness {
+  const connects: string[] = [];
   const calls: Call[] = [];
   const notes: string[] = [];
   const warnings: string[] = [];
@@ -111,8 +117,13 @@ function makeEngine(dev: FakeDevice, opts: { connectScript?: string; phantomFix?
     platform: makePlatform(notes),
     readLocalBootId: () => LOCAL_BOOT,
     adbBin: ADB,
+    // Never spawns: records the script and reports the scripted exit status.
+    connect: async (script: string) => {
+      connects.push(script);
+      return { status: opts.connectStatus ?? 0, stderr: "" };
+    },
   };
-  return { engine: new AndroidEngine(ctx, deps), calls, notes, warnings, adbFixed };
+  return { engine: new AndroidEngine(ctx, deps), calls, notes, warnings, adbFixed, connects };
 }
 
 /** adb invocations that ran a device shell command other than identity probes. */
@@ -257,7 +268,67 @@ describe("fixAdb — empty connect_script", () => {
     const ok = await h.engine.fixAdb();
     expect(ok).toBe(false);
     expect(h.adbFixed).toEqual([false]);
+    expect(h.connects).toEqual([]);
     // The failure must name the real cause, not a phantom script failure.
-    expect(h.warnings.join("\n")).toMatch(/no ADB device/i);
+    expect(h.warnings.join("\n")).toMatch(/no verified local ADB device/i);
+  });
+
+  test("with only an external device online it is not marked fixed", async () => {
+    const h = makeEngine({
+      devices: "List of devices attached\n192.168.1.50:5555\tdevice\n",
+      bootIds: { "192.168.1.50:5555": OTHER_BOOT },
+    });
+    engines.push(h.engine);
+    expect(await h.engine.fixAdb()).toBe(false);
+    expect(h.adbFixed).toEqual([false]);
+    expect(shellCommands(h.calls)).toEqual([]);
+  });
+});
+
+describe("fixAdb — non-empty connect_script", () => {
+  const SCRIPT = "/fake/adb-connect.sh";
+
+  test("script exits 0 but no device is online → not fixed, nothing attempted", async () => {
+    const h = makeEngine({ devices: "List of devices attached\n", bootIds: {} }, { connectScript: SCRIPT });
+    engines.push(h.engine);
+    expect(await h.engine.fixAdb()).toBe(false);
+    expect(h.connects).toEqual([SCRIPT]);
+    expect(h.adbFixed).toEqual([false]);
+    expect(shellCommands(h.calls)).toEqual([]);
+    expect(h.warnings.join("\n")).toMatch(/no verified local ADB device/i);
+  });
+
+  test("script exits 0 but only an external device is online → not fixed", async () => {
+    const h = makeEngine({
+      devices: "List of devices attached\n192.168.1.50:5555\tdevice\n",
+      bootIds: { "192.168.1.50:5555": OTHER_BOOT },
+    }, { connectScript: SCRIPT });
+    engines.push(h.engine);
+    expect(await h.engine.fixAdb()).toBe(false);
+    expect(h.adbFixed).toEqual([false]);
+    expect(shellCommands(h.calls)).toEqual([]);
+  });
+
+  test("script exits 0 and the local device is online → fixed and protections applied", async () => {
+    const h = makeEngine({
+      devices: "List of devices attached\n127.0.0.1:5555\tdevice\n",
+      bootIds: {},
+    }, { connectScript: SCRIPT });
+    engines.push(h.engine);
+    expect(await h.engine.fixAdb()).toBe(true);
+    expect(h.adbFixed).toEqual([true]);
+    expect(shellCommands(h.calls).length).toBeGreaterThan(10);
+  });
+
+  test("script exits non-zero → connection failure, no device probing needed", async () => {
+    const h = makeEngine({
+      devices: "List of devices attached\n127.0.0.1:5555\tdevice\n",
+      bootIds: {},
+    }, { connectScript: SCRIPT, connectStatus: 1 });
+    engines.push(h.engine);
+    expect(await h.engine.fixAdb()).toBe(false);
+    expect(h.adbFixed).toEqual([false]);
+    expect(h.warnings.join("\n")).toMatch(/ADB connection failed/);
+    expect(shellCommands(h.calls)).toEqual([]);
   });
 });

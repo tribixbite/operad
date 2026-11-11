@@ -172,8 +172,8 @@ export interface Platform {
   /** Resolve ADB binary path, or null if unavailable */
   resolveAdbPath(): string | null;
 
-  /** Apply Android phantom process killer fix + Doze whitelist */
-  applyPhantomFix(adbBin: string, serialArgs: string[]): void;
+  // Process protections (phantom-process fix, Doze whitelist, …) live in
+  // AndroidEngine.applyPhantomFix, which verifies the adb target first.
 
   /** Resolve local IP address (for ADB serial detection) */
   resolveLocalIp(): string | null;
