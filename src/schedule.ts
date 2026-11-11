@@ -114,9 +114,20 @@ function parseCronField(spec: string, min: number, max: number): Set<number> | n
  * Termux does not read Android's zone setting and falls back to UTC unless
  * `TZ` is exported.
  *
- * TODO: DST edges follow the naive wall-clock walk — a time inside a
- * spring-forward gap is skipped that day, and one inside the repeated
- * fall-back hour can fire twice. Vixie cron special-cases both.
+ * DST transitions follow Vixie cron / cronie. For FIXED-TIME jobs (neither
+ * the minute nor the hour field starts with `*`, e.g. `30 2 * * *`):
+ *  - Spring-forward: a wall time skipped by the gap (02:30 when 02:00 jumps
+ *    to 03:00) fires ONCE at the first valid minute after the gap (03:00).
+ *    Chosen over skipping because a daily or weekly job would otherwise
+ *    silently miss a whole run — the nightly backup does not happen that
+ *    night at all — and catching up is what crontab users already get.
+ *  - Fall-back: a wall time that occurs twice (01:30 when 02:00 falls back to
+ *    01:00) fires ONCE, on its first occurrence; the repeat is skipped.
+ * WILDCARD jobs (`*\/15 * * * *`, `*\/30 2 * * *` — backslash only so this
+ * comment does not close) follow elapsed real time:
+ * they keep their cadence through the repeated hour, and minutes that do not
+ * exist in a spring-forward gap are simply skipped — catching them up would
+ * fire a burst of collapsed runs.
  *
  * Exported for unit testing — use ScheduleEngine for production scheduling.
  */
@@ -146,21 +157,8 @@ export function nextCronTime(expr: string, after: Date): Date | null {
   // Sunday as 7 must also match getDay()'s 0.
   if (dows.has(7)) dows.add(0);
 
-  // Brute-force search: iterate minute by minute from `after`, cap at 366 days.
-  // Stepping absolute time by 60s and reading local fields keeps the walk
-  // monotonic across DST changes. Every zone offset in use is a whole number
-  // of minutes, so zeroing local seconds is a minute boundary in UTC too.
-  const maxIter = 366 * 24 * 60;
-  const candidate = new Date(after.getTime() + 60_000); // start 1 min after `after`
-  candidate.setSeconds(0, 0);
-
-  for (let i = 0; i < maxIter; i++) {
-    const m = candidate.getMinutes();
-    const h = candidate.getHours();
-    const dom = candidate.getDate();
-    const mon = candidate.getMonth() + 1;
-    const dow = candidate.getDay();
-
+  /** Does a wall-clock time (minute, hour, day, month, weekday) match? */
+  const matches = (m: number, h: number, dom: number, mon: number, dow: number): boolean => {
     const dayMatches =
       domRestricted && dowRestricted
         ? doms.has(dom) || dows.has(dow)   // both restricted → union
@@ -169,12 +167,57 @@ export function nextCronTime(expr: string, after: Date): Date | null {
           : dowRestricted
             ? dows.has(dow)                // only dow restricted → dom ignored
             : true;                        // neither restricted → every day
+    return months.has(mon) && dayMatches && hours.has(h) && minutes.has(m);
+  };
+  const matchesLocal = (d: Date): boolean =>
+    matches(d.getMinutes(), d.getHours(), d.getDate(), d.getMonth() + 1, d.getDay());
 
-    if (months.has(mon) && dayMatches && hours.has(h) && minutes.has(m)) {
-      return candidate;
+  // DST handling applies to FIXED-TIME jobs only — neither the minute nor the
+  // hour field starts with `*` — exactly as Vixie cron / cronie define them.
+  // Wildcard jobs (`*/15 * * * *`, `*/30 2 * * *`) follow elapsed real time
+  // and get no catch-up or suppression. See nextCronTime's doc comment.
+  const fixedTime = !minSpec.startsWith("*") && !hourSpec.startsWith("*");
+
+  // Brute-force search: step absolute time minute by minute from `after`,
+  // capped at 366 days, reading local fields at each step. Every zone offset
+  // in use is a whole number of minutes, so flooring the epoch to a minute
+  // is a local minute boundary too. (Local setters like setSeconds() must
+  // NOT be used: inside a repeated fall-back hour they re-resolve the
+  // ambiguous wall time to its FIRST occurrence and step the walk backwards.)
+  const MINUTE = 60_000;
+  const maxIter = 366 * 24 * 60;
+  let t = Math.floor(after.getTime() / MINUTE) * MINUTE + MINUTE; // first whole minute after `after`
+
+  for (let i = 0; i < maxIter; i++, t += MINUTE) {
+    const candidate = new Date(t);
+    const offset = candidate.getTimezoneOffset(); // minutes west of UTC; larger = earlier clock
+
+    if (fixedTime) {
+      const prevOffset = new Date(t - MINUTE).getTimezoneOffset();
+      if (offset < prevOffset) {
+        // Spring-forward: the wall clock jumped from (t - 1 min) straight to
+        // t, skipping `prevOffset - offset` minutes of wall time. A fixed
+        // time inside that gap fires once, now — the first valid minute
+        // after the gap.
+        const gapStartWall = t - offset * MINUTE - (prevOffset - offset) * MINUTE;
+        for (let w = gapStartWall; w < t - offset * MINUTE; w += MINUTE) {
+          const g = new Date(w); // wall time encoded as UTC
+          if (matches(g.getUTCMinutes(), g.getUTCHours(), g.getUTCDate(), g.getUTCMonth() + 1, g.getUTCDay())) {
+            return candidate;
+          }
+        }
+      }
+      // Fall-back: this wall time already occurred earlier under the
+      // previous (pre-transition) offset. A fixed time fires only on its
+      // first occurrence, so the repeat is skipped.
+      const dayEarlierOffset = new Date(t - 24 * 60 * MINUTE).getTimezoneOffset();
+      if (dayEarlierOffset < offset) {
+        const firstOccurrence = t - (offset - dayEarlierOffset) * MINUTE;
+        if (new Date(firstOccurrence).getTimezoneOffset() === dayEarlierOffset) continue;
+      }
     }
 
-    candidate.setTime(candidate.getTime() + 60_000);
+    if (matchesLocal(candidate)) return candidate;
   }
 
   return null; // no match within a year

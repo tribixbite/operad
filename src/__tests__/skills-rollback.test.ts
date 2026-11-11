@@ -287,3 +287,99 @@ describe("install rollback — commit: versions", () => {
     env.sql.close();
   }, 60_000);
 });
+
+/** Make the post-commit "install" event write throw — a failure AFTER SQLite COMMIT. */
+function failInstallEvent(mgr: SkillManager): void {
+  const store = mgr.store as unknown as { appendEvent: (id: string, type: string, detail: unknown) => void };
+  const real = store.appendEvent.bind(store);
+  store.appendEvent = (id, type, detail) => {
+    if (type === "install") throw new Error("injected event failure");
+    real(id, type, detail);
+  };
+}
+
+describe("install rollback — failure after the SQLite commit", () => {
+  // The sqlite step's rollback deleted the active-version pointer outright,
+  // so an upgrade failing after COMMIT left the skill with NO active version,
+  // and the committed generation stayed live.
+  test("a failed upgrade restores the previous active version and tool generation", async () => {
+    const repo = newRepo();
+    commitVersion(repo, manifest("post", "post_tool", wf("post-wf", "echo v1")), "v0.1.0");
+    const env = buildEnv();
+    const v1 = await env.mgr.install("git+url", repo, "v0.1.0");
+    const genBefore = env.te.getCurrentGeneration();
+
+    commitVersion(repo, manifest("post", "post_tool", wf("post-wf", "echo v2")), "v0.2.0");
+    failInstallEvent(env.mgr);
+    await expect(env.mgr.install("git+url", repo, "v0.2.0")).rejects.toThrow(/injected event failure/);
+
+    const active = env.mgr.store.getActive("git+url", repo);
+    expect(active?.id).toBe(v1.skill.id);
+    expect(active?.source.version).toBe("v0.1.0");
+    expect(env.mgr.get(v1.skill.id)).not.toBeNull();
+    const rows = env.sql.prepare(`SELECT id FROM skills`).all() as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual([v1.skill.id]);
+    expect(env.te.getCurrentGeneration()).toBe(genBefore);
+    expect(env.te.hasTool("post_tool")).toBe(true);
+    expect(JSON.stringify(env.we.get("post-wf")!.spec)).toContain("echo v1");
+    env.sql.close();
+  }, 60_000);
+
+  test("a failed same-version reinstall keeps the skill row and active pointer", async () => {
+    const repo = newRepo();
+    commitVersion(repo, manifest("post2", "post2_tool", ""), "v0.1.0");
+    const env = buildEnv();
+    const first = await env.mgr.install("git+url", repo, "v0.1.0");
+
+    failInstallEvent(env.mgr);
+    await expect(env.mgr.install("git+url", repo, "v0.1.0")).rejects.toThrow(/injected event failure/);
+
+    expect(env.mgr.store.getActive("git+url", repo)?.id).toBe(first.skill.id);
+    expect(env.mgr.get(first.skill.id)).not.toBeNull();
+    env.sql.close();
+  }, 60_000);
+
+  test("a failed fresh install still leaves no row and no active pointer", async () => {
+    const repo = newRepo();
+    commitVersion(repo, manifest("post3", "post3_tool", ""), "v0.1.0");
+    const env = buildEnv();
+    const genBefore = env.te.getCurrentGeneration();
+    failInstallEvent(env.mgr);
+    await expect(env.mgr.install("git+url", repo, "v0.1.0")).rejects.toThrow(/injected event failure/);
+    expect(env.mgr.store.getActive("git+url", repo)).toBeNull();
+    expect((env.sql.prepare(`SELECT count(*) AS n FROM skills`).get() as { n: number }).n).toBe(0);
+    expect(env.te.getCurrentGeneration()).toBe(genBefore);
+    expect(env.te.hasTool("post3_tool")).toBe(false);
+    env.sql.close();
+  }, 60_000);
+});
+
+describe("install rollback — MCP entries taken over with force_take_ownership", () => {
+  // The take-over overwrote the user's own ~/.claude.json entry; rollback
+  // then removed it entirely instead of putting the user's entry back.
+  test("the user's original entry is restored and a new entry is removed", async () => {
+    const cjPath = join(tmpHome!, ".claude.json");
+    const userEntry = { command: "user-own-server", args: ["--flag"] };
+    writeFileSync(cjPath, JSON.stringify({ mcpServers: { user_mcp: userEntry }, unrelated: 1 }, null, 2));
+
+    const repo = newRepo();
+    commitVersion(
+      repo,
+      manifest("mcpskill", "mcp_tool", "") +
+        `\n[mcp.user_mcp]\ncommand = "skill-server"\n\n[mcp.fresh_mcp]\ncommand = "fresh-server"\n`,
+      "v0.1.0",
+    );
+    const env = buildEnv();
+    failCommit(env.mgr);
+    await expect(env.mgr.install("git+url", repo, "v0.1.0", { force_take_ownership: true }))
+      .rejects.toThrow(/injected commit failure/);
+
+    const after = JSON.parse(readFileSync(cjPath, "utf8"));
+    expect(after.mcpServers.user_mcp).toEqual(userEntry);
+    expect(after.mcpServers.fresh_mcp).toBeUndefined();
+    expect(after.operad_managed?.user_mcp).toBeUndefined();
+    expect(after.operad_managed?.fresh_mcp).toBeUndefined();
+    expect(after.unrelated).toBe(1);
+    env.sql.close();
+  }, 60_000);
+});
