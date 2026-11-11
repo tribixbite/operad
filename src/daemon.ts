@@ -294,7 +294,14 @@ export class Daemon {
       this.config.orchestrator.memory_emergency_mb,
     );
     this.activity = new ActivityDetector(this.log);
-    this.battery = new BatteryMonitor(this.log, this.config.battery.low_threshold_pct);
+    // Seed from the persisted snapshot so radios disabled for low battery by
+    // the previous daemon are still re-enabled after a restart.
+    this.battery = new BatteryMonitor(
+      this.log,
+      this.config.battery.low_threshold_pct,
+      undefined,
+      this.state.getState().battery?.radios_disabled === true,
+    );
 
     // Load dynamic session registry
     const registryPath = join(dirname(this.config.orchestrator.state_file), "registry.json");

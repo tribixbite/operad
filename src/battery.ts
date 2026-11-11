@@ -8,6 +8,10 @@
 
 import type { Logger } from "./log.js";
 import { detectPlatform } from "./platform/platform.js";
+import type { Platform } from "./platform/platform.js";
+
+/** The platform calls BatteryMonitor makes — injectable for unit tests. */
+export type BatteryPlatform = Pick<Platform, "getBatteryStatus" | "disableRadios" | "enableRadios" | "sendBatteryAlert">;
 
 /** Battery status snapshot */
 export interface BatteryStatus {
@@ -70,9 +74,28 @@ export class BatteryMonitor {
     appliedAt: 0,
   };
 
-  constructor(log: Logger, lowThresholdPct = 10) {
+  private platform: BatteryPlatform;
+
+  /**
+   * @param restoredRadiosDisabled - `battery.radios_disabled` from the state
+   *   file written by the previous daemon. The action state used to live only
+   *   in memory, so a restart while radios were off for low battery forgot it
+   *   and the "clear" branch could never fire — radios stayed off for good.
+   *   Seeding it lets the normal charging + hysteresis rule re-enable them.
+   */
+  constructor(
+    log: Logger,
+    lowThresholdPct = 10,
+    platform: BatteryPlatform = detectPlatform(),
+    restoredRadiosDisabled = false,
+  ) {
     this.log = log;
     this.lowThresholdPct = lowThresholdPct;
+    this.platform = platform;
+    if (restoredRadiosDisabled) {
+      this.actionState.actionsApplied = true;
+      this.log.info("Radios were disabled for low battery before restart — will re-enable once charging and recovered");
+    }
   }
 
   /** Update threshold (e.g. from config reload) */
@@ -82,8 +105,7 @@ export class BatteryMonitor {
 
   /** Read current battery status via platform abstraction */
   getBatteryStatus(): BatteryStatus | null {
-    const plat = detectPlatform();
-    const info = plat.getBatteryStatus();
+    const info = this.platform.getBatteryStatus();
     if (!info) return null;
 
     return {
@@ -106,7 +128,7 @@ export class BatteryMonitor {
     const status = this.getBatteryStatus();
     if (!status) return null;
 
-    const plat = detectPlatform();
+    const plat = this.platform;
     const action = batteryActionDecision(status, this.lowThresholdPct, this.actionState.actionsApplied);
 
     if (action === "trigger") {

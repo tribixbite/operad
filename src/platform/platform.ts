@@ -55,7 +55,9 @@ export interface Platform {
 
   /**
    * Build process tree: maps ppid → children with CPU ticks.
-   * Used by ActivityDetector for tree-wide CPU tracking.
+   * Used by ActivityDetector for tree-wide CPU tracking. On procfs `ticks`
+   * is utime+stime+cutime+cstime (fields 14-17), so time of reaped
+   * descendants stays in the tree sum.
    */
   buildProcessTree(): Map<number, { pid: number; ticks: number }[]>;
 

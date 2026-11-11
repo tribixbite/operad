@@ -262,9 +262,16 @@ export class StateManager {
     this.state.memory = memory;
   }
 
-  /** Update battery snapshot (transient, not persisted) */
+  /**
+   * Update battery snapshot. The readings are transient, but
+   * `radios_disabled` is persisted whenever it flips: it records an action
+   * applied to the device (radios turned off) that a restarted daemon must
+   * know about to undo — see BatteryMonitor's restoredRadiosDisabled.
+   */
   updateBattery(battery: BatterySnapshot | null): void {
+    const wasDisabled = this.state.battery?.radios_disabled === true;
     this.state.battery = battery;
+    if ((battery?.radios_disabled === true) !== wasDisabled) this.persist();
   }
 
   /** Mark a session as suspended (SIGSTOP'd) */

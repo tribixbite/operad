@@ -434,7 +434,10 @@ export interface TmxState {
   sessions: Record<string, SessionState>;
   /** Latest system memory snapshot (populated by daemon, not persisted) */
   memory?: SystemMemorySnapshot | null;
-  /** Latest battery snapshot (populated by daemon, not persisted) */
+  /**
+   * Latest battery snapshot (populated by daemon). Written to disk when
+   * `radios_disabled` changes, so a restarted daemon can re-enable radios.
+   */
   battery?: BatterySnapshot | null;
   /** Switchboard — subsystem enable/disable controls */
   switchboard?: Switchboard;

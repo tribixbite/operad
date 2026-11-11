@@ -58,6 +58,43 @@ function parsePsTime(timeStr: string): number {
   return NaN;
 }
 
+/**
+ * Pure parser: available memory in kB from `vm_stat` output
+ * (free + inactive + speculative + purgeable pages × page size).
+ *
+ * Returns **null** when vm_stat produced nothing or no "Pages free" line,
+ * matching parseMeminfo. This used to default to 0, and `available_kb: 0` is
+ * not "unknown" but "no memory left": a failed vm_stat classified as
+ * emergency pressure, SIGSTOPping idle sessions with no way to recover.
+ */
+export function parseVmStatAvailableKb(vmStatOutput: string | null): number | null {
+  if (!vmStatOutput) return null;
+
+  // First line: "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+  const pageSizeMatch = vmStatOutput.match(/page size of (\d+) bytes/);
+  const pageSize = pageSizeMatch ? parseInt(pageSizeMatch[1], 10) : 16384;
+
+  // Parse "Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"
+  const pageFields: Record<string, number> = {};
+  for (const line of vmStatOutput.split("\n")) {
+    const m = line.match(/^(.+?):\s+(\d+)/);
+    if (m) {
+      pageFields[m[1].trim()] = parseInt(m[2], 10);
+    }
+  }
+
+  // "Pages free" is the load-bearing field; without it the reading is unknown.
+  const freePages = pageFields["Pages free"];
+  if (freePages === undefined) return null;
+  // The others legitimately read 0 or are absent on some macOS versions.
+  const inactivePages = pageFields["Pages inactive"] ?? 0;
+  const speculativePages = pageFields["Pages speculative"] ?? 0;
+  const purgeablePages = pageFields["Pages purgeable"] ?? 0;
+
+  const availablePages = freePages + inactivePages + speculativePages + purgeablePages;
+  return Math.round((availablePages * pageSize) / 1024);
+}
+
 export class DarwinPlatform implements Platform {
   readonly id = "darwin" as const;
   readonly hasAdb = false;
@@ -81,31 +118,9 @@ export class DarwinPlatform implements Platform {
     const total_kb = Math.round(totalBytes / 1024);
 
     // vm_stat for page-level memory breakdown
-    const vmStatOutput = execQuiet("vm_stat", []);
-    let available_kb = 0;
-
-    if (vmStatOutput) {
-      // First line: "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
-      const pageSizeMatch = vmStatOutput.match(/page size of (\d+) bytes/);
-      const pageSize = pageSizeMatch ? parseInt(pageSizeMatch[1], 10) : 16384;
-
-      // Parse "Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:"
-      const pageFields: Record<string, number> = {};
-      for (const line of vmStatOutput.split("\n")) {
-        const m = line.match(/^(.+?):\s+(\d+)/);
-        if (m) {
-          pageFields[m[1].trim()] = parseInt(m[2], 10);
-        }
-      }
-
-      const freePages = pageFields["Pages free"] ?? 0;
-      const inactivePages = pageFields["Pages inactive"] ?? 0;
-      const speculativePages = pageFields["Pages speculative"] ?? 0;
-      const purgeablePages = pageFields["Pages purgeable"] ?? 0;
-
-      const availablePages = freePages + inactivePages + speculativePages + purgeablePages;
-      available_kb = Math.round((availablePages * pageSize) / 1024);
-    }
+    const available_kb = parseVmStatAvailableKb(execQuiet("vm_stat", []));
+    // Unknown, not zero — callers treat null as "hold at normal pressure".
+    if (available_kb === null) return null;
 
     // Swap from sysctl — format: "total = 2048.00M  used = 512.00M  free = 1536.00M  ..."
     let swap_total_kb = 0;

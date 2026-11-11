@@ -125,12 +125,72 @@ describe("classifyActivity — exact threshold boundary sequence", () => {
 });
 
 describe("classifyActivity — negative delta", () => {
-  test("negative delta treated same as zero-delta (increments idle streak)", () => {
-    // Ticks shouldn't decrease in practice, but the classifier handles it gracefully.
+  // A tree total drops when a descendant exits and its time is not folded
+  // into a live ancestor (unreaped, reparented to init, or on platforms with
+  // no cutime). Something exited — that is evidence of work, never of idling.
+  test("negative delta never advances the idle streak", () => {
     const prev = { ticks: 500, idle_streak: 0 };
     const { state, newStreak } = classifyActivity(499, prev); // delta = -1
-    expect(newStreak).toBe(1);
-    expect(state).toBe("active"); // streak 1 < threshold
+    expect(newStreak).toBe(0);
+    expect(state).toBe("active");
+  });
+
+  test("negative delta one poll before the threshold does not tip the session into idle", () => {
+    const prev = { ticks: 500, idle_streak: IDLE_THRESHOLD - 1 };
+    const { state, newStreak } = classifyActivity(400, prev);
+    expect(state).toBe("active");
+    expect(newStreak).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ActivityDetector.classifyTree — exited children's CPU time
+// ---------------------------------------------------------------------------
+
+describe("ActivityDetector.classifyTree — a build that spawns short-lived children", () => {
+  /**
+   * Scripted procfs: a pane shell (pid 10, parent 1) running a build that
+   * starts a fresh compiler child each poll. Each compiler exits and is
+   * reaped before the next poll, so its time moves into the shell's cutime.
+   * `ticks` in the tree carries utime+stime+cutime+cstime (what procfs
+   * reports); readProcessCpuTicks is the root's own utime+stime only.
+   */
+  function scriptedPlatform() {
+    let poll = 0;
+    const ROOT_OWN = 100; // shell's own utime+stime never changes
+    const CHILD = 40;     // each compiler burns 40 ticks then is reaped
+    return {
+      next() { poll++; },
+      platform: {
+        readProcessCpuTicks: (pid: number) => (pid === 10 ? ROOT_OWN : null),
+        buildProcessTree: () => {
+          const reapedSoFar = poll * CHILD; // previous compilers, now in cutime
+          return new Map([
+            [1, [{ pid: 10, ticks: ROOT_OWN + reapedSoFar }]],
+            // The live compiler of this poll has only just started.
+            [10, [{ pid: 100 + poll, ticks: 5 }]],
+          ]);
+        },
+      },
+    };
+  }
+
+  test("stays active across many polls although each poll's live children are new", () => {
+    const { logger, tmpDir } = makeLogger();
+    try {
+      const s = scriptedPlatform();
+      const detector = new ActivityDetector(logger, s.platform);
+      const states: ActivityState[] = [];
+      for (let i = 0; i < IDLE_THRESHOLD + 3; i++) {
+        detector.invalidateProcCache();
+        states.push(detector.classifyTree("build", 10));
+        s.next();
+      }
+      expect(states[0]).toBe("unknown");
+      expect(states.slice(1).every((st) => st === "active")).toBe(true);
+    } finally {
+      cleanup(tmpDir);
+    }
   });
 });
 
