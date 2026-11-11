@@ -1487,8 +1487,8 @@ describe("pruneHistory", () => {
   });
 
   test("compaction is idempotent — a second pass does not double-count", () => {
-    // The compaction row is stamped at the cutoff so it stays eligible; it
-    // must be excluded from being folded into another compaction row.
+    // The compaction row is stamped at the cutoff so it stays eligible; a
+    // repeat pass that finds it alone (n = 1) must leave it as it is.
     const raw = db.requireDb();
     for (const d of [10, -4, 6]) {
       raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('idem',?,'old',?)`)
@@ -1610,5 +1610,132 @@ describe("evolveStrategy", () => {
       .prepare(`SELECT COUNT(*) c FROM agent_strategies WHERE agent_name='swap-agent' AND active=1`)
       .get() as any;
     expect(actives.c).toBe(1);
+  });
+});
+
+// -- Learning confidence integrity --------------------------------------------
+//
+// A ```learning``` block with `confidence: high` parsed to NaN, which bun:sqlite
+// stores as NULL; every later prompt build then called `.toFixed(2)` on null
+// and threw, failing every subsequent run of that agent. `confidence: 85`
+// stored 85 and outranked every real learning forever.
+
+describe("addLearning — confidence is always a finite value in [0, 1]", () => {
+  const confOf = (id: number | null) =>
+    (db.requireDb().prepare(`SELECT confidence FROM agent_learnings WHERE id = ?`).get(id) as any).confidence;
+
+  test("NaN falls back to the 0.5 default instead of storing NULL", () => {
+    const id = db.addLearning("agt", "insight", "nan conf", { confidence: Number.NaN });
+    expect(confOf(id)).toBe(0.5);
+  });
+
+  test("out-of-range values are clamped", () => {
+    expect(confOf(db.addLearning("agt", "insight", "big", { confidence: 85 }))).toBe(1);
+    expect(confOf(db.addLearning("agt", "insight", "neg", { confidence: -2 }))).toBe(0);
+  });
+
+  test("existing NULL / out-of-range rows are repaired when the DB is opened", async () => {
+    const raw = db.requireDb();
+    raw.prepare(`INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence)
+                 VALUES ('legacy','insight','null row','h-null',NULL)`).run();
+    raw.prepare(`INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence)
+                 VALUES ('legacy','insight','huge row','h-huge',85)`).run();
+    db.close();
+    db = new MemoryDb(silentLog(), tmpDir);
+    await db.init();
+    const rows = db.getAgentLearnings("legacy") as Array<{ content: string; confidence: number }>;
+    const byContent = Object.fromEntries(rows.map((r) => [r.content, r.confidence]));
+    expect(byContent["null row"]).toBe(0.5);
+    expect(byContent["huge row"]).toBe(1);
+  });
+});
+
+// -- Cross-pollination primitives ---------------------------------------------
+
+describe("addLearningIfAbsent / getSharedInsights — no echo, no fake reinforcement", () => {
+  test("addLearningIfAbsent inserts once and never reinforces", () => {
+    const id = db.addLearningIfAbsent("b", "insight", "shared fact", { confidence: 0.6, sourceAgent: "a" });
+    expect(id).toBeGreaterThan(0);
+    expect(db.addLearningIfAbsent("b", "insight", "shared fact", { confidence: 0.6, sourceAgent: "a" })).toBeNull();
+    const [row] = db.getAgentLearnings("b") as any[];
+    expect(row.reinforcement_count).toBe(1);
+    expect(row.confidence).toBeCloseTo(0.6, 5);
+    expect(row.source_agent).toBe("a");
+  });
+
+  test("addLearningIfAbsent leaves an agent's own matching learning untouched", () => {
+    db.addLearning("b", "insight", "own fact", { confidence: 0.9 });
+    expect(db.addLearningIfAbsent("b", "insight", "own fact", { confidence: 0.6, sourceAgent: "a" })).toBeNull();
+    const [row] = db.getAgentLearnings("b") as any[];
+    expect(row.confidence).toBeCloseTo(0.9, 5);
+    expect(row.reinforcement_count).toBe(1);
+    expect(row.source_agent).toBeNull();
+  });
+
+  test("getSharedInsights skips pollinated copies and learnings the agent already holds", () => {
+    db.addLearning("a", "insight", "a original", { confidence: 0.9 });
+    // b holds a pollinated copy of a's learning, pumped to high confidence
+    db.addLearningIfAbsent("b", "insight", "a original", { confidence: 0.95, sourceAgent: "a" });
+    // c sees a's original but NOT b's copy
+    const forC = db.getSharedInsights("c", 0.7, 10) as any[];
+    expect(forC.map((r) => r.agent_name)).toEqual(["a"]);
+    // b already holds it, so it is not offered to b again
+    expect(db.getSharedInsights("b", 0.7, 10)).toHaveLength(0);
+  });
+});
+
+// -- setLearningConfidence ------------------------------------------------------
+
+describe("setLearningConfidence", () => {
+  test("sets (clamped) confidence without counting a reinforcement", () => {
+    const id = db.addLearning("agt", "insight", "settable", { confidence: 0.3 })!;
+    db.setLearningConfidence(id, 0.9);
+    let [row] = db.getAgentLearnings("agt") as any[];
+    expect(row.confidence).toBeCloseTo(0.9, 5);
+    expect(row.reinforcement_count).toBe(1);
+    db.setLearningConfidence(id, Number.NaN);
+    [row] = db.getAgentLearnings("agt") as any[];
+    expect(row.confidence).toBeCloseTo(0.9, 5); // non-finite is ignored, not stored
+  });
+});
+
+// -- Self-sent messages ------------------------------------------------------
+
+describe("getUnreadMessages — an agent's own messages are not its inbox", () => {
+  test("a broadcast the agent sent itself is excluded; others still see it", () => {
+    db.sendAgentMessage("master-controller", "*", "status: all fine");
+    db.sendAgentMessage("optimizer", "*", "optimizer broadcast");
+    const mc = db.getUnreadMessages("master-controller") as any[];
+    expect(mc.map((m) => m.content)).toEqual(["optimizer broadcast"]);
+    const opt = db.getUnreadMessages("optimizer") as any[];
+    expect(opt.map((m) => m.content)).toEqual(["status: all fine"]);
+  });
+});
+
+// -- Trust-ledger compaction must not accumulate compaction rows ----------------
+
+describe("compactTrustLedger — compaction rows are folded too", () => {
+  const DAY = 86_400;
+  const now = () => Math.floor(Date.now() / 1000);
+
+  test("successive passes leave ONE compaction row per agent, sum unchanged", () => {
+    const raw = db.requireDb();
+    const ins = (d: number, age: number) =>
+      raw.prepare(`INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at) VALUES ('acc',?,'old',?)`)
+        .run(d, now() - age * DAY);
+    const rawSum = () =>
+      (raw.prepare(`SELECT SUM(score_delta) t FROM agent_trust_ledger WHERE agent_name='acc'`).get() as any).t;
+
+    ins(5, 400); ins(7, 400);
+    db.pruneHistory({ trustLedgerDays: 180 });
+    // Rows that aged past the cutoff since the last pass (the daily case).
+    // 179 stands in for "the next day's pass": its cutoff is one day later,
+    // so the previous compaction row (stamped at the old cutoff) is stale.
+    ins(3, 300); ins(-1, 300);
+    db.pruneHistory({ trustLedgerDays: 179 });
+
+    expect(rawSum()).toBe(14);
+    const rows = raw.prepare(`SELECT reason FROM agent_trust_ledger WHERE agent_name='acc'`).all() as any[];
+    expect(rows).toHaveLength(1);
   });
 });

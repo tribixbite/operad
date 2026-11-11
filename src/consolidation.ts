@@ -124,9 +124,17 @@ export function runConsolidation(
       for (const insight of insights) {
         const content = String(insight.content);
         const category = String(insight.category);
-        // addLearning deduplicates by content_hash — safe to call repeatedly
-        db.addLearning(agent, category, content, { confidence: 0.6 });
-        totalCrossPollinated++;
+        // Insert-once, never reinforce. addLearning's duplicate path adds
+        // +0.05 and a reinforcement on every repeat, so re-sharing the same
+        // insight each run promoted copies to core knowledge on no evidence.
+        // getSharedInsights already skips pollinated copies (no echo back to
+        // the source) and anything this agent holds; INSERT OR IGNORE closes
+        // the remaining race. Count only rows that actually landed.
+        const id = db.addLearningIfAbsent(agent, category, content, {
+          confidence: 0.6,
+          sourceAgent: String(insight.agent_name),
+        });
+        if (id !== null) totalCrossPollinated++;
       }
     }
   }

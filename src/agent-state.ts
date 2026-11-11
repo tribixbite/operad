@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
-import type { MemoryDb } from "./memory-db.js";
+import { clamp01, type MemoryDb } from "./memory-db.js";
 import type { AgentConfig } from "./agents.js";
 import type { Logger } from "./log.js";
 
@@ -292,18 +292,28 @@ export function importAgentState(
   // Import learnings with deduplication
   if (sections.includes("learnings")) {
     const existing = db.getAgentLearnings(agentName, 10000) as Array<Record<string, unknown>>;
-    const existingHashes = new Set(existing.map((l) => String(l.content_hash)));
+    const existingByHash = new Map(
+      existing.map((l) => [String(l.content_hash), { id: Number(l.id), confidence: Number(l.confidence) }]),
+    );
 
     for (const learning of bundle.learnings) {
-      if (existingHashes.has(learning.content_hash)) {
-        if (options.learningMerge === "prefer_import") {
-          // Was a TODO with both branches doing the same thing, so
-          // prefer_import behaved exactly like prefer_existing. addLearning
-          // upserts on content_hash, so re-adding applies the imported
-          // confidence to the existing row.
-          db.addLearning(agentName, learning.category, learning.content, {
-            confidence: learning.confidence,
-          });
+      const current = existingByHash.get(learning.content_hash);
+      if (current) {
+        // Resolve the conflict with an explicit SET. Re-calling addLearning
+        // (as this used to) never applied the imported value: its duplicate
+        // path ignores opts.confidence and REINFORCES instead (+0.05,
+        // reinforcement_count++), so every import also inflated the
+        // core-knowledge ranking signal. An import is not new evidence.
+        // Clamped up front so an out-of-range import (1.5) compares against
+        // what would actually be stored.
+        const imported = clamp01(learning.confidence, Number.NaN);
+        const target =
+          options.learningMerge === "prefer_import" ? imported
+          : options.learningMerge === "keep_higher_confidence"
+            ? Math.max(current.confidence, imported)
+          : current.confidence; // prefer_existing
+        if (Number.isFinite(target) && target !== current.confidence) {
+          db.setLearningConfidence(current.id, target);
           result.learnings_imported++;
         } else {
           result.learnings_skipped++;

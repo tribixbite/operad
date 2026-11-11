@@ -330,10 +330,15 @@ describe("importAgentState — learnings", () => {
     };
 
     const result = importAgentState(db, bundle);
-    expect(result.learnings_skipped).toBe(1);
-    expect(result.learnings_imported).toBe(0);
-    // Still only 1 learning
-    expect(db.getAgentLearnings("dest").length).toBe(1);
+    // The default merge is keep_higher_confidence, and the import (0.9) beats
+    // the existing default (0.5), so the existing row's confidence is raised —
+    // counted as imported. It used to be skipped with the higher value lost.
+    expect(result.learnings_skipped).toBe(0);
+    expect(result.learnings_imported).toBe(1);
+    // Still only 1 learning — a duplicate hash never adds a row
+    const rows = db.getAgentLearnings("dest") as Array<Record<string, unknown>>;
+    expect(rows.length).toBe(1);
+    expect(rows[0].confidence as number).toBeCloseTo(0.9, 5);
   });
 
   test("sections filter: learnings not imported when 'learnings' not in sections", () => {
@@ -894,6 +899,36 @@ describe("importAgentState — learningMerge prefer_import", () => {
     });
     expect(r.learnings_imported).toBe(1);
     expect(r.learnings_skipped).toBe(0);
+  });
+
+  const stored = (content: string) =>
+    (db.getAgentLearnings("dest", 10_000) as Array<Record<string, unknown>>)
+      .find((r) => String(r.content) === content) as { confidence: number; reinforcement_count: number };
+
+  // addLearning ignores opts.confidence for an existing hash and instead
+  // REINFORCES (+0.05, count++), so prefer_import never applied the imported
+  // value and every import inflated reinforcement_count.
+  test("prefer_import sets the imported confidence without a reinforcement", () => {
+    importAgentState(db, bundleWithLearning("adopt me", 0.3));
+    const h = storedHash("adopt me");
+    importAgentState(db, bundleWithLearning("adopt me", 0.9, h), { learningMerge: "prefer_import" });
+    expect(stored("adopt me").confidence).toBeCloseTo(0.9, 5);
+    expect(stored("adopt me").reinforcement_count).toBe(1);
+    // ...including LOWER values: that is what "prefer import" means.
+    importAgentState(db, bundleWithLearning("adopt me", 0.2, h), { learningMerge: "prefer_import" });
+    expect(stored("adopt me").confidence).toBeCloseTo(0.2, 5);
+  });
+
+  test("keep_higher_confidence takes the max of existing and imported", () => {
+    importAgentState(db, bundleWithLearning("max me", 0.3));
+    const h = storedHash("max me");
+    const up = importAgentState(db, bundleWithLearning("max me", 0.8, h), { learningMerge: "keep_higher_confidence" });
+    expect(stored("max me").confidence).toBeCloseTo(0.8, 5);
+    expect(up.learnings_imported).toBe(1);
+    const down = importAgentState(db, bundleWithLearning("max me", 0.4, h), { learningMerge: "keep_higher_confidence" });
+    expect(stored("max me").confidence).toBeCloseTo(0.8, 5);
+    expect(down.learnings_skipped).toBe(1);
+    expect(stored("max me").reinforcement_count).toBe(1);
   });
 
   test("prefer_existing still skips the duplicate", () => {

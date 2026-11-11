@@ -24,6 +24,14 @@ import type { Logger } from "./log.js";
 /** Cached lazy SDK module */
 let _sdk: typeof import("@anthropic-ai/claude-agent-sdk") | null = null;
 
+/**
+ * Test seam: install a stand-in SDK module (or null to reset). Injected here
+ * rather than via mock.module, which bun:test applies process-wide.
+ */
+export function _setSdkModule(sdk: unknown): void {
+  _sdk = sdk as typeof _sdk;
+}
+
 /** Lazy-load the Claude Agent SDK (throws descriptive error if not installed) */
 async function getSdk() {
   if (_sdk) return _sdk;
@@ -53,6 +61,12 @@ type PermissionResult =
 /** Permission request pending resolution */
 interface PendingPermission {
   id: string;
+  /**
+   * The run that asked (attached session or one standalone run). Pending
+   * permissions are settled per owner, so tearing one run down cannot
+   * auto-deny another run's outstanding request.
+   */
+  owner: string;
   resolve: (result: PermissionResult) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -67,6 +81,8 @@ interface ActiveSession {
   session: any;
   /** Whether a prompt is currently being processed */
   busy: boolean;
+  /** Owner tag for this attachment's pending permissions */
+  owner: string;
 }
 
 /** SDK bridge configuration */
@@ -135,6 +151,8 @@ export class SdkBridge {
   private standaloneBusy = false;
   private pendingPermissions = new Map<string, PendingPermission>();
   private permissionIdCounter = 0;
+  /** Sequence for per-run permission owner tags */
+  private ownerSeq = 0;
   private log: Logger;
   private broadcast: BroadcastFn;
   private config: SdkBridgeConfig;
@@ -164,8 +182,18 @@ export class SdkBridge {
   /**
    * Build shared session options for V2 create/resume calls.
    * Centralizes Termux-specific config (executable, path, env, sandbox).
+   *
+   * @param room   WS room permission requests are broadcast to — the same
+   *               room the run's messages stream to (the session name when
+   *               attached, the agent name for a standalone run). This used
+   *               to be read as `this.active?.sessionName ?? "unknown"` at
+   *               request time; standalone/OODA/scheduled runs have no
+   *               `active`, so every request went to room "unknown", which
+   *               nobody subscribes to, and the run hung 5 min before an
+   *               automatic deny.
+   * @param owner  Per-run tag recorded on each pending permission.
    */
-  private buildSessionOptions(cwd: string): Record<string, unknown> {
+  private buildSessionOptions(cwd: string, room: string, owner: string): Record<string, unknown> {
     const env = this.platform.cleanEnv();
     const opts: Record<string, unknown> = {
       cwd,
@@ -175,7 +203,7 @@ export class SdkBridge {
       env,
       sandbox: { enabled: false },
       canUseTool: async (toolName: string, toolInput: unknown) => {
-        return this.requestPermission(this.active?.sessionName ?? "unknown", toolName, toolInput);
+        return this.requestPermission(room, owner, toolName, toolInput);
       },
       permissionMode: "default",
     };
@@ -200,14 +228,24 @@ export class SdkBridge {
     sessionId: string | undefined,
     cwd: string,
   ): Promise<{ sessionId: string }> {
+    // Refuse while a standalone run owns the bridge. runStandaloneAgent
+    // already refuses while attached; without the converse, attaching mid-run
+    // spawned a second SDK subprocess (the one-at-a-time Android memory
+    // constraint) and let a later detach() deny that run's pending
+    // permissions.
+    if (this.standaloneBusy) {
+      throw new Error("Cannot attach — a standalone agent run is in progress");
+    }
+
     // Detach existing session first
     if (this.active) {
       await this.detach();
     }
 
     const sdk = await getSdk();
+    const owner = `attach:${sessionName}#${++this.ownerSeq}`;
     // Cast to any — SDKSessionOptions requires model but it defaults internally
-    const opts = this.buildSessionOptions(cwd) as any;
+    const opts = this.buildSessionOptions(cwd, sessionName, owner) as any;
 
     // V2 API: create or resume a persistent session
     let session: any;
@@ -232,6 +270,7 @@ export class SdkBridge {
       cwd,
       session,
       busy: false,
+      owner,
     };
 
     this.log.info(`SDK attached to session: ${sessionName} (id=${resolvedSessionId || "new"})`);
@@ -300,21 +339,27 @@ export class SdkBridge {
   /** Detach — close the SDK subprocess */
   async detach(): Promise<void> {
     if (!this.active) return;
-    const name = this.active.sessionName;
+    const { sessionName: name, owner } = this.active;
     try {
       this.active.session.close();
     } catch { /* may already be closed */ }
     this.active = null;
 
-    // Clean up pending permissions
-    for (const [, pending] of this.pendingPermissions) {
-      clearTimeout(pending.timer);
-      pending.resolve({ behavior: "deny", message: "Session detached" });
-    }
-    this.pendingPermissions.clear();
+    // Settle only THIS attachment's pending permissions.
+    this.denyPendingPermissions(owner, "Session detached");
 
     this.broadcast(name, { type: "detached", sessionName: name });
     this.log.info(`SDK detached from session: ${name}`);
+  }
+
+  /** Deny and drop every pending permission belonging to one run. */
+  private denyPendingPermissions(owner: string, message: string): void {
+    for (const [id, pending] of this.pendingPermissions) {
+      if (pending.owner !== owner) continue;
+      clearTimeout(pending.timer);
+      this.pendingPermissions.delete(id);
+      pending.resolve({ behavior: "deny", message });
+    }
   }
 
   /** Resolve a pending permission request */
@@ -366,9 +411,15 @@ export class SdkBridge {
     }
 
     this.standaloneBusy = true;
+    const owner = `standalone:${agentName}#${++this.ownerSeq}`;
     try {
       const sdk = await getSdk();
-      const opts = this.buildSessionOptions(cwd) as any;
+      // Permission requests go to the agent's room — where this run's
+      // messages already stream (see the broadcast in the loop below).
+      // TODO: no dashboard view subscribes to an agent's room yet (only
+      // ConversationDrawer subscribes, to session rooms), so answering a
+      // standalone run's request still needs a client that subscribes to it.
+      const opts = this.buildSessionOptions(cwd, agentName, owner) as any;
 
       // For standalone runs, the agent IS the session — set its prompt as system prompt
       // and apply max_budget_usd at the session level (not on AgentDefinition)
@@ -448,6 +499,8 @@ export class SdkBridge {
       const thinkingText = thinkingParts.join("\n");
       return { sessionId: resolvedSessionId, costUsd, inputTokens, outputTokens, turns, responseText, thinkingText };
     } finally {
+      // The session is closed; nothing can act on an answer any more.
+      this.denyPendingPermissions(owner, "Agent run ended");
       this.standaloneBusy = false;
     }
   }
@@ -532,6 +585,7 @@ export class SdkBridge {
    */
   private requestPermission(
     sessionName: string,
+    owner: string,
     toolName: string,
     toolInput: unknown,
   ): Promise<PermissionResult> {
@@ -545,7 +599,7 @@ export class SdkBridge {
         resolve({ behavior: "deny", message: "Permission request timed out" });
       }, timeoutMs);
 
-      this.pendingPermissions.set(id, { id, resolve, timer });
+      this.pendingPermissions.set(id, { id, owner, resolve, timer });
 
       // Broadcast permission request to all session room subscribers
       this.broadcast(sessionName, {

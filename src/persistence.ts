@@ -58,9 +58,9 @@ export class PersistenceEngine {
     if (this.lastSnapshotDate === today) return;
 
     const snapshotDir = this.snapshotDir;
+    const enabled = agentConfigs.filter((a) => a.enabled);
     let anySucceeded = false;
-    for (const agent of agentConfigs) {
-      if (!agent.enabled) continue;
+    for (const agent of enabled) {
       try {
         saveSnapshot(memoryDb, agent, snapshotDir);
         pruneSnapshots(snapshotDir, agent.name);
@@ -72,17 +72,23 @@ export class PersistenceEngine {
     // Marked only after something actually landed. This was set before the
     // loop, so a transient failure (disk full, DB locked) burned the whole
     // day's snapshot with no retry until tomorrow.
-    if (anySucceeded) this.lastSnapshotDate = today;
+    //
+    // "Nothing to snapshot" is also done for the day. Without this, a daemon
+    // with no enabled agents never set the marker and ran the prune + info
+    // log below on every 60 s tick, forever.
+    if (!anySucceeded && enabled.length > 0) return; // all failed — retry next tick
+    this.lastSnapshotDate = today;
 
     // Same daily cadence: trim the history tables, which otherwise grow
     // without bound (agent_runs keeps full response text, agent_personality
     // inserts a row per trait update, tool_executions grows per call).
+    // Gated on the marker above so it runs once per day, not once per tick.
     try {
       memoryDb.pruneHistory();
     } catch (err) {
       log.warn(`History prune failed: ${err}`);
     }
-    log.info(`Daily agent snapshots saved (${agentConfigs.filter((a) => a.enabled).length} agents)`);
+    log.info(`Daily agent snapshots saved (${enabled.length} agents)`);
   }
 
   /**
