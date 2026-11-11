@@ -46,6 +46,16 @@ src/
   claude-session.ts       — JSONL resolution, per-model token/cost scanning (incremental),
                             conversation + timeline parsing, readiness detection (~1490 lines)
   prompts.ts              — Prompt history extraction from Claude JSONL
+  exit-record.ts          — POSIX-sh exit recorder for agent shells (exit vs OOM kill)
+  conversation-pin.ts     — Records which agy/Codex conversation a running session is on
+  title-cache.ts          — Persisted per-transcript `/rename` cache (append-only scans)
+  jsonl-lines.ts          — Lazy forward/backward line readers shared by all scanners
+  timezone.ts             — Sets TZ from the device at startup (bun on Termux is UTC)
+  sqlite-readonly.ts      — Sync read-only SQLite for other tools' databases
+  shell-quote.ts          — POSIX single-quoting
+  bounded-exec.ts         — Subprocess with timeout/output cap/process-group kill
+  runtimes/               — Agent adapters (claude, codex, opencode, agy), pane
+                            runtime detection, agy/Codex conversation locators
   migrate.ts              — Legacy config migration
   types.ts                — Type definitions (~800 lines)
   deps.ts                 — Dependency graph (topological sort)
@@ -147,7 +157,9 @@ tmx boot
 - **LD_PRELOAD on Termux**: Bun's glibc runner strips it. `cleanEnv()` re-injects, `ensureTmuxLdPreload()` sets via tmux.
 - **esbuild android binary**: `node build.cjs` (not `bun build.cjs`). Bun's platform detection rejects the android binary.
 - **tmux spawnSync**: Use array args, not string concatenation. No shell quoting needed.
-- **tmux exact-match sigil**: `=name` works ONLY for target-session subcommands (has-session, kill-session, list-clients, switch-client). Pane/window targets (send-keys, capture-pane, list-panes, select-window) need `=name:` (trailing colon → target-window → resolves to current pane). Bare `=name` on those errors with "can't find pane".
+- **tmux exact-match sigil**: `=name` works ONLY for target-session subcommands (has-session, kill-session, list-clients, switch-client, `list-panes -s`). Pane/window targets (send-keys, capture-pane, list-panes, select-window) need `=name:` (trailing colon → target-window → resolves to current pane). Bare `=name` on those errors with "can't find pane". **`set-option` and `set-hook` also need `=name:` on tmux 3.5a — even for session options** (`=name` fails "no such window"/"no such session"). `tmux()` swallows errors, so a wrong target fails silently: that is how remain-on-exit went unset.
+- **Tests that need tmux use a private server**: set `OPERAD_TMUX_SOCKET` (→ `tmux -L`) before the first call, assert `tmuxServerArgs()`, and in afterAll SIGKILL the server pid and unlink its socket — `kill-server` is a no-op when the server inherited the agent shell's blocked signal mask. See `session-tmux.test.ts`.
+- **Never mutate `$HOME` in tests**: claude-session.ts has `_setClaudeHome()`, agents.ts `_setUserAgentsHome()`; bun caches `os.homedir()` process-wide.
 - **Symlink resolution**: Use `realpathSync(__filename)` to resolve repo root from symlinked `~/.local/bin/tmx`.
 - **Nested CC detection**: Daemon strips `CLAUDECODE`, `CLAUDE_CODE_*`, `ENABLE_CLAUDE_CODE_*`, `CLAUDE_TMPDIR` from env.
 - **SSE connection limit**: Close EventSource on `beforeunload`/`pagehide` to avoid exhausting 6-per-origin limit.

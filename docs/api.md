@@ -1199,10 +1199,10 @@ Connect to `ws://localhost:18970/ws` for bidirectional streaming (SDK prompts, a
 | `type` | Fields | Description |
 |---|---|---|
 | `ping` | — | Keepalive; server responds with `{ type: "pong" }` |
-| `subscribe` | `sessionName` | Subscribe to a session room for per-session updates |
+| `subscribe` | `sessionName` | Join a room — a session's name, or an agent's name for its standalone runs. Any `permission_request` still outstanding in the room is sent right after `subscribed`, so a client that joins late can still answer it |
 | `unsubscribe` | `sessionName` | Unsubscribe from a session room |
 | `prompt` | `sessionName`, `text`, `effort?`, `thinking?` | Send a prompt to the attached SDK session |
-| `permission_response` | `id`, `resolved` | Respond to a tool permission request |
+| `permission_response` | `id`, `behavior` (`"allow"` \| `"deny"`) | Answer a `permission_request` |
 | `abort` | — | Abort an in-progress SDK prompt |
 | `attach` | `sessionName`, `sessionId?`, `cwd?` | Attach SDK bridge to a session |
 | `detach` | — | Detach SDK bridge |
@@ -1235,6 +1235,7 @@ Connect to `ws://localhost:18970/ws` for bidirectional streaming (SDK prompts, a
 | `tool_result` | `toolName`, `result`, `agentName` | Tool execution result |
 | `consolidation` | Consolidation result | Memory consolidation completed |
 | `roundtable_status` | `running`, `topic`, `agents`, `result?` | Roundtable started or finished |
+| `permission_request` | `id`, `room`, `kind` (`"session"` \| `"agent"`), `tool`, `input`, `timeout_ms` | An SDK run needs approval for a tool call. Sent to the room's subscribers; `kind` says whether `room` is an attached session or a standalone agent run (the two are bare names and can collide). `timeout_ms` is the time LEFT — on a replay to a late subscriber it is less than the original. Unanswered requests are denied at timeout |
 | `permission_resolved` | `id`, `resolved` | Permission request resolved |
 | `error` | `message` | Error from the server |
 

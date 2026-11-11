@@ -60,25 +60,37 @@ entry and then *deleted* the autostart override, which was the only piece of
 state that could have said no, and the next boot re-derived the session from
 history and started it.
 
-A deliberate exit is now identified and honoured. Agent sessions are created
-with tmux's `remain-on-exit on`, so a shell that exits leaves a dead pane
-behind to be inspected instead of taking the session down with it; the health
-check reports `user_exited` for that shape, and the daemon then stops
-supervising the session, clears its ⭐ pin, and records the close against the
-project path in `state.manual_closes`. Boot resolution skips a closed project
-until it is used again — history activity newer than the close, or an explicit
-`open` / `start` / pin, all cancel it. `close` and the ⭐ toggle write the same
-record, so the dashboard and the CLI agree.
+A deliberate exit is now identified and honoured. Agent sessions keep their
+dead panes (`remain-on-exit`, also carried to windows opened later by an
+`after-new-window` hook), so a shell that exits leaves something to inspect
+instead of taking the session down with it; the health check reports
+`user_exited` for that shape, and the daemon then stops supervising the
+session, clears its ⭐ pin, and records the close against the project path in
+`state.manual_closes`. Boot resolution skips a closed project until it is used
+again — history activity newer than the close, or an explicit `open` / `start`
+/ pin, all cancel it. `close` and the ⭐ toggle write the same record, so the
+dashboard and the CLI agree.
 
-What this cannot separate is Android's low-memory killer taking just the
-pane's shell: tmux 3.5a under Termux leaves `pane_dead_status` and
-`pane_dead_signal` empty, so that looks exactly like an exit. The OOM failure
-that actually happens on this platform takes the whole tmux server, which is
-handled on its own path (every session marked failed, restored on the next
-boot) and is untouched. `boot.respect_manual_exit = false` restores the old
-always-reopen behaviour. A missing tmux session is still treated as a fault,
-not an exit, because sessions created before this change disappear on a clean
-exit too.
+**An exit and an OOM kill are told apart by an exit recorder.** tmux 3.5a
+under Termux leaves `pane_dead_status` and `pane_dead_signal` empty, so from
+tmux alone a person typing `exit` and Android's low-memory killer SIGKILLing
+the shell are identical. Agent shells now run under a tiny POSIX-sh wrapper
+(`exit-record.ts`) that writes `running` to a per-pane record under the state
+directory, then the shell's exit status. A recorded SIGKILL — or a record still
+saying `running`, meaning the wrapper died with the shell — is a crash and is
+restarted; any other status (including `exit 3`, and 130 after a Ctrl-C) is the
+user leaving. Sessions that already existed are adopted on daemon start; only
+their original pane, which predates the recorder, keeps the old tmux-field
+reading until its next restart. A missing tmux session is still treated as a
+fault, not an exit. `boot.respect_manual_exit = false` restores the old
+always-reopen behaviour.
+
+The first version of this shipped broken: `set-option -t '=name' remain-on-exit
+on` fails on tmux 3.5a ("no such window" — the session sigil does not resolve
+for `set-option`) and the error was discarded, so no session ever kept its
+dead pane. Targets are `=name:` now, and `session-tmux.test.ts` drives a real
+tmux server (selected with the new `OPERAD_TMUX_SOCKET`, never the user's) so
+that class of failure is visible to the suite.
 
 ### Fixed — a Codex or Antigravity session came back as Claude Code
 
@@ -136,6 +148,111 @@ and the device's low-memory killer is already taking processes:
 
 All three now walk lines lazily through one shared reader and stop when they
 have what they need. Peak heap across the three is ~50 MB.
+
+### Fixed — Codex and OpenCode restarts opened a new conversation
+
+The adapters started plain `codex` / `opencode`, which begin a NEW session;
+their comments claimed both resumed by working directory. They now resume:
+`codex resume <id>` or `codex resume --last` (cwd-filtered; starts fresh when
+the project has none), and `opencode --session <id>` or `opencode --continue`.
+Codex's readiness patterns had never been checked against a real pane — its
+input row carries placeholder text — so readiness always ran to its 90 s
+timeout; they are rebuilt from a live 0.160.0 capture.
+
+### Added — restores resume the exact agy / Codex conversation
+
+`--continue` / `--last` mean "the project's most recent", which is wrong as
+soon as the same tool has been used in the same project anywhere else. While
+an agy or Codex session runs, operad now records which conversation it is on
+— from Antigravity's `conversation_summaries.db` (opened strictly read-only)
+and Codex's rollout `session_meta` — counting only conversations written
+after the agent was first seen in the pane, and skipping subagent threads.
+The id goes to the registry, so a restart or the next boot names it exactly.
+Two panes running the same tool in the same project at once still see the
+same newest conversation; neither tool exposes a pane-to-conversation mapping.
+The registry also stopped dropping non-UUID conversation ids (OpenCode's
+`ses_…`) on load; only Claude entries require a UUID.
+
+### Fixed — boot spent ~5 s proving transcripts had not been renamed
+
+Finding each recent session's last `/rename` means reading a transcript with
+no rename all the way to its start. A persisted per-transcript cache
+(`title-cache.json` beside the state file) records how far each was scanned
+and what it found; transcripts are append-only, so later lookups read only
+the bytes added since. On the author's device: 5.6 s cold, 12 ms warm.
+`history.jsonl` is walked newest-first and stops past the window instead of
+being loaded whole.
+
+### Fixed — the conversation viewer re-read every transcript per page
+
+`getConversationPage` listed the project's conversations with their titles by
+reading every transcript in full on every page request. Titles now come from
+the same cache. `resolveActiveJsonl` (all of `history.jsonl`) and
+`readTimeline` (all of `trace.log`) no longer load whole files either.
+
+### Fixed — Haiku 5.5 long prompts were under-priced
+
+Haiku 5.5 bills a request whose prompt (all input tokens, cache reads and
+writes included) is over 100,000 tokens at $0.50 / $2.50 per MTok instead of
+$0.10 / $0.50, with cache rates at that tier's usual multiples. The tier is
+now chosen per request, before usage is summed — once buckets are added
+together, which requests were long is gone.
+
+### Fixed — "local time" was UTC on Termux
+
+The daemon runs under bun, which ignores Android's time zone (Termux's node
+does not), so cron schedules and the daily token / cost buckets were UTC on
+the phone. An unset `TZ` is now taken from `persist.sys.timezone` at startup
+(via `/system/bin/getprop` — a bare `getprop` fails under bun there). An
+explicit `TZ` always wins.
+
+### Fixed — work in a second tmux window was invisible to monitoring
+
+Memory and activity were measured from the current window's first pane, so a
+build in another window read as an idle session — and idle sessions are what
+memory-pressure auto-suspend SIGSTOPs, across every window. RSS and CPU now
+cover every pane.
+
+### Added — agent-run permission prompts reach the dashboard
+
+Standalone agent runs (OODA, scheduled, manual) asked for tool permission in a
+room nothing subscribed to, so each request waited out its five-minute
+timeout and was denied. A dashboard-wide watcher now answers them on any
+page; the daemon replays outstanding requests to a client that subscribes
+late, with the time left rather than the full timeout; requests carry `room`
+and `kind` so a session and an agent sharing a name are not confused.
+
+### Fixed — audit of the remaining subsystems
+
+- **Android**: the adb target is verified once per run and every command is
+  addressed to that serial (it was re-resolved per command, and an
+  `emulator-*` serial was trusted as this device); an empty `connect_script`
+  no longer fails `fixAdb` forever, and a successful script with no local
+  device no longer counts as fixed; radios disabled for low battery are
+  re-enabled after a daemon restart; reaped children's CPU time counts toward
+  activity; `launchApp` uses `amEnv()` and the local-target guard.
+- **Agents**: a TOML `[[agent]]` override no longer blanks a builtin's prompt
+  and tool restrictions; non-numeric learning confidence no longer stores NULL
+  and breaks every later run; cross-pollination inserts once instead of
+  reinforcing itself; an agent's own broadcasts no longer trigger paid OODA
+  cycles; daily history pruning runs daily, not every minute.
+- **API**: MCP routes refuse (409) instead of overwriting an unparseable
+  `~/.claude.json` / `settings.json`; switchboard patches are validated by one
+  shared whitelist; SDK routes honour the switchboard; 413 / 408 reach the
+  client; customization import is document-only; every path segment is
+  decoded once (a malformed escape is a 400, not a 500).
+- **Tools, schedules, skills**: parallel workflow edges no longer strand their
+  target; cron parses `N/step`, validates strictly, matches local time, and has
+  defined DST behaviour; re-enabling a schedule re-arms it; git runs async and
+  bounded; reinstalling the live version cannot delete it; failed installs roll
+  back exactly what they changed; `diff-files` / `grep-search` report failures;
+  `memory-search` without a project searches every project; tool timeouts kill
+  the whole process group; `file-write` denies more auto-exec paths.
+- **Dashboard**: `svelte-check` went from 58 errors / 80 warnings to none. Bugs
+  it exposed: the skill Install button passed its click event as
+  `acceptCapDowngrade`, silently accepting provider-tier cap downgrades; the
+  Growth tab read misnamed fields; prompt export wrote `undefined` session ids;
+  collapsible headers were not keyboard-operable.
 
 ### Changed
 

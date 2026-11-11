@@ -16,8 +16,7 @@
  *   msg.exe or a simple PowerShell toast — gracefully no-ops if unavailable.
  */
 
-import { existsSync } from "node:fs";
-import { spawnSync, spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Platform, PlatformId, SystemMemoryInfo, BatteryInfo } from "./platform.js";

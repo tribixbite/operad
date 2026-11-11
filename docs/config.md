@@ -131,11 +131,27 @@ interval_s = 30
 
 | Type | `path` | `command` | tmux | Description |
 |---|---|---|---|---|
-| `claude` | required | — | yes | Launches `claude` CLI in a tmux session. |
+| `claude` | required | — | yes | Claude Code: `claude --resume <session_id>` when that conversation still exists, else your `cc` shell alias. |
+| `codex` | required | — | yes | OpenAI Codex: `codex resume <session_id>`, else `codex resume --last` (most recent for the directory; fresh when there is none). |
+| `opencode` | required | — | yes | OpenCode: `opencode --session <session_id>`, else `opencode --continue`. |
+| `agy` | required | — | yes | Antigravity: `agy --conversation <session_id>`, else `agy --continue`. |
 | `daemon` | required | optional | yes | Runs a background daemon (e.g., a server) in tmux. |
 | `service` | optional | required | yes | Runs an arbitrary command in tmux. |
 
 For `bare = true` sessions, the command is spawned as a detached process instead of a tmux session.
+
+Agent sessions (the first four types) keep their dead panes after the shell
+exits and run that shell under a small exit recorder (records under
+`<state_dir>/exits/`), so a deliberate `exit` retires the session while an
+OOM kill restarts it — see `boot.respect_manual_exit`. For sessions operad
+opened dynamically (registry-backed), the conversation an agy or Codex session
+is on is recorded while it runs, so a restart resumes that exact one.
+
+**Environment.** `OPERAD_TMUX_SOCKET=<name>` points every tmux call at a
+separate server (`tmux -L <name>`) — for running a second instance, or tests,
+without touching your sessions. `TZ`, when unset, is taken from the device on
+Android (bun there otherwise runs in UTC), and governs cron schedules and the
+daily token/cost buckets.
 
 ---
 
