@@ -12,9 +12,9 @@
    * Each tab has a "Download JSON" button that triggers a browser file download.
    */
 
-  import { fetchAllCustomization } from "$lib/api";
+  import { AllCustomizationLoader } from "$lib/all-customization.svelte";
   import { shortenHomePath as shortenPath } from "$lib/env.svelte";
-  import type { MemoryFileInfo, AllProjectsCustomizationResponse } from "$lib/types";
+  import type { MemoryFileInfo } from "$lib/types";
   import { formatBytes, formatRelativeTime, copyToClipboard } from "$lib/format";
 
   // -- Props ------------------------------------------------------------------
@@ -37,9 +37,8 @@
   type Tab = "user" | "project" | "all";
   let activeTab = $state<Tab>("user");
 
-  let allData: AllProjectsCustomizationResponse | null = $state(null);
-  let allLoading = $state(false);
-  let allError: string | null = $state(null);
+  /** Lazily fetched on first visit to the "All Projects" tab. */
+  const allProjects = new AllCustomizationLoader();
 
 
   // -- Derived ----------------------------------------------------------------
@@ -48,10 +47,10 @@
   const projectMemories = $derived(memories.filter(m => m.scope === "project"));
 
   const allMemories = $derived<Array<MemoryFileInfo & { projectPath?: string; projectName?: string }>>(
-    allData
+    allProjects.data
       ? [
-          ...(allData.user.memories ?? []).map(m => ({ ...m, projectPath: undefined, projectName: "~/.claude" })),
-          ...allData.projects.flatMap(p =>
+          ...(allProjects.data.user.memories ?? []).map(m => ({ ...m, projectPath: undefined, projectName: "~/.claude" })),
+          ...allProjects.data.projects.flatMap(p =>
             (p.memories ?? []).map(m => ({ ...m, projectPath: p.path, projectName: p.name })),
           ),
         ]
@@ -60,22 +59,9 @@
 
   // -- Functions --------------------------------------------------------------
 
-  async function loadAll() {
-    if (allData || allLoading) return;
-    allLoading = true;
-    allError = null;
-    try {
-      allData = await fetchAllCustomization();
-    } catch (e: unknown) {
-      allError = e instanceof Error ? e.message : String(e);
-    } finally {
-      allLoading = false;
-    }
-  }
-
   function selectTab(tab: Tab) {
     activeTab = tab;
-    if (tab === "all") loadAll();
+    if (tab === "all") allProjects.load();
   }
 
   function downloadJson(filename: string, payload: unknown) {
@@ -132,7 +118,7 @@
     onclick={() => selectTab("all")}
   >
     All Projects
-    {#if allData}
+    {#if allProjects.data}
       <span class="tab-count">{allMemories.length}</span>
     {/if}
   </button>
@@ -235,14 +221,14 @@
   <!-- All Projects tab -->
   {:else if activeTab === "all"}
     <div class="tab-actions">
-      <button class="btn-dl" onclick={downloadAll} disabled={allMemories.length === 0 || allLoading}>
+      <button class="btn-dl" onclick={downloadAll} disabled={allMemories.length === 0 || allProjects.loading}>
         Download JSON
       </button>
     </div>
-    {#if allLoading}
+    {#if allProjects.loading}
       <p class="muted">Loading…</p>
-    {:else if allError}
-      <p class="error-msg">{allError}</p>
+    {:else if allProjects.error}
+      <p class="error-msg">{allProjects.error}</p>
     {:else if allMemories.length === 0}
       <p class="muted">No memories found across any known projects.</p>
     {:else}

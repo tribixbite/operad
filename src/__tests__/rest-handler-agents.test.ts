@@ -501,8 +501,14 @@ describe("RestHandler — cognitive decisions", () => {
     fc.db!.recordDecision("optimizer", "tuned config", "improve velocity");
     const res = await h.handleDashboardApi("GET", "/api/cognitive/metrics", "");
     expect(res.status).toBe(200);
-    const metrics = res.data as { agent_name: string }[];
-    expect(metrics.some((m) => m.agent_name === "optimizer")).toBe(true);
+    const metrics = res.data as { agent_name: string; total_decisions: number; scored_decisions: number; trend: string }[];
+    const optimizer = metrics.find((m) => m.agent_name === "optimizer");
+    expect(optimizer).toBeDefined();
+    // Field names the dashboard's DecisionMetric type reads; one unscored decision
+    // is too few to compute a trend.
+    expect(optimizer!.total_decisions).toBe(1);
+    expect(optimizer!.scored_decisions).toBe(0);
+    expect(optimizer!.trend).toBe("insufficient_data");
   });
 });
 

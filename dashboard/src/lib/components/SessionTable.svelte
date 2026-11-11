@@ -55,6 +55,12 @@
   type InactiveSort = "chrono" | "alpha";
   let inactiveSort: InactiveSort = $state("chrono");
 
+  /** Sort-button handler; stops the click reaching the divider row, which would collapse the group. */
+  function setInactiveSort(e: MouseEvent, mode: InactiveSort) {
+    e.stopPropagation();
+    inactiveSort = mode;
+  }
+
   /** Active sessions sorted alphabetically (small set; chronological isn't useful here). */
   const activeSessions = $derived(
     filteredSessions.filter((s) => ACTIVE_STATUSES.has(s.status)).sort((a, b) => a.name.localeCompare(b.name))
@@ -440,17 +446,17 @@
             <span class="inactive-label">Inactive</span>
             <span class="inactive-count">{inactiveTotal}</span>
             {#if showInactive}
-              <span class="sort-controls" onclick={(e) => e.stopPropagation()} role="group" aria-label="Inactive sort">
+              <span class="sort-controls" role="group" aria-label="Inactive sort">
                 <button
                   class="sort-btn"
                   class:sort-active={inactiveSort === "chrono"}
-                  onclick={() => (inactiveSort = "chrono")}
+                  onclick={(e) => setInactiveSort(e, "chrono")}
                   title="Sort by recent activity (uptime_start desc)"
                 >recent</button>
                 <button
                   class="sort-btn"
                   class:sort-active={inactiveSort === "alpha"}
-                  onclick={() => (inactiveSort = "alpha")}
+                  onclick={(e) => setInactiveSort(e, "alpha")}
                   title="Sort alphabetically"
                 >a–z</button>
               </span>

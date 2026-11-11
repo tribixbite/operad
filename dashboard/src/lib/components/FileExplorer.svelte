@@ -135,7 +135,7 @@
   });
 </script>
 
-<div class="file-explorer" onclick={(e) => e.stopPropagation()}>
+<div class="file-explorer">
   <!-- Breadcrumb navigation -->
   <div class="breadcrumb-bar">
     {#if inSubdir || viewingFile}
@@ -218,10 +218,6 @@
 </div>
 
 <style>
-  .file-explorer {
-    /* Container — no max-height here; children constrain themselves */
-  }
-
   .status-msg {
     font-size: 0.6875rem;
     color: var(--text-muted);
@@ -360,11 +356,6 @@
     color: var(--text-muted);
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
-  }
-
-  /* File content view */
-  .file-view {
-    /* Container for content preview */
   }
 
   .truncated-notice {

@@ -7,7 +7,7 @@
     fetchDecisionMetrics, fetchAgents, fetchStrategyHistory,
     fetchSpecializations,
   } from "$lib/api";
-  import type { StrategyVersion } from "$lib/api";
+  import type { StrategyVersion, DecisionMetric, PersonalityDrift } from "$lib/api";
   import { connect, on } from "$lib/ws.svelte";
   import type {
     GoalRecord, DecisionRecord,
@@ -77,13 +77,7 @@
   /** Per-agent learnings */
   let learnings: Map<string, AgentLearning[]> = $state(new Map());
   /** Per-agent decision metrics */
-  let decisionMetrics: Array<{
-    agent_name: string;
-    avg_score: number | null;
-    scored_count: number;
-    total_count: number;
-    trend: string;
-  }> = $state([]);
+  let decisionMetrics: DecisionMetric[] = $state([]);
   /** Selected agent for growth detail */
   let growthAgent: string | null = $state(null);
   /** Derived personality traits for selected growth agent */
@@ -93,7 +87,7 @@
   /** Derived decision metric for selected growth agent */
   let growthMetric = $derived(growthAgent ? decisionMetrics.find(m => m.agent_name === growthAgent) ?? null : null);
   /** Per-agent personality drift */
-  let drifts: Map<string, Array<{ trait_name: string; current: number; previous: number; delta: number; direction: string }>> = $state(new Map());
+  let drifts: Map<string, PersonalityDrift[]> = $state(new Map());
   /** Derived drift for selected growth agent */
   let growthDrift = $derived(growthAgent ? (drifts.get(growthAgent) ?? []) : []);
   /** Per-agent strategy version history */
@@ -200,7 +194,7 @@
       // Load personality + learnings + drift + strategy history for each agent in parallel
       const pMap = new Map<string, PersonalityTrait[]>();
       const lMap = new Map<string, AgentLearning[]>();
-      const dMap = new Map<string, Array<{ trait_name: string; current: number; previous: number; delta: number; direction: string }>>();
+      const dMap = new Map<string, PersonalityDrift[]>();
       const sMap = new Map<string, StrategyVersion[]>();
       await Promise.all(agents.map(async (a: AgentInfo) => {
         const [p, l, d, s] = await Promise.all([
@@ -692,7 +686,7 @@
                 <span class="metric-score" class:good={m.avg_score != null && m.avg_score >= 0.7} class:mid={m.avg_score != null && m.avg_score >= 0.4 && m.avg_score < 0.7} class:bad={m.avg_score != null && m.avg_score < 0.4}>
                   {m.avg_score != null ? `${Math.round(m.avg_score * 100)}%` : "—"}
                 </span>
-                <span class="metric-detail">{m.scored_count}/{m.total_count} scored</span>
+                <span class="metric-detail">{m.scored_decisions}/{m.total_decisions} scored</span>
                 <span class="metric-trend" class:improving={m.trend === "improving"} class:declining={m.trend === "declining"}>
                   {m.trend}
                 </span>
@@ -721,8 +715,8 @@
                     </div>
                     <span class="trait-value">{t.trait_value.toFixed(2)}</span>
                     {#each growthDrift.filter(d => d.trait_name === t.trait_name) as d}
-                      <span class="drift-indicator" class:up={d.direction === "up"} class:down={d.direction === "down"}>
-                        {d.direction === "up" ? "↑" : "↓"}{Math.abs(d.delta).toFixed(2)}
+                      <span class="drift-indicator" class:up={d.direction === "increased"} class:down={d.direction === "decreased"}>
+                        {d.direction === "increased" ? "↑" : d.direction === "decreased" ? "↓" : "→"}{Math.abs(d.delta).toFixed(2)}
                       </span>
                     {/each}
                   </div>
@@ -788,7 +782,7 @@
                   {growthMetric.avg_score != null ? `${Math.round(growthMetric.avg_score * 100)}%` : "—"}
                 </span>
                 <span class="quality-detail">
-                  {growthMetric.scored_count} scored / {growthMetric.total_count} total
+                  {growthMetric.scored_decisions} scored / {growthMetric.total_decisions} total
                 </span>
                 <span class="quality-trend" class:improving={growthMetric.trend === "improving"} class:declining={growthMetric.trend === "declining"}>
                   {growthMetric.trend}

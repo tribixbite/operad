@@ -145,7 +145,7 @@
   });
 </script>
 
-<div class="script-runner" onclick={(e) => e.stopPropagation()}>
+<div class="script-runner">
   <!-- Command input row -->
   <div class="cmd-row">
     <input

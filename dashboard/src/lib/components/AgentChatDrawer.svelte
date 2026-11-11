@@ -216,9 +216,11 @@
   }
 </script>
 
-<!-- Backdrop -->
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onclose}></div>
+<!-- Escape closes the drawer: the keyboard counterpart of a backdrop click -->
+<svelte:window onkeydown={(e) => { if (e.key === "Escape") onclose(); }} />
+
+<!-- Backdrop: pointer-only dismiss target, hidden from assistive tech -->
+<div class="backdrop" role="presentation" onclick={onclose}></div>
 
 <!-- Drawer -->
 <div class="drawer">

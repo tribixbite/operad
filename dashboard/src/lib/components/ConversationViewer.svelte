@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fetchConversation, sendToSession, branchSession } from "$lib/api";
   import { store } from "$lib/store.svelte";
+  import { untrack } from "svelte";
   import type { ConversationPage, ConversationEntry, ConversationBlock } from "$lib/types";
   import PromptLibrary from "./PromptLibrary.svelte";
 
@@ -60,7 +61,7 @@
   let error: string | null = $state(null);
   // Seed from the optional prop so the first load targets the requested
   // conversation; the session picker can still switch afterwards.
-  let selectedSessionId = $state(initialSessionId ?? "");
+  let selectedSessionId = $state(untrack(() => initialSessionId ?? ""));
   let scrollContainer: HTMLElement | undefined = $state(undefined);
 
   // Prompt input state
@@ -77,7 +78,7 @@
   let sentMessages: string[] = $state([]);
   let recallIndex = $state(-1);
   let savedDraft = $state("");
-  const RECALL_STORAGE_KEY = `tmx-recall-${sessionName}`;
+  const RECALL_STORAGE_KEY = $derived(`tmx-recall-${sessionName}`);
 
   // Template pills for quick prompts
   const TEMPLATE_PILLS = [

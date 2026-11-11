@@ -254,7 +254,7 @@
         const proj = projectBasename(p.project);
         const ts = new Date(p.timestamp).toISOString().slice(0, 19);
         const star = p.starred ? " [starred]" : "";
-        return `--- ${proj} | ${ts} | ${p.session}${star} ---\n${p.display}\n`;
+        return `--- ${proj} | ${ts} | ${p.sessionId ?? "no session"}${star} ---\n${p.display}\n`;
       });
       const blob = new Blob([lines.join("\n")], { type: "text/plain" });
       const url = URL.createObjectURL(blob);
@@ -470,9 +470,7 @@
     flex-direction: column;
     gap: 0.5rem;
   }
-  .prompt-library:not(.compact) {
-    /* Standalone card mode uses card class from global.css */
-  }
+  /* Standalone (non-compact) mode takes its card styling from the global .card class */
 
   /* -- Header (standalone mode only) -- */
   .header {
@@ -666,17 +664,20 @@
     overflow: hidden;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
   }
   /* Tapped-open row: drop the 2-line clamp so the full prompt shows. */
   .prompt-item.expanded .prompt-text {
     -webkit-line-clamp: unset;
+    line-clamp: unset;
     display: block;
     overflow: visible;
   }
   .compact .prompt-text {
     font-size: 0.625rem;
     -webkit-line-clamp: 1;
+    line-clamp: 1;
   }
 
   .prompt-meta {

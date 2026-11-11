@@ -8,7 +8,7 @@
 
   let { sessionName }: Props = $props();
 
-  let info: GitInfo | null = $state(null);
+  let info = $state<GitInfo | null>(null);
   let loading = $state(true);
   let error: string | null = $state(null);
   /** Track last loaded session to skip redundant fetches */
@@ -43,7 +43,7 @@
   });
 </script>
 
-<div class="git-panel" onclick={(e) => e.stopPropagation()}>
+<div class="git-panel">
   {#if loading}
     <div class="status-msg">Loading git info...</div>
   {:else if error}

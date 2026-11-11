@@ -236,7 +236,8 @@ bun ~/git/operad/dist/tmx.js daemon --enable-skills-preview</pre>
           <input type="checkbox" bind:checked={installForceOwnership} />
           force-take-ownership
         </label>
-        <button onclick={handleInstall} disabled={installing || !installLocator.trim()}>
+        <!-- Wrapped: a bare handler would receive the MouseEvent as acceptCapDowngrade. -->
+        <button onclick={() => handleInstall()} disabled={installing || !installLocator.trim()}>
           {installing ? "Installing…" : "Install"}
         </button>
       </div>
