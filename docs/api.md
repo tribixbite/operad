@@ -624,9 +624,15 @@ Body: `{ "session_id": "string" }`
 ### MCP Servers
 
 #### `GET /api/mcp`
-List all MCP servers from `~/.claude/claude_desktop_config.json`.
+List all MCP servers from `~/.claude.json` (`mcpServers`), with `enabled`
+derived from `disabledMcpServers` in `~/.claude/settings.json`.
 
-Response: `{ servers: [{ name, command, args, env, enabled, source }] }`
+Response: `{ servers: [{ name, command, args, env, enabled, source }] }`.
+Missing files read as empty. When either file exists but is unreadable, not
+valid JSON, not a JSON object, or holds a wrong-shaped `mcpServers` /
+`disabledMcpServers`, the response is `409` with
+`{ "error": string, "file": "<absolute path of the broken file>" }`, so a
+broken config is never shown as "no servers configured".
 
 #### `POST /api/mcp`
 Add a new MCP server.
@@ -647,7 +653,8 @@ Enable or disable an MCP server.
 All four write routes are read-modify-write of `~/.claude.json` (toggle:
 `~/.claude/settings.json`) and write atomically (temp file + rename). When the
 existing file is unreadable, not valid JSON, or not a JSON object, they answer
-`409` with `{ error }` and leave the file untouched rather than replacing it.
+`409` with `{ error, file }` (same shape as `GET /api/mcp`) and leave the file
+untouched rather than replacing it.
 
 ---
 
@@ -1260,7 +1267,9 @@ All REST endpoints return:
 - `200` on success
 - `201` on resource creation
 - `202` on accepted (non-blocking operations)
-- `400` for bad request (missing params, invalid JSON)
+- `400` for bad request (missing params, invalid JSON, or a malformed
+  percent-escape such as a bare `%` in any path segment — every segment is
+  decoded once, up front, before routing)
 - `403` for forbidden operations (e.g., deleting a builtin agent)
 - `404` for not found
 - `405` for wrong HTTP method
