@@ -49,6 +49,11 @@ export interface AndroidEngineDeps {
   readLocalBootId: () => string | null;
   /** adb binary to invoke. */
   adbBin: string;
+  /**
+   * Run adb.connect_script bounded by a timeout, without blocking the event
+   * loop (default: AndroidEngine's async `timeout <s> <script>` spawn).
+   */
+  connect: (script: string, timeoutS: number) => Promise<{ status: number | null; stderr: string }>;
 }
 
 /**
@@ -230,6 +235,7 @@ export class AndroidEngine {
       platform: deps.platform ?? detectPlatform(),
       readLocalBootId: deps.readLocalBootId ?? readKernelBootId,
       adbBin: deps.adbBin ?? ADB_BIN,
+      connect: deps.connect ?? ((script, timeoutS) => this.runConnectScript(script, timeoutS)),
     };
   }
 
@@ -399,18 +405,26 @@ export class AndroidEngine {
         // never reached even when adb was already connected (e.g. a pinned
         // `adb tcpip` loopback). Skip the step and use whatever is online.
         this.ctx.log.info("No adb.connect_script configured — using the existing ADB connection");
-        this.invalidateAdbSerial();
-        if (!this.resolveAdbSerial()) {
-          return fail("ADB fix skipped: no adb.connect_script configured and no ADB device online");
-        }
       } else {
-        const result = await this.runConnectScript(connect_script, connect_timeout_s);
+        const result = await this.deps.connect(connect_script, connect_timeout_s);
         if (result.status !== 0) {
           return fail("ADB connection failed", { stderr: result.stderr.trim() });
         }
-        this.ctx.log.info("ADB connected");
-        // Clear cached serial so it's re-resolved with the new connection
-        this.invalidateAdbSerial();
+        this.ctx.log.info("ADB connect script succeeded");
+      }
+
+      // Shared post-connect verification for both paths. A connect script
+      // exiting 0 proves nothing about what adb can see: previously that
+      // alone marked adb fixed and ran the phantom fix against no device (or
+      // a foreign one). Fixed means a VERIFIED local serial exists now.
+      // Clear the cached serial first so the fresh connection is resolved.
+      this.invalidateAdbSerial();
+      if (!this.resolveLocalAdbSerial()) {
+        const seen = this.resolveAdbSerial();
+        return fail(
+          `ADB fix not applied: no verified local ADB device online` +
+            (seen ? ` (adb sees '${seen}', which is not this device)` : ""),
+        );
       }
 
       if (phantom_fix) {

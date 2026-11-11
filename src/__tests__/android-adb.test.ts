@@ -20,9 +20,11 @@ import { AndroidEngine } from "../android-engine.js";
 
 function makeCtx(connectScript: string): any {
   return {
-    config: { adb: { connect_script: connectScript, connect_timeout_s: 10, phantom_fix: false } },
+    config: {
+      adb: { connect_script: connectScript, connect_timeout_s: 10, retry_interval_s: 3600, phantom_fix: false },
+    },
     log: { info() {}, warn() {}, error() {}, debug() {} },
-    state: { setAdbFixed() {} },
+    state: { setAdbFixed() {}, getState: () => ({ adb_fixed: false }) },
   };
 }
 
@@ -45,7 +47,14 @@ describe.skipIf(!process.env.TERMUX_VERSION)("AndroidEngine.fixAdb — non-block
       : "#!/bin/sh";
     writeFileSync(script, `${shebang}\nsleep 1\nexit 0\n`);
     chmodSync(script, 0o755);
-    const engine = new AndroidEngine(makeCtx(script));
+    // Real connect runner (what's under test), but a fake synchronous runner:
+    // fixAdb's post-connect verification must not query — or `adb
+    // disconnect` stale entries on — the host's real adb server.
+    const engine = new AndroidEngine(makeCtx(script), {
+      run: () => ({ status: 0, stdout: "List of devices attached\n", stderr: "" }),
+      platform: { notify() {}, resolveLocalIp: () => null } as any,
+      readLocalBootId: () => null,
+    });
 
     const order: string[] = [];
     // Fires 30ms in — well inside the 1s connect. Only reaches the queue if
@@ -58,6 +67,8 @@ describe.skipIf(!process.env.TERMUX_VERSION)("AndroidEngine.fixAdb — non-block
     // returns → ["adb","timer"].
     expect(order).toEqual(["timer", "adb"]);
 
+    // No device → fixAdb arms its retry timer; don't leak it.
+    engine.stopRetryTimer();
     rmSync(dir, { recursive: true, force: true });
   }, 10000);
 });

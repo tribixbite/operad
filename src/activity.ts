@@ -9,9 +9,15 @@
  *
  * Confirmed on device: active session delta=7, idle session delta=0.
  *
- * TODO: macOS builds its tree from `ps utime/stime`, which has no cutime
- * equivalent, so reaped children's time still leaves the tree there; only
- * the negative-delta rule protects those sessions.
+ * TODO: macOS builds its tree from `ps -eo pid,ppid,utime,stime`, which
+ * reports each LIVE process's own time only — there is no cutime/cstime
+ * equivalent. What is lost there: the CPU time of every descendant that
+ * exited and was reaped before the next poll. A child that both starts and
+ * exits within one poll interval contributes zero ticks, so a session whose
+ * work is a stream of such short-lived children (a build spawning compilers)
+ * can read a delta of 0 and accrue idle streak. The negative-delta rule only
+ * covers the case where the tree total visibly drops (a child seen in the
+ * previous poll is gone), not children that were never seen at all.
  */
 
 import type { Logger } from "./log.js";
