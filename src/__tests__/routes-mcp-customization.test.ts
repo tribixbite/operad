@@ -14,8 +14,8 @@
  *    branches that return early WITHOUT touching the file system (409 collision,
  *    404 not-found), plus a full round-trip against a McpRoutes instance whose
  *    claudeJsonPath getter we override in a subclass pointing at fc.dir.
- *  - readClaudeJson() returns {} on any error — safe to call against a
- *    non-existent or empty path.
+ *  - cmdMcpList() reads both files strictly: absent → empty list, unreadable
+ *    → 409 naming the file.
  *  - cmdMcpToggle writes settings.json — same per-instance path override used.
  *
  * For CustomizationRoutes the helper methods are purely functional:
@@ -98,28 +98,29 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// McpRoutes.readClaudeJson()
+// McpRoutes.cmdMcpList()
 // ---------------------------------------------------------------------------
 
-describe("McpRoutes.readClaudeJson()", () => {
-  test("returns {} when file does not exist", () => {
+describe("McpRoutes.cmdMcpList()", () => {
+  test("returns an empty list when neither file exists", () => {
     const routes = new TempMcpRoutes(fc.ctx, fc.dir);
-    const result = routes.readClaudeJson();
-    expect(result).toEqual({});
+    expect(routes.cmdMcpList()).toEqual({ status: 200, data: { servers: [] } });
   });
 
-  test("returns parsed content when valid JSON file exists", () => {
+  test("returns parsed servers when .claude.json is valid", () => {
     writeFileSync(join(fc.dir, ".claude.json"), JSON.stringify({ mcpServers: { "my-tool": { command: "cmd" } } }), "utf-8");
     const routes = new TempMcpRoutes(fc.ctx, fc.dir);
-    const result = routes.readClaudeJson();
-    expect((result.mcpServers as Record<string, unknown>)["my-tool"]).toBeDefined();
+    const result = routes.cmdMcpList();
+    expect(result.status).toBe(200);
+    expect((result.data as { servers: Array<{ name: string }> }).servers.map((s) => s.name)).toEqual(["my-tool"]);
   });
 
-  test("returns {} when file has invalid JSON", () => {
+  test("returns 409 (not an empty list) when .claude.json has invalid JSON", () => {
     writeFileSync(join(fc.dir, ".claude.json"), "{ bad json }", "utf-8");
     const routes = new TempMcpRoutes(fc.ctx, fc.dir);
-    const result = routes.readClaudeJson();
-    expect(result).toEqual({});
+    const result = routes.cmdMcpList();
+    expect(result.status).toBe(409);
+    expect((result.data as { file: string }).file).toBe(join(fc.dir, ".claude.json"));
   });
 });
 
@@ -659,6 +660,56 @@ describe("RestHandler — GET /api/mcp (list)", () => {
     expect(res.status).toBe(200);
     const servers = (res.data as { servers: Array<{ name: string }> }).servers;
     expect(servers.some((s) => s.name === "listed-tool")).toBe(true);
+  });
+
+  // The list used to read ~/.claude.json leniently (broken → {} → an empty
+  // list indistinguishable from "no servers configured") and JSON.parse
+  // settings.json unguarded (broken → URIError-style 500). Both now answer
+  // 409 naming the unreadable file, matching the write routes.
+  for (const bad of ['{ "mcpServers": ', "[1]", "null"]) {
+    test(`GET /api/mcp → 409 naming .claude.json when it is unreadable (${bad})`, async () => {
+      const path = join(fc.dir, ".claude.json");
+      writeFileSync(path, bad, "utf-8");
+      const res = await buildH().handleDashboardApi("GET", "/api/mcp", "");
+      expect(res.status).toBe(409);
+      const data = res.data as { error: string; file: string; servers?: unknown };
+      expect(data.file).toBe(path);
+      expect(data.error).toContain(path);
+      expect(data.servers).toBeUndefined();
+    });
+
+    test(`GET /api/mcp → 409 naming settings.json when it is unreadable (${bad})`, async () => {
+      writeFileSync(join(fc.dir, ".claude.json"), JSON.stringify({ mcpServers: { t: { command: "c" } } }), "utf-8");
+      const path = join(fc.dir, "settings.json");
+      writeFileSync(path, bad, "utf-8");
+      const res = await buildH().handleDashboardApi("GET", "/api/mcp", "");
+      expect(res.status).toBe(409);
+      expect((res.data as { file: string }).file).toBe(path);
+    });
+  }
+
+  test("GET /api/mcp → 409 when mcpServers / disabledMcpServers have the wrong shape", async () => {
+    const claudeJson = join(fc.dir, ".claude.json");
+    writeFileSync(claudeJson, JSON.stringify({ mcpServers: ["t"] }), "utf-8");
+    const a = await buildH().handleDashboardApi("GET", "/api/mcp", "");
+    expect(a.status).toBe(409);
+    expect((a.data as { file: string }).file).toBe(claudeJson);
+
+    writeFileSync(claudeJson, JSON.stringify({ mcpServers: {} }), "utf-8");
+    const settings = join(fc.dir, "settings.json");
+    writeFileSync(settings, JSON.stringify({ disabledMcpServers: "t" }), "utf-8");
+    const b = await buildH().handleDashboardApi("GET", "/api/mcp", "");
+    expect(b.status).toBe(409);
+    expect((b.data as { file: string }).file).toBe(settings);
+  });
+
+  test("GET /api/mcp marks servers listed in disabledMcpServers as disabled", async () => {
+    writeFileSync(join(fc.dir, ".claude.json"), JSON.stringify({ mcpServers: { a: { command: "x" }, b: { command: "y" } } }), "utf-8");
+    writeFileSync(join(fc.dir, "settings.json"), JSON.stringify({ disabledMcpServers: ["b"] }), "utf-8");
+    const res = await buildH().handleDashboardApi("GET", "/api/mcp", "");
+    expect(res.status).toBe(200);
+    const servers = (res.data as { servers: Array<{ name: string; enabled: boolean }> }).servers;
+    expect(Object.fromEntries(servers.map((s) => [s.name, s.enabled]))).toEqual({ a: true, b: false });
   });
 
   test("POST /api/mcp with missing name → 400", async () => {

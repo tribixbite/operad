@@ -16,10 +16,10 @@ import { readJsonObjectFile, writeJsonFileAtomic } from "./customization-transfe
 type RouteResult = { status: number; data: unknown };
 
 /**
- * McpRoutes — handles POST/PUT/DELETE /api/mcp and POST /api/mcp/:name/toggle.
+ * McpRoutes — handles GET/POST/PUT/DELETE /api/mcp and POST /api/mcp/:name/toggle.
  *
- * Also exposes readClaudeJson() and settingsJsonPath for the mcp GET list
- * (called inline from the RestHandler dispatch for the GET case).
+ * Every route reads through readJsonObjectFile; GET reports an unreadable
+ * file as a 409 naming it, exactly like the writes.
  *
  * Every write is read-modify-write of a file Claude Code owns. The read goes
  * through readJsonObjectFile, which reports an unreadable / unparseable /
@@ -45,14 +45,13 @@ export class McpRoutes {
   }
 
   /**
-   * Read ~/.claude.json for DISPLAY, returning the parsed object or `{}`.
-   *
-   * Lenient on purpose: the GET list only renders it. Never feed this result
-   * back into a write — use {@link updateJsonObject}, which refuses instead.
+   * The 409 every MCP route returns when a config file it depends on is
+   * unreadable, unparseable, or the wrong shape. `file` names which one, so
+   * the client can tell "~/.claude.json is broken" from "settings.json is
+   * broken" without parsing the message.
    */
-  readClaudeJson(): Record<string, unknown> {
-    const read = readJsonObjectFile(this.claudeJsonPath);
-    return read.ok ? read.obj : {};
+  private unreadable(file: string, error: string): RouteResult {
+    return { status: 409, data: { error, file } };
   }
 
   /**
@@ -70,7 +69,7 @@ export class McpRoutes {
     onWritten: (obj: Record<string, unknown>) => unknown,
   ): RouteResult {
     const read = readJsonObjectFile(path);
-    if (!read.ok) return { status: 409, data: { error: read.error } };
+    if (!read.ok) return this.unreadable(path, read.error);
     const early = mutate(read.obj);
     if (early) return early;
     const writeErr = writeJsonFileAtomic(path, read.obj);
@@ -95,6 +94,42 @@ export class McpRoutes {
   // ---------------------------------------------------------------------------
   // Public route methods
   // ---------------------------------------------------------------------------
+
+  /**
+   * GET /api/mcp — list MCP servers from ~/.claude.json with their enabled
+   * state from settings.json.
+   *
+   * Strict, like the write routes: an unreadable / unparseable / wrong-shaped
+   * file is a 409 naming it. The list used to fall back to {} (a broken
+   * ~/.claude.json looked exactly like "no servers configured") and parse
+   * settings.json unguarded (a broken one was a bare 500).
+   */
+  cmdMcpList(): RouteResult {
+    const claude = readJsonObjectFile(this.claudeJsonPath);
+    if (!claude.ok) return this.unreadable(this.claudeJsonPath, claude.error);
+    const rawServers = claude.obj.mcpServers ?? {};
+    if (!rawServers || typeof rawServers !== "object" || Array.isArray(rawServers)) {
+      return this.unreadable(this.claudeJsonPath, `mcpServers in ${this.claudeJsonPath} is not an object`);
+    }
+
+    const settings = readJsonObjectFile(this.settingsJsonPath);
+    if (!settings.ok) return this.unreadable(this.settingsJsonPath, settings.error);
+    const disabled = settings.obj.disabledMcpServers ?? [];
+    if (!Array.isArray(disabled)) {
+      return this.unreadable(this.settingsJsonPath, `disabledMcpServers in ${this.settingsJsonPath} is not an array`);
+    }
+
+    const servers = Object.entries(rawServers as Record<string, Record<string, unknown> | null>)
+      .map(([name, cfg]) => ({
+        name,
+        command: cfg?.command ?? "",
+        args: cfg?.args ?? [],
+        env: cfg?.env ?? {},
+        enabled: !disabled.includes(name),
+        source: "claude-json" as const,
+      }));
+    return { status: 200, data: { servers } };
+  }
 
   /** Add a new MCP server to ~/.claude.json */
   cmdMcpAdd(
@@ -183,10 +218,10 @@ export class McpRoutes {
         (settings) => {
           const raw = settings.disabledMcpServers ?? [];
           if (!Array.isArray(raw)) {
-            return {
-              status: 409,
-              data: { error: `disabledMcpServers in ${this.settingsJsonPath} is not an array — refusing to overwrite it` },
-            };
+            return this.unreadable(
+              this.settingsJsonPath,
+              `disabledMcpServers in ${this.settingsJsonPath} is not an array — refusing to overwrite it`,
+            );
           }
           const disabled = raw as unknown[];
           const idx = disabled.indexOf(serverName);

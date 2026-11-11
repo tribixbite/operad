@@ -79,6 +79,31 @@ const BASH_SHEBANG = process.env.PREFIX
   ? `#!${process.env.PREFIX}/bin/bash`
   : `#!/usr/bin/env bash`;
 
+/**
+ * Split an `/api/...` path into its segments and percent-decode EVERY one,
+ * exactly once. Returns null when any segment holds a malformed escape (a raw
+ * `%`, `%zz`, a truncated UTF-8 sequence) — the dispatcher answers that with
+ * a 400.
+ *
+ * This is the only place the REST dispatcher decodes path input. Routes used
+ * to decode deeper segments ad hoc, where a malformed escape threw URIError
+ * into the catch-all and surfaced as a 500, and segments[1] was sometimes
+ * decoded twice (`%2541` → "A"). Splitting happens BEFORE decoding, so an
+ * encoded `%2F` stays inside its segment instead of creating a new one.
+ */
+export function decodePathSegments(pathPart: string): string[] | null {
+  const raw = pathPart.replace(/^\/api\//, "").split("/");
+  const decoded: string[] = [];
+  for (const segment of raw) {
+    try {
+      decoded.push(decodeURIComponent(segment));
+    } catch {
+      return null;
+    }
+  }
+  return decoded;
+}
+
 /** Chunk text into ~maxChars segments splitting on paragraph/newline boundaries */
 function chunkText(text: string, maxChars = 2000): string[] {
   const chunks: string[] = [];
@@ -295,22 +320,16 @@ export class RestHandler {
       return raw === "live" || raw === "all" ? raw : fallback;
     };
 
-    // Extract path segments: /api/command/name
-    const segments = pathPart.replace(/^\/api\//, "").split("/");
-    const command = segments[0];
-    // A raw `%` in a path segment makes decodeURIComponent throw a URIError.
-    // This sits above the try below, so it used to fall out to the transport
-    // and surface as a 500 — a malformed request from the client is a 400.
-    let name: string | undefined;
-    try {
-      name = segments[1] ? decodeURIComponent(segments[1]) : undefined;
-    } catch {
+    // Extract path segments: /api/command/name/... — every segment is
+    // percent-decoded exactly once, here. A malformed escape anywhere in the
+    // path is the client's error (400), never a URIError 500 from inside a
+    // route. Routes must treat `segments` / `name` as already decoded.
+    const segments = decodePathSegments(pathPart);
+    if (!segments) {
       return { status: 400, data: { error: "Malformed percent-encoding in path" } };
     }
-    // `name` is DECODED from here on — routes must not decode it again.
-    // TODO: segments[2+] are still decoded ad hoc per route; a malformed `%`
-    // there throws inside the try below and surfaces as a 500, not a 400.
-    // Decode all segments once here and hand routes the decoded array.
+    const command = segments[0];
+    const name: string | undefined = segments[1] || undefined;
 
     try {
       let resp;
@@ -681,7 +700,7 @@ export class RestHandler {
           }
           if (name === "disconnect") {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
-            const serial = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+            const serial = segments[2] || undefined;
             if (serial) return this.adbRoutes.adbDisconnectDevice(serial);
             return this.adbRoutes.adbDisconnectAll();
           }
@@ -846,7 +865,7 @@ export class RestHandler {
           break;
         case "customization-file": {
           if (method === "GET") {
-            const filePath = segments.slice(1).map(s => decodeURIComponent(s)).join("/");
+            const filePath = segments.slice(1).join("/");
             if (!filePath) return { status: 400, data: { error: "File path required" } };
             resp = this.customizationRoutes.cmdReadCustomizationFile(filePath);
           } else if (method === "POST") {
@@ -1013,21 +1032,9 @@ export class RestHandler {
         }
         case "mcp": {
           if (method === "GET" && !name) {
-            const config = this.mcpRoutes.readClaudeJson();
-            const settingsData = existsSync(this.mcpRoutes.settingsJsonPath)
-              ? JSON.parse(readFileSync(this.mcpRoutes.settingsJsonPath, "utf-8")) : {};
-            const disabled: string[] = settingsData.disabledMcpServers ?? [];
-            const servers = Object.entries(config.mcpServers ?? {}).map(([n, cfg]: [string, any]) => ({
-              name: n,
-              command: cfg.command ?? "",
-              args: cfg.args ?? [],
-              env: cfg.env ?? {},
-              enabled: !disabled.includes(n),
-              source: "claude-json" as const,
-            }));
-            return { status: 200, data: { servers } };
+            return this.mcpRoutes.cmdMcpList();
           }
-          const mcpAction = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          const mcpAction = segments[2] || undefined;
           if (mcpAction === "toggle" && name) {
             if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
             return this.mcpRoutes.cmdMcpToggle(name);
@@ -1055,7 +1062,7 @@ export class RestHandler {
           return { status: 405, data: { error: "Method not allowed" } };
         }
         case "prompts": {
-          const promptAction = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          const promptAction = segments[2] || undefined;
           if (name === "projects" && method === "GET") {
             return { status: 200, data: getPromptProjects() };
           }
@@ -1160,7 +1167,7 @@ export class RestHandler {
         }
         case "sdk": {
           const subCmd = name;
-          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          const arg = segments[2] || undefined;
           // The switchboard kill-switch (all / sdkBridge) gates starting work
           // on the bridge, exactly as the WS attach path does. Detach,
           // interrupt and status stay open so a disabled bridge can still be
@@ -1272,12 +1279,12 @@ export class RestHandler {
 
         case "agents": {
           const subCmd = name;
-          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          const arg = segments[2] || undefined;
 
           if (subCmd === "runs") {
             if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
             // /api/agents/runs/<id> — fetch one run with full prompt/response/thinking text.
-            const detailId = segments[2] ? Number(decodeURIComponent(segments[2])) : NaN;
+            const detailId = segments[2] ? Number(segments[2]) : NaN;
             if (Number.isFinite(detailId)) {
               const run = memoryDb.getAgentRun(detailId);
               if (!run) return { status: 404, data: { error: `Run not found: ${detailId}` } };
@@ -1397,7 +1404,7 @@ export class RestHandler {
 
           if (subCmd && arg === "personality" && method === "GET") {
             if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
-            const traitName = segments[3] ? decodeURIComponent(segments[3]) : undefined;
+            const traitName = segments[3] || undefined;
             if (traitName === "history") {
               const trait = queryParams.get("trait") ?? "";
               return { status: 200, data: memoryDb.getPersonalityHistory(subCmd, trait) };
@@ -1540,9 +1547,8 @@ export class RestHandler {
           // (== agent1/`name`), so every conversation query compared an agent
           // to itself. Requiring segments[2] also stops `pairs` being shadowed.
           if (name && segments[2] && method === "GET") {
-            // `name` (agent1) is already decoded; only segments[2] is raw.
             const agent1 = name;
-            const agent2 = decodeURIComponent(segments[2]);
+            const agent2 = segments[2];
             const limit = parseLimit(queryParams, 50);
             return { status: 200, data: memoryDb.getConversation(agent1, agent2, limit) };
           }
@@ -1572,7 +1578,7 @@ export class RestHandler {
 
         case "cognitive": {
           const subCmd = name;
-          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          const arg = segments[2] || undefined;
 
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
@@ -1658,7 +1664,7 @@ export class RestHandler {
 
         case "profile": {
           const subCmd = name;
-          const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+          const arg = segments[2] || undefined;
 
           if (!memoryDb) return { status: 503, data: { error: "Memory database not initialized" } };
 
@@ -1835,7 +1841,7 @@ export class RestHandler {
             if (name) {
               const tool = toolExec.getTool(name);
               if (!tool) return { status: 404, data: { error: `Tool "${name}" not found` } };
-              const arg = segments[2] ? decodeURIComponent(segments[2]) : undefined;
+              const arg = segments[2] || undefined;
               if (arg === "history" && memoryDb) {
                 const limit = parseLimit(queryParams, 50);
                 const executions = memoryDb.getToolExecutions(undefined, limit)

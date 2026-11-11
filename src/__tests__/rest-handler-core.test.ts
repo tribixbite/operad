@@ -14,7 +14,9 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { RestHandler } from "../rest-handler.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { RestHandler, decodePathSegments } from "../rest-handler.js";
 import { ToolEngine } from "../tool-engine.js";
 import {
   makeFakeContext,
@@ -312,6 +314,49 @@ describe("RestHandler — clone / create / register validation", () => {
   test("POST /api/register with non-JSON body falls back to default (undefined)", async () => {
     await h.handleDashboardApi("POST", "/api/register", "not-json");
     expect(fc.calls.cmdRegister).toEqual([[undefined]]);
+  });
+});
+
+// Only segments[1] used to be decoded up front (with a 400 on failure); every
+// deeper segment was decoded ad hoc inside a route, where a malformed `%`
+// threw URIError into the dispatcher's catch-all and came back as a 500.
+describe("RestHandler — malformed percent-encoding in ANY path segment is a 400", () => {
+  const MALFORMED = ["%", "%zz", "%E0%A4%A"];
+  /** [method, path template] — `{bad}` is replaced by each malformed escape. */
+  const ROUTES: Array<[string, string]> = [
+    ["POST", "/api/sdk/attach/{bad}"],
+    ["GET", "/api/sdk/sessions/{bad}/messages"],
+    ["GET", "/api/agents/runs/{bad}"],
+    ["GET", "/api/agents/alpha/personality/{bad}"],
+    ["GET", "/api/agent-messages/alpha/{bad}"],
+    ["GET", "/api/customization-file/dir/{bad}"],
+    ["POST", "/api/mcp/srv/{bad}"],
+    ["POST", "/api/adb/disconnect/{bad}"],
+    ["GET", "/api/tools/read/{bad}"],
+    ["PUT", "/api/cognitive/goals/{bad}"],
+    ["GET", "/api/status/{bad}"],
+  ];
+
+  for (const [method, template] of ROUTES) {
+    test(`${method} ${template}`, async () => {
+      for (const bad of MALFORMED) {
+        const res = await h.handleDashboardApi(method, template.replace("{bad}", bad), "{}");
+        expect(res.status).toBe(400);
+        expect((res.data as { error: string }).error).toBe("Malformed percent-encoding in path");
+      }
+    });
+  }
+
+  test("decodePathSegments decodes every segment once, and null on malformed input", () => {
+    expect(decodePathSegments("/api/a%20b/c%2Fd/%2541")).toEqual(["a b", "c/d", "%41"]);
+    expect(decodePathSegments("/api/ok/fine/%zz")).toBeNull();
+  });
+
+  // Guard against a route reintroducing an ad-hoc (throwing) decode: the
+  // shared decoder is the only call site in the dispatcher module.
+  test("rest-handler.ts calls decodeURIComponent only inside decodePathSegments", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "rest-handler.ts"), "utf-8");
+    expect(src.match(/decodeURIComponent\(/g)?.length).toBe(1);
   });
 });
 
