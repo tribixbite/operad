@@ -6,6 +6,8 @@
  * page navigation to avoid connection exhaustion.
  */
 
+import { RoomRefs } from "./room-refs";
+
 /** Server -> Client WS message */
 export interface WsServerMessage {
   type: string;
@@ -29,7 +31,8 @@ export const wsState = $state({
 /** Internal state */
 let socket: WebSocket | null = null;
 let handlers = new Map<string, Set<WsHandler>>();
-let subscribedRooms = new Set<string>();
+/** Room holders across all components (see room-refs.ts). */
+const subscribedRooms = new RoomRefs();
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let intentionalClose = false;
 
@@ -63,7 +66,7 @@ export function connect(): void {
     wsState.reconnectAttempts = 0;
 
     // Re-subscribe to any rooms that were active before disconnect
-    for (const room of subscribedRooms) {
+    for (const room of subscribedRooms.rooms()) {
       socket?.send(JSON.stringify({ type: "subscribe", sessionName: room }));
     }
   };
@@ -125,7 +128,8 @@ function scheduleReconnect(): void {
 
 /** Subscribe to a session room for targeted messages */
 export function subscribe(sessionName: string): void {
-  subscribedRooms.add(sessionName);
+  // Only the first holder subscribes; later ones share it.
+  if (!subscribedRooms.join(sessionName)) return;
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "subscribe", sessionName }));
   }
@@ -133,7 +137,8 @@ export function subscribe(sessionName: string): void {
 
 /** Unsubscribe from a session room */
 export function unsubscribe(sessionName: string): void {
-  subscribedRooms.delete(sessionName);
+  // Only the last holder leaves the room on the server.
+  if (!subscribedRooms.leave(sessionName)) return;
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "unsubscribe", sessionName }));
   }

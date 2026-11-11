@@ -2,6 +2,7 @@
   import "../app.css";
   import { page } from "$app/stores";
   import NotificationBell from "$lib/components/NotificationBell.svelte";
+  import AgentPermissionWatcher from "$lib/components/AgentPermissionWatcher.svelte";
   import { loadEnv } from "$lib/env.svelte";
   import { authState, applyToken } from "$lib/auth.svelte";
 
@@ -101,6 +102,8 @@
     </section>
   {:else}
     {@render children()}
+    <!-- Agent runs' permission prompts, on whichever page is open. -->
+    <AgentPermissionWatcher />
   {/if}
 </main>
 

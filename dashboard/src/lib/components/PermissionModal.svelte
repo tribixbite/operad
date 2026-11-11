@@ -9,8 +9,8 @@
   }
   let { request, sessionName, ondismiss }: Props = $props();
 
-  /** Remaining seconds on the timeout countdown */
-  let remainingSec = $state(Math.ceil(request.timeout_ms / 1000));
+  /** Remaining seconds on the timeout countdown (seeded by the effect below). */
+  let remainingSec = $state(0);
   let countdownTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Truncated preview of tool input (max 500 chars) */
@@ -25,7 +25,10 @@
     }
   });
 
-  /** Start countdown timer */
+  /**
+   * Count down from the time the request has LEFT. Re-runs when a new request
+   * replaces this one, so the countdown is never the previous request's.
+   */
   $effect(() => {
     remainingSec = Math.ceil(request.timeout_ms / 1000);
     countdownTimer = setInterval(() => {
@@ -72,13 +75,17 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="perm-backdrop" onclick={() => respond("deny")}>
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="perm-modal" onclick={(e) => e.stopPropagation()}>
+<div class="perm-overlay">
+  <!--
+    The backdrop is a real button (tapping outside denies), placed BESIDE the
+    dialog rather than wrapping it, so no element needs a click handler it
+    cannot be keyboard-operated for. Keyboard users have Enter / Esc.
+  -->
+  <button type="button" class="perm-backdrop" tabindex="-1" aria-label="Deny" onclick={() => respond("deny")}></button>
+  <div class="perm-modal" role="alertdialog" aria-modal="true" aria-labelledby="perm-title">
     <div class="perm-header">
       <span class="perm-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg></span>
-      <span class="perm-title">Permission Request</span>
+      <span class="perm-title" id="perm-title">Permission Request</span>
       <span class="perm-timer" class:perm-timer-warn={remainingSec < 30}>
         {fmtTime(remainingSec)}
       </span>
@@ -108,15 +115,24 @@
 </div>
 
 <style>
-  .perm-backdrop {
+  .perm-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
     z-index: 200;
     display: flex;
     align-items: center;
     justify-content: center;
     animation: fade-in 0.15s ease-out;
+  }
+
+  .perm-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: default;
   }
 
   @keyframes fade-in {
@@ -125,6 +141,7 @@
   }
 
   .perm-modal {
+    position: relative; /* above the backdrop button */
     width: min(400px, 90vw);
     background: var(--bg-secondary);
     border: 1px solid var(--border);

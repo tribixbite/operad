@@ -71,6 +71,12 @@ describe("SdkBridge — standalone run permissions", () => {
     const req = sent.find((m) => m.data?.type === "permission_request");
     expect(req).toBeDefined();
     expect(req!.room).toBe("optimizer");
+    // The payload names its room and kind: agent and session rooms are both
+    // keyed by bare names, and the dashboard routes the two to different
+    // views (a global watcher for agent runs, the conversation drawer for
+    // attached sessions).
+    expect(req!.data.room).toBe("optimizer");
+    expect(req!.data.kind).toBe("agent");
 
     expect(bridge.resolvePermission(req!.data.id, "allow")).toBe(true);
     await run;
@@ -108,9 +114,57 @@ describe("SdkBridge — standalone run permissions", () => {
     await fake.asked;
     const req = sent.find((m) => m.data?.type === "permission_request")!;
     expect(req.room).toBe("my-session");
+    expect(req.data.room).toBe("my-session");
+    expect(req.data.kind).toBe("session");
 
     await bridge.detach();
     await sending;
     expect(fake.decisions).toEqual([{ behavior: "deny", message: "Session detached" }]);
+  });
+});
+
+describe("SdkBridge — pending requests survive a late subscriber", () => {
+  test("a room's outstanding requests can be replayed, and leave once answered", async () => {
+    // A request is broadcast once. A dashboard opened (or reconnected) after
+    // that would never see it, and the run would wait out its 5-minute
+    // timeout and be denied. The server replays these on subscribe.
+    const fake = makeFakeSdk();
+    _setSdkModule(fake.sdk);
+    const sent: Array<{ room: string; data: any }> = [];
+    const bridge = new SdkBridge(silentLog(), (room, data) => sent.push({ room, data }));
+
+    const run = bridge.runStandaloneAgent("optimizer", { prompt: "p" }, ".", "go");
+    await fake.asked;
+
+    const pending = bridge.pendingRequestsFor("optimizer");
+    expect(pending.length).toBe(1);
+    const live = sent.find((m) => m.data?.type === "permission_request")!.data;
+    // Same request — but `timeout_ms` is what is LEFT, so a late subscriber's
+    // countdown is not reset to the full five minutes.
+    const { timeout_ms: replayedLeft, ...replayed } = pending[0];
+    const { timeout_ms: liveTotal, ...original } = live;
+    expect(replayed).toEqual(original);
+    expect(replayedLeft as number).toBeLessThanOrEqual(liveTotal as number);
+    expect(replayedLeft as number).toBeGreaterThan(0);
+    expect(bridge.pendingRequestsFor("other-room")).toEqual([]);
+
+    bridge.resolvePermission(pending[0].id as string, "deny");
+    await run;
+    expect(bridge.pendingRequestsFor("optimizer")).toEqual([]);
+  });
+});
+
+describe("SdkBridge — replayed requests carry the time left", () => {
+  test("timeout_ms on a replay shrinks as the request ages", async () => {
+    const fake = makeFakeSdk();
+    _setSdkModule(fake.sdk);
+    const bridge = new SdkBridge(silentLog(), () => {}, { permissionTimeoutMs: 10_000 });
+    const run = bridge.runStandaloneAgent("optimizer", { prompt: "p" }, ".", "go");
+    await fake.asked;
+    await new Promise((r) => setTimeout(r, 120));
+    const [req] = bridge.pendingRequestsFor("optimizer");
+    expect(req.timeout_ms as number).toBeLessThanOrEqual(10_000 - 100);
+    bridge.resolvePermission(req.id as string, "deny");
+    await run;
   });
 });

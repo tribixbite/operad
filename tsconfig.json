@@ -9,7 +9,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "dist",
-    "rootDir": "src",
     "declaration": false,
     "sourceMap": false,
     "resolveJsonModule": true,

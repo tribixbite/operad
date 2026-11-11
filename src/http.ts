@@ -151,6 +151,8 @@ export class DashboardServer {
   private allowedOrigins: Set<string>;
   /** How long a request body may take to arrive before a 408. */
   private bodyTimeoutMs: number;
+  /** Replay hook for late room subscribers (see constructor opts). */
+  private onSubscribe?: (room: string) => ReadonlyArray<unknown>;
 
   constructor(
     port: number,
@@ -163,8 +165,15 @@ export class DashboardServer {
       allowedOrigins?: string[];
       /** Request-body read timeout (ms) before answering 408. Default 10s. */
       bodyTimeoutMs?: number;
+      /**
+       * Messages still outstanding in a room, sent to a client right after it
+       * subscribes — so a request broadcast before it joined (a dashboard
+       * opened or reconnected mid-run) still reaches it.
+       */
+      onSubscribe?: (room: string) => ReadonlyArray<unknown>;
     },
   ) {
+    this.onSubscribe = opts.onSubscribe;
     this.bodyTimeoutMs = opts.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS;
     this.port = port;
     this.log = log;
@@ -438,6 +447,15 @@ export class DashboardServer {
               room.add(ws);
               ws.send(JSON.stringify({ type: "subscribed", sessionName: msg.sessionName }));
               this.log.debug(`WS subscribed to room: ${msg.sessionName}`);
+              // Anything still waiting in the room was broadcast before this
+              // client joined; without a replay it could never be answered.
+              try {
+                for (const pending of this.onSubscribe?.(msg.sessionName) ?? []) {
+                  ws.send(JSON.stringify(pending));
+                }
+              } catch (err) {
+                this.log.warn(`WS subscribe replay failed for ${msg.sessionName}: ${err}`);
+              }
             }
             break;
           case "unsubscribe":

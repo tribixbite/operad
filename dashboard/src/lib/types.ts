@@ -649,7 +649,15 @@ export interface SdkPermissionRequest {
   id: string;
   tool: string;
   input: unknown;
+  /** Time left to answer (a replay to a late subscriber reports what remains). */
   timeout_ms: number;
+  /**
+   * Which room raised it: an attached session, or a standalone agent run
+   * (OODA, scheduled, manual). Absent from older daemons. See
+   * permission-routing.ts for how views pick their own requests.
+   */
+  kind?: "session" | "agent";
+  room?: string;
 }
 
 /** SDK assistant message sent via WS */

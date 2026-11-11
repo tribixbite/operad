@@ -58,6 +58,9 @@ type PermissionResult =
   | { behavior: "allow"; updatedInput?: Record<string, unknown> }
   | { behavior: "deny"; message: string };
 
+/** What a permission request's room is: an attached session, or a standalone agent run. */
+export type PermissionRoomKind = "session" | "agent";
+
 /** Permission request pending resolution */
 interface PendingPermission {
   id: string;
@@ -67,6 +70,12 @@ interface PendingPermission {
    * auto-deny another run's outstanding request.
    */
   owner: string;
+  /** Room the request was broadcast to. */
+  room: string;
+  /** The broadcast payload, kept so a late subscriber can be sent it. */
+  payload: Record<string, unknown>;
+  /** When the request times out (epoch ms) — replays report the time left. */
+  expiresAt: number;
   resolve: (result: PermissionResult) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -192,8 +201,15 @@ export class SdkBridge {
    *               nobody subscribes to, and the run hung 5 min before an
    *               automatic deny.
    * @param owner  Per-run tag recorded on each pending permission.
+   * @param kind   Whether `room` is a session or an agent — sent with each
+   *               request so clients can route it (both are bare names).
    */
-  private buildSessionOptions(cwd: string, room: string, owner: string): Record<string, unknown> {
+  private buildSessionOptions(
+    cwd: string,
+    room: string,
+    owner: string,
+    kind: PermissionRoomKind,
+  ): Record<string, unknown> {
     const env = this.platform.cleanEnv();
     const opts: Record<string, unknown> = {
       cwd,
@@ -203,7 +219,7 @@ export class SdkBridge {
       env,
       sandbox: { enabled: false },
       canUseTool: async (toolName: string, toolInput: unknown) => {
-        return this.requestPermission(room, owner, toolName, toolInput);
+        return this.requestPermission(room, owner, kind, toolName, toolInput);
       },
       permissionMode: "default",
     };
@@ -245,7 +261,7 @@ export class SdkBridge {
     const sdk = await getSdk();
     const owner = `attach:${sessionName}#${++this.ownerSeq}`;
     // Cast to any — SDKSessionOptions requires model but it defaults internally
-    const opts = this.buildSessionOptions(cwd, sessionName, owner) as any;
+    const opts = this.buildSessionOptions(cwd, sessionName, owner, "session") as any;
 
     // V2 API: create or resume a persistent session
     let session: any;
@@ -362,6 +378,24 @@ export class SdkBridge {
     }
   }
 
+  /**
+   * Requests still waiting for an answer in `room`, as they were broadcast.
+   * A request is broadcast once; the server replays these to a client that
+   * subscribes later (a dashboard opened or reconnected mid-run), which
+   * otherwise could never answer it and the run would wait out its timeout.
+   */
+  pendingRequestsFor(room: string): Array<Record<string, unknown>> {
+    const now = Date.now();
+    const out: Array<Record<string, unknown>> = [];
+    for (const p of this.pendingPermissions.values()) {
+      if (p.room !== room) continue;
+      // `timeout_ms` is relative, so a replay states what is LEFT: a
+      // countdown restarted at the full timeout would outlive the request.
+      out.push({ ...p.payload, timeout_ms: Math.max(0, p.expiresAt - now) });
+    }
+    return out;
+  }
+
   /** Resolve a pending permission request */
   resolvePermission(permissionId: string, behavior: "allow" | "deny"): boolean {
     const pending = this.pendingPermissions.get(permissionId);
@@ -419,7 +453,7 @@ export class SdkBridge {
       // TODO: no dashboard view subscribes to an agent's room yet (only
       // ConversationDrawer subscribes, to session rooms), so answering a
       // standalone run's request still needs a client that subscribes to it.
-      const opts = this.buildSessionOptions(cwd, agentName, owner) as any;
+      const opts = this.buildSessionOptions(cwd, agentName, owner, "agent") as any;
 
       // For standalone runs, the agent IS the session — set its prompt as system prompt
       // and apply max_budget_usd at the session level (not on AgentDefinition)
@@ -586,6 +620,7 @@ export class SdkBridge {
   private requestPermission(
     sessionName: string,
     owner: string,
+    kind: PermissionRoomKind,
     toolName: string,
     toolInput: unknown,
   ): Promise<PermissionResult> {
@@ -599,16 +634,22 @@ export class SdkBridge {
         resolve({ behavior: "deny", message: "Permission request timed out" });
       }, timeoutMs);
 
-      this.pendingPermissions.set(id, { id, owner, resolve, timer });
-
-      // Broadcast permission request to all session room subscribers
-      this.broadcast(sessionName, {
+      // Broadcast permission request to the room's subscribers. `room` and
+      // `kind` travel in the payload: a client subscribed to several rooms
+      // must know which one asked, and an agent may share a session's name.
+      const payload: Record<string, unknown> = {
         type: "permission_request",
         id,
+        room: sessionName,
+        kind,
         tool: toolName,
         input: toolInput,
         timeout_ms: timeoutMs,
+      };
+      this.pendingPermissions.set(id, {
+        id, owner, room: sessionName, payload, expiresAt: Date.now() + timeoutMs, resolve, timer,
       });
+      this.broadcast(sessionName, payload);
     });
   }
 }

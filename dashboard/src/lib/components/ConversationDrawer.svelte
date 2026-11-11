@@ -5,6 +5,7 @@
   import { connect, subscribe, unsubscribe, send, on, wsState } from "$lib/ws.svelte";
   import { sdkAttach, sdkDetach, sdkInterrupt, fetchConversation } from "$lib/api";
   import { store } from "$lib/store.svelte";
+  import { isSessionPermissionFor } from "$lib/permission-routing";
 
   interface Props {
     sessionName: string;
@@ -134,7 +135,10 @@
         }
       }),
       on("permission_request", (msg) => {
-        pendingPermission = msg as unknown as SdkPermissionRequest;
+        // Agent-run requests belong to the global watcher; a session's only
+        // to its own drawer (room names can collide — see permission-routing).
+        const req = msg as unknown as SdkPermissionRequest;
+        if (isSessionPermissionFor(req, sessionName)) pendingPermission = req;
       }),
       on("result", (msg) => {
         const r = msg as unknown as SdkResultMessage;
@@ -266,12 +270,6 @@
     if (e.key === "Escape" && !pendingPermission) onclose();
   }
 
-  /** Close on backdrop click */
-  function handleBackdrop(e: MouseEvent) {
-    if ((e.target as HTMLElement).classList.contains("drawer-backdrop")) {
-      onclose();
-    }
-  }
 
   /** Cleanup on destroy */
   $effect(() => {
@@ -294,9 +292,11 @@
   />
 {/if}
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<div class="drawer-backdrop" onclick={handleBackdrop}>
-  <div class="drawer-panel">
+<div class="drawer-overlay">
+  <!-- Tapping outside closes. A real button beside the panel, not a click
+       handler on a wrapping div; Esc closes for keyboard users. -->
+  <button type="button" class="drawer-backdrop" tabindex="-1" aria-label="Close conversation" onclick={onclose}></button>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-label={sessionName}>
     <div class="drawer-header">
       <h3 class="drawer-title">{sessionName}</h3>
       <div class="drawer-controls">
@@ -423,15 +423,25 @@
 </div>
 
 <style>
-  .drawer-backdrop {
+  .drawer-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
     z-index: 100;
     display: flex;
     justify-content: flex-end;
   }
+  .drawer-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: default;
+  }
+
   .drawer-panel {
+    position: relative; /* above the backdrop button */
     width: min(480px, 92vw);
     height: 100%;
     background: var(--bg-secondary);

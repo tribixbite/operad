@@ -1577,6 +1577,8 @@ export class Daemon {
         authToken,
         bindAddress: this.config.orchestrator.bind,
         allowedOrigins: this.config.orchestrator.allowed_origins,
+        // Replay permission requests a late subscriber missed.
+        onSubscribe: (room) => this.sdkBridge?.pendingRequestsFor(room) ?? [],
       },
     );
 
