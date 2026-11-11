@@ -63,9 +63,60 @@ export type ScheduleHandler = (schedule: ScheduleRecord) => Promise<{
 // -- Minimal cron parser (5-field: min hour dom month dow) --------------------
 
 /**
+ * One comma-separated element of a cron field:
+ *   `*`, `N`, `N-M`, each optionally followed by `/STEP`.
+ * `N/STEP` means N..max stepping by STEP (Vixie cron extension).
+ * Anchored so trailing garbage (`5x`) and empty elements are rejected —
+ * the previous parseInt fallback accepted `5x` as 5 and `5/10` as 5.
+ */
+const CRON_PART = /^(?:(\*)|(\d+)(?:-(\d+))?)(?:\/(\d+))?$/;
+
+/**
+ * Parse one cron field into its set of allowed values, or null when any
+ * element is malformed or out of [min, max]. Ranges must be ascending and
+ * every bound is checked — `20-30` in the hour field was silently accepted
+ * and simply never matched past 23.
+ */
+function parseCronField(spec: string, min: number, max: number): Set<number> | null {
+  const values = new Set<number>();
+  for (const part of spec.split(",")) {
+    const m = CRON_PART.exec(part);
+    if (!m) return null;
+    const [, star, startStr, endStr, stepStr] = m;
+    const step = stepStr !== undefined ? parseInt(stepStr, 10) : 1;
+    if (step < 1) return null;
+
+    let start: number;
+    let end: number;
+    if (star) {
+      start = min;
+      end = max;
+    } else {
+      start = parseInt(startStr, 10);
+      // `N` alone is a single value; `N/STEP` runs to the field max.
+      end = endStr !== undefined ? parseInt(endStr, 10) : stepStr !== undefined ? max : start;
+    }
+    if (start < min || end > max || start > end) return null;
+    for (let i = start; i <= end; i += step) values.add(i);
+  }
+  return values.size > 0 ? values : null;
+}
+
+/**
  * Parse a 5-field cron expression and return the next fire time after `after`.
- * Supports: numbers, *, /step, ranges (1-5), lists (1,3,5).
- * Does NOT support: @yearly, @monthly, etc.
+ * Supports: numbers, *, ranges (1-5), lists (1,3,5), and /step on `*`, a
+ * range or a single start value (`5/10` = 5,15,…,55).
+ * Does NOT support: @yearly, @monthly, names (MON, JAN), L/W/#.
+ *
+ * Fields are matched in the daemon process's LOCAL time zone, as crontab(5)
+ * does — `0 9 * * *` means 09:00 on the wall clock. The zone is whatever the
+ * runtime resolves (the `TZ` env var, else the system zone). Note: Bun on
+ * Termux does not read Android's zone setting and falls back to UTC unless
+ * `TZ` is exported.
+ *
+ * TODO: DST edges follow the naive wall-clock walk — a time inside a
+ * spring-forward gap is skipped that day, and one inside the repeated
+ * fall-back hour can fire twice. Vixie cron special-cases both.
  *
  * Exported for unit testing — use ScheduleEngine for production scheduling.
  */
@@ -75,45 +126,11 @@ export function nextCronTime(expr: string, after: Date): Date | null {
 
   const [minSpec, hourSpec, domSpec, monSpec, dowSpec] = fields;
 
-  // Parse individual field into set of valid values
-  function parseField(spec: string, min: number, max: number): Set<number> | null {
-    const values = new Set<number>();
-    for (const part of spec.split(",")) {
-      const stepMatch = part.match(/^(\*|(\d+)-(\d+))\/(\d+)$/);
-      if (stepMatch) {
-        const start = stepMatch[1] === "*" ? min : parseInt(stepMatch[2], 10);
-        const end = stepMatch[1] === "*" ? max : parseInt(stepMatch[3], 10);
-        const step = parseInt(stepMatch[4], 10);
-        if (step <= 0) return null;
-        for (let i = start; i <= end; i += step) values.add(i);
-        continue;
-      }
-      if (part === "*") {
-        for (let i = min; i <= max; i++) values.add(i);
-        continue;
-      }
-      const rangeMatch = part.match(/^(\d+)-(\d+)$/);
-      if (rangeMatch) {
-        const s = parseInt(rangeMatch[1], 10);
-        const e = parseInt(rangeMatch[2], 10);
-        for (let i = s; i <= e; i++) values.add(i);
-        continue;
-      }
-      const n = parseInt(part, 10);
-      if (!isNaN(n) && n >= min && n <= max) {
-        values.add(n);
-      } else {
-        return null; // invalid
-      }
-    }
-    return values.size > 0 ? values : null;
-  }
-
-  const minutes = parseField(minSpec, 0, 59);
-  const hours = parseField(hourSpec, 0, 23);
-  const doms = parseField(domSpec, 1, 31);
-  const months = parseField(monSpec, 1, 12);
-  const dows = parseField(dowSpec, 0, 7); // 0 and 7 both mean Sunday
+  const minutes = parseCronField(minSpec, 0, 59);
+  const hours = parseCronField(hourSpec, 0, 23);
+  const doms = parseCronField(domSpec, 1, 31);
+  const months = parseCronField(monSpec, 1, 12);
+  const dows = parseCronField(dowSpec, 0, 7); // 0 and 7 both mean Sunday
 
   if (!minutes || !hours || !doms || !months || !dows) return null;
 
@@ -126,20 +143,23 @@ export function nextCronTime(expr: string, after: Date): Date | null {
   const domRestricted = domSpec.trim() !== "*";
   const dowRestricted = dowSpec.trim() !== "*";
 
-  // Sunday as 7 must also match getUTCDay()'s 0.
+  // Sunday as 7 must also match getDay()'s 0.
   if (dows.has(7)) dows.add(0);
 
-  // Brute-force search: iterate minute by minute from `after`, cap at 366 days
+  // Brute-force search: iterate minute by minute from `after`, cap at 366 days.
+  // Stepping absolute time by 60s and reading local fields keeps the walk
+  // monotonic across DST changes. Every zone offset in use is a whole number
+  // of minutes, so zeroing local seconds is a minute boundary in UTC too.
   const maxIter = 366 * 24 * 60;
   const candidate = new Date(after.getTime() + 60_000); // start 1 min after `after`
-  candidate.setUTCSeconds(0, 0);
+  candidate.setSeconds(0, 0);
 
   for (let i = 0; i < maxIter; i++) {
-    const m = candidate.getUTCMinutes();
-    const h = candidate.getUTCHours();
-    const dom = candidate.getUTCDate();
-    const mon = candidate.getUTCMonth() + 1;
-    const dow = candidate.getUTCDay();
+    const m = candidate.getMinutes();
+    const h = candidate.getHours();
+    const dom = candidate.getDate();
+    const mon = candidate.getMonth() + 1;
+    const dow = candidate.getDay();
 
     const dayMatches =
       domRestricted && dowRestricted
@@ -164,6 +184,9 @@ export function nextCronTime(expr: string, after: Date): Date | null {
 
 /** Max consecutive failures before auto-disable */
 const MAX_CONSECUTIVE_FAILURES = 3;
+
+/** Seconds before a deferred run is retried (capped at its natural next slot) */
+const DEFER_RETRY_SEC = 60;
 
 /**
  * ScheduleEngine — persistent schedule polling and execution.
@@ -261,10 +284,31 @@ export class ScheduleEngine {
     return result.changes > 0;
   }
 
-  /** Enable/disable a schedule */
+  /**
+   * Enable/disable a schedule.
+   *
+   * Auto-disable writes next_run_at = NULL and the poll only selects rows with
+   * a non-null next_run_at, so flipping `enabled` alone left a re-enabled
+   * schedule dormant until the next daemon restart. Enabling a schedule that
+   * was disabled (or has no next run) therefore re-arms it from now and clears
+   * the failure streak that disabled it. An already-enabled, armed schedule
+   * is left untouched so a redundant enable cannot push its next run out.
+   */
   setEnabled(id: number, enabled: boolean): void {
     const db = this.db.requireDb();
-    db.prepare(`UPDATE agent_schedules SET enabled = ? WHERE id = ?`).run(enabled ? 1 : 0, id);
+    if (!enabled) {
+      db.prepare(`UPDATE agent_schedules SET enabled = 0 WHERE id = ?`).run(id);
+      return;
+    }
+    const row = db.prepare(
+      `SELECT enabled, next_run_at, cron_expr, interval_minutes FROM agent_schedules WHERE id = ?`,
+    ).get(id) as Pick<ScheduleRecord, "enabled" | "next_run_at" | "cron_expr" | "interval_minutes"> | null | undefined;
+    if (!row) return;
+    if (row.enabled === 1 && row.next_run_at !== null) return;
+    const nextRun = this.computeNextRun(row.cron_expr, row.interval_minutes, Math.floor(Date.now() / 1000));
+    db.prepare(
+      `UPDATE agent_schedules SET enabled = 1, consecutive_failures = 0, next_run_at = ? WHERE id = ?`,
+    ).run(nextRun, id);
   }
 
   /** Get all schedules (optionally filtered by agent) */
@@ -291,12 +335,24 @@ export class ScheduleEngine {
        ORDER BY next_run_at ASC`,
     ).all(now) as unknown as ScheduleRecord[];
 
-    for (const schedule of due) {
+    // Re-reads a row and keeps it only if it is still enabled and due.
+    const stillDue = db.prepare(
+      `SELECT * FROM agent_schedules WHERE id = ? AND enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?`,
+    );
+
+    for (const snapshot of due) {
       if (!this.running) break;
-      if (this.inFlight.has(schedule.id)) {
-        this.log.debug(`Schedule "${schedule.schedule_name}" still running — not re-entering`);
+      if (this.inFlight.has(snapshot.id)) {
+        this.log.debug(`Schedule "${snapshot.schedule_name}" still running — not re-entering`);
         continue;
       }
+      // `due` was read before earlier iterations awaited their handlers —
+      // possibly minutes ago. An overlapping poll may have fired (or deferred)
+      // this schedule meanwhile, or it was disabled/edited. Firing from the
+      // stale snapshot ran it twice and wrote a stale consecutive_failures.
+      // bun:sqlite's .get() yields null when no row matches.
+      const schedule = stillDue.get(snapshot.id, Math.floor(Date.now() / 1000)) as unknown as ScheduleRecord | null | undefined;
+      if (!schedule) continue;
 
       this.log.info(`Schedule firing: "${schedule.schedule_name}" for ${schedule.agent_name}`);
 
@@ -311,12 +367,17 @@ export class ScheduleEngine {
         const nextRun = this.computeNextRun(schedule.cron_expr, schedule.interval_minutes, doneAt);
 
         if (result.deferred) {
-          // Transient: reschedule, do not touch the failure counter, and do
-          // not bump run_count — nothing ran.
-          this.db.requireDb().prepare(
+          // Transient: retry soon, do not touch the failure counter, and do
+          // not bump run_count — nothing ran. Rescheduling a full cycle out
+          // meant one deferral (a session attached at 02:00) skipped the
+          // whole night; retry after DEFER_RETRY_SEC instead, but never later
+          // than the schedule's own next slot.
+          const retryAt = doneAt + DEFER_RETRY_SEC;
+          const attemptAt = nextRun === null ? retryAt : Math.min(retryAt, nextRun);
+          db.prepare(
             `UPDATE agent_schedules SET next_run_at = ? WHERE id = ?`,
-          ).run(nextRun, schedule.id);
-          this.log.debug(`Schedule "${schedule.schedule_name}" deferred; next attempt at ${nextRun}`);
+          ).run(attemptAt, schedule.id);
+          this.log.debug(`Schedule "${schedule.schedule_name}" deferred; next attempt at ${attemptAt}`);
         } else if (result.success) {
           db.prepare(
             `UPDATE agent_schedules SET
@@ -377,12 +438,22 @@ export class ScheduleEngine {
     return null; // one-shot schedule (no repeat)
   }
 
-  /** Recompute next_run_at for all enabled schedules (called on startup) */
+  /**
+   * Fill in next_run_at for enabled schedules that have none (called on
+   * startup).
+   *
+   * A pending next_run_at is the schedule's own state and is kept. This used
+   * to recompute every row from `last_run_at ?? now`, so a never-run interval
+   * schedule was pushed a full interval out on each restart — a daemon that
+   * restarts more often than the interval starved it forever. A next_run_at
+   * already in the past simply fires once on the first poll (catch-up).
+   */
   private recomputeAllNextRuns(): void {
     const db = this.db.requireDb();
     const now = Math.floor(Date.now() / 1000);
     const schedules = db.prepare(
-      `SELECT id, cron_expr, interval_minutes, last_run_at FROM agent_schedules WHERE enabled = 1`,
+      `SELECT id, cron_expr, interval_minutes, last_run_at FROM agent_schedules
+        WHERE enabled = 1 AND next_run_at IS NULL`,
     ).all() as Array<{ id: number; cron_expr: string | null; interval_minutes: number | null; last_run_at: number | null }>;
 
     for (const s of schedules) {

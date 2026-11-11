@@ -948,13 +948,27 @@ Body:
 ```
 Either `cron_expr` or `interval_minutes` is required.
 
+`cron_expr` is a standard 5-field expression (`min hour dom month dow`)
+supporting `*`, `N`, `N-M`, lists, and `/step` on `*`, a range, or a start
+value (`5/10` = minutes 5, 15, …, 55). Fields are matched in the daemon's
+**local time zone**, as crontab does — the runtime resolves it from `TZ`,
+else the system zone. Bun on Termux does not read Android's zone setting and
+falls back to UTC unless `TZ` is exported to the daemon. Out-of-range values
+and malformed fields make the expression invalid.
+
+A run deferred for a transient reason (SDK busy, quota) is retried after
+about 60 s, never later than the schedule's next regular slot. A pending
+`next_run_at` survives daemon restarts.
+
 #### `DELETE /api/schedules/:scheduleName`
 Delete a schedule.
 
 Query: `?agent=<agentName>` (default: `master-controller`).
 
 #### `PATCH /api/schedules/:id`
-Enable or disable a schedule by numeric ID.
+Enable or disable a schedule by numeric ID. Enabling a disabled schedule
+(including one auto-disabled after 3 consecutive failures) re-arms its next
+run from now and resets its failure count.
 
 Body: `{ "enabled": true|false }`
 
