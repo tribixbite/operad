@@ -998,6 +998,20 @@ else the system zone. Bun on Termux does not read Android's zone setting and
 falls back to UTC unless `TZ` is exported to the daemon. Out-of-range values
 and malformed fields make the expression invalid.
 
+Daylight-saving transitions follow Vixie cron / cronie. For **fixed-time**
+expressions — neither the minute nor the hour field starts with `*`, e.g.
+`30 2 * * *`:
+
+- **Spring-forward:** a time skipped by the gap (02:30 when 02:00 jumps to
+  03:00) fires **once, at the first valid minute after the gap** (03:00).
+  Skipping it instead would silently drop a whole daily or weekly run.
+- **Fall-back:** a time that occurs twice (01:30 when 02:00 falls back to
+  01:00) fires **once, on its first occurrence**.
+
+**Wildcard** expressions (`*/15 * * * *`, `*/30 2 * * *`) follow elapsed real
+time: they keep their cadence through the repeated hour, and minutes that do
+not exist during a spring-forward gap are skipped rather than run in a burst.
+
 A run deferred for a transient reason (SDK busy, quota) is retried after
 about 60 s, never later than the schedule's next regular slot. A pending
 `next_run_at` survives daemon restarts.

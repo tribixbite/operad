@@ -836,6 +836,62 @@ describe("nextCronTime — local wall-clock time, like crontab", () => {
   });
 });
 
+// -- DST transitions ---------------------------------------------------------
+//
+// America/New_York, 2026: spring-forward Sun 8 Mar 02:00 EST → 03:00 EDT
+// (07:00Z), fall-back Sun 1 Nov 02:00 EDT → 01:00 EST (06:00Z). Each case
+// chains `count` successive fires in a child process with TZ pinned.
+
+describe("nextCronTime — DST transitions (America/New_York 2026)", () => {
+  function fires(expr: string, afterIso: string, count: number): string[] {
+    const mod = join(import.meta.dir, "..", "schedule.ts");
+    const script =
+      `const { nextCronTime } = await import(${JSON.stringify(mod)});` +
+      `let t = new Date(${JSON.stringify(afterIso)}); const out = [];` +
+      `for (let i = 0; i < ${count}; i++) { t = nextCronTime(${JSON.stringify(expr)}, t); out.push(t ? t.toISOString() : null); if (!t) break; }` +
+      `console.log(JSON.stringify(out));`;
+    const proc = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, TZ: "America/New_York" },
+    });
+    expect(proc.stderr.toString()).toBe("");
+    return JSON.parse(proc.stdout.toString()) as string[];
+  }
+
+  // 02:30 does not exist on 8 Mar. The naive walk skipped the whole day.
+  test("a fixed time inside the spring-forward gap fires once at 03:00 EDT", () => {
+    expect(fires("30 2 * * *", "2026-03-08T05:00:00Z", 2)).toEqual([
+      "2026-03-08T07:00:00.000Z", // 03:00 EDT — first valid minute after the gap
+      "2026-03-09T06:30:00.000Z", // 02:30 EDT next day, back to normal
+    ]);
+  });
+
+  test("a fixed time outside the gap is unaffected on the transition day", () => {
+    expect(fires("30 4 * * *", "2026-03-08T05:00:00Z", 1)).toEqual(["2026-03-08T08:30:00.000Z"]);
+  });
+
+  // 01:30 happens twice on 1 Nov. The naive walk fired at both.
+  test("a fixed time in the repeated fall-back hour fires once, on its first occurrence", () => {
+    expect(fires("30 1 * * *", "2026-11-01T04:00:00Z", 2)).toEqual([
+      "2026-11-01T05:30:00.000Z", // 01:30 EDT
+      "2026-11-02T06:30:00.000Z", // 01:30 EST next day — NOT 06:30Z on 1 Nov
+    ]);
+  });
+
+  // Wildcard-minute/hour jobs follow elapsed time (Vixie/cronie): no
+  // catch-up, no suppression.
+  test("a wildcard-hour job keeps its real-time cadence through fall-back", () => {
+    expect(fires("*/30 * * * *", "2026-11-01T05:00:00Z", 3)).toEqual([
+      "2026-11-01T05:30:00.000Z", // 01:30 EDT
+      "2026-11-01T06:00:00.000Z", // 01:00 EST
+      "2026-11-01T06:30:00.000Z", // 01:30 EST
+    ]);
+  });
+
+  test("a wildcard-minute job in the skipped hour is skipped that day", () => {
+    expect(fires("*/15 2 * * *", "2026-03-08T05:00:00Z", 1)).toEqual(["2026-03-09T06:00:00.000Z"]);
+  });
+});
+
 // -- enable, restart and deferral semantics ----------------------------------
 
 describe("ScheduleEngine — re-enable, restart persistence and deferral retry", () => {
