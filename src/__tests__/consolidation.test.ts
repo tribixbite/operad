@@ -848,3 +848,46 @@ describe("mergeSimilarLearnings — three-way merge accounting", () => {
     expect(count.c).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cross-pollination must be insert-once, not reinforcement
+// ---------------------------------------------------------------------------
+//
+// Consolidation re-shared the same top insights every run through
+// addLearning, whose duplicate path REINFORCES (+0.05, count++). Copies were
+// promoted to core knowledge with no evidence and then shared back to their
+// source, reinforcing the original too.
+
+describe("runConsolidation — cross-pollination", () => {
+  const row = (agent: string, content: string) =>
+    db.requireDb().prepare(
+      `SELECT confidence, reinforcement_count, source_agent FROM agent_learnings WHERE agent_name = ? AND content = ?`,
+    ).get(agent, content) as { confidence: number; reinforcement_count: number; source_agent: string | null } | null;
+
+  test("repeated runs copy once, never reinforce the copy, and never echo back", () => {
+    db.addLearning("agent-a", "insight", "batch sqlite writes", { confidence: 0.9 });
+
+    const first = runConsolidation(db, ["agent-a", "agent-b"], silentLog());
+    expect(first.cross_pollinated).toBe(1);
+    for (let i = 0; i < 5; i++) runConsolidation(db, ["agent-a", "agent-b"], silentLog());
+
+    const copy = row("agent-b", "batch sqlite writes")!;
+    expect(copy.reinforcement_count).toBe(1);
+    expect(copy.confidence).toBeCloseTo(0.6, 5);
+    expect(copy.source_agent).toBe("agent-a");
+    // Not promoted to core knowledge.
+    expect(db.getCoreAgentLearnings("agent-b")).toHaveLength(0);
+
+    // The source's own learning gained nothing from its echo.
+    const original = row("agent-a", "batch sqlite writes")!;
+    expect(original.reinforcement_count).toBe(1);
+    expect(original.confidence).toBeCloseTo(0.9, 5);
+  });
+
+  test("a run with nothing new to share reports zero cross-pollinated", () => {
+    db.addLearning("agent-a", "insight", "only once", { confidence: 0.9 });
+    runConsolidation(db, ["agent-a", "agent-b"], silentLog());
+    const second = runConsolidation(db, ["agent-a", "agent-b"], silentLog());
+    expect(second.cross_pollinated).toBe(0);
+  });
+});

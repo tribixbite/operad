@@ -12,6 +12,8 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import type { ToolCategory } from "./tools.js";
+import type { AutonomyLevel } from "./types.js";
 
 /** Valid permission modes (matches SDK PermissionMode type) */
 type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto";
@@ -422,8 +424,12 @@ export function loadAgents(
   for (const a of tomlAgents) {
     const existing = agents.get(a.name);
     if (existing) {
-      // Merge: TOML fields override, keep existing fields for unset values
-      agents.set(a.name, { ...existing, ...a, source: "toml" });
+      // Merge: TOML fields override, keep existing fields for unset values.
+      // parseTomlAgents emits "" for an absent description/prompt and
+      // undefined for every absent optional, so a bare spread of `a` turned
+      // `[[agent]] name="optimizer" enabled=true` into an agent with an empty
+      // prompt and no guardrails. Only fields the TOML actually set may win.
+      agents.set(a.name, { ...existing, ...stripUnsetOverride(a), source: "toml" });
     } else {
       agents.set(a.name, { ...a, source: "toml" });
     }
@@ -660,6 +666,19 @@ function stripUndefined<T extends object>(o: T): Partial<T> {
   return out;
 }
 
+/**
+ * stripUndefined, plus empty strings: the TOML parser's asString fallback is
+ * "", which means "not given" — no override wants an empty prompt,
+ * description or model replacing the inherited one.
+ */
+function stripUnsetOverride<T extends object>(o: T): Partial<T> {
+  const out = stripUndefined(o);
+  for (const k of Object.keys(out) as (keyof T)[]) {
+    if (out[k] === "") delete out[k];
+  }
+  return out;
+}
+
 // -- Persistence (user-level agents) ------------------------------------------
 
 /**
@@ -708,6 +727,27 @@ const VALID_EFFORTS: EffortLevel[] = ["low", "medium", "high", "max"];
 const VALID_MEMORIES: MemoryScope[] = ["user", "project", "local"];
 /** Valid permission modes for TOML validation */
 const VALID_PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"];
+/** Valid autonomy levels (order matches tools.ts / memory-db BUCKET_RANK) */
+const VALID_AUTONOMY: AutonomyLevel[] = ["observe", "suggest", "supervised", "trusted", "autonomous"];
+/**
+ * Valid tool categories. Keyed as a Record so adding a ToolCategory without
+ * listing it here is a compile error rather than a silently rejected value.
+ */
+const TOOL_CATEGORY_SET: Record<ToolCategory, true> = {
+  observe: true, analyze: true, mutate: true, communicate: true, orchestrate: true,
+};
+
+/**
+ * Keep only known tool categories. An EMPTY list means "all categories"
+ * (ToolExecutor.getAvailableTools), so if filtering removed every entry the
+ * result must not collapse to [] — that would turn
+ * `allowed_tool_categories = ["read-only"]` into full access. Fall back to
+ * observe-only instead. An explicit `[]` in the config is kept as written.
+ */
+function parseToolCategories(raw: string[]): ToolCategory[] {
+  const valid = raw.filter((c): c is ToolCategory => Object.hasOwn(TOOL_CATEGORY_SET, c));
+  return valid.length === 0 && raw.length > 0 ? ["observe"] : valid;
+}
 
 /**
  * Parse raw TOML [[agent]] sections into AgentConfig[].
@@ -752,6 +792,20 @@ export function parseTomlAgents(
         : undefined,
       max_budget_usd: a.max_budget_usd != null
         ? asNumber(a.max_budget_usd, `${prefix}.max_budget_usd`, 0)
+        : undefined,
+      // Guardrails documented in docs/config.md. Invalid values fall back to
+      // the MOST restrictive choice: a typo must never widen what an agent
+      // may do without approval.
+      autonomy_level: a.autonomy_level != null
+        ? asEnum(a.autonomy_level, VALID_AUTONOMY, `${prefix}.autonomy_level`, "observe")
+        : undefined,
+      allowed_tool_categories: a.allowed_tool_categories != null
+        ? parseToolCategories(
+            asStringArray(a.allowed_tool_categories, `${prefix}.allowed_tool_categories`, []),
+          )
+        : undefined,
+      max_tool_calls_per_run: a.max_tool_calls_per_run != null
+        ? asNumber(a.max_tool_calls_per_run, `${prefix}.max_tool_calls_per_run`, 20)
         : undefined,
       enabled: asBool(a.enabled, `${prefix}.enabled`, true),
       source: "toml",

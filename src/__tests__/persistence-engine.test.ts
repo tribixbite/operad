@@ -8,9 +8,10 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PersistenceEngine } from "../persistence.js";
+import type { Logger } from "../log.js";
 import { makeFakeContext, makeAgent, type FakeContext } from "./helpers/fake-context.js";
 
 let fc: FakeContext;
@@ -78,5 +79,42 @@ describe("PersistenceEngine — maybeConsolidate", () => {
     const eng = new PersistenceEngine(fc.ctx);
     eng.maybeConsolidate();
     expect(fc.broadcasts.some((b) => b.type === "consolidation")).toBe(true);
+  });
+});
+
+// With no enabled agents nothing can "succeed", so the daily marker was never
+// set: pruneHistory and an info log ran on every 60 s tick, forever.
+describe("PersistenceEngine — maybeDailySnapshot with nothing to snapshot", () => {
+  test("prunes and logs once per day, not on every tick", async () => {
+    const infos: string[] = [];
+    const log = {
+      debug: () => {}, warn: () => {}, error: () => {},
+      info: (m: string) => { infos.push(m); },
+    } as unknown as Logger;
+    fc = await makeFakeContext({ withDb: true, log, agentConfigs: [makeAgent("optimizer", { enabled: false })] });
+    let prunes = 0;
+    const db = fc.db!;
+    const realPrune = db.pruneHistory.bind(db);
+    db.pruneHistory = ((opts?: Parameters<typeof realPrune>[0]) => { prunes++; return realPrune(opts); }) as typeof db.pruneHistory;
+
+    const eng = new PersistenceEngine(fc.ctx, join(fc.dir, "snapshots"));
+    for (let i = 0; i < 5; i++) eng.maybeDailySnapshot();
+
+    expect(prunes).toBe(1);
+    expect(infos.filter((m) => m.startsWith("Daily agent snapshots")).length).toBe(1);
+  });
+
+  test("a day where every snapshot failed does not prune or claim success, and retries", async () => {
+    fc = await makeFakeContext({ withDb: true, agentConfigs: [makeAgent("optimizer")] });
+    let prunes = 0;
+    const db = fc.db!;
+    db.pruneHistory = (() => { prunes++; return {}; }) as typeof db.pruneHistory;
+    // A regular FILE where the snapshot dir should be makes every save fail.
+    const blocker = join(fc.dir, "not-a-dir");
+    writeFileSync(blocker, "x");
+    const eng = new PersistenceEngine(fc.ctx, blocker);
+    eng.maybeDailySnapshot();
+    eng.maybeDailySnapshot();
+    expect(prunes).toBe(0);
   });
 });

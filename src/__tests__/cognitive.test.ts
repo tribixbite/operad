@@ -1180,3 +1180,34 @@ describe("parseOodaResponse — field length caps", () => {
     expect((actions[0] as { content: string }).content).toBe("item 0");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Learning confidence is model-written free text
+// ---------------------------------------------------------------------------
+
+describe("parseOodaResponse — learning confidence", () => {
+  const conf = (raw: string) =>
+    (parseOodaResponse(`\`\`\`learning\ncategory: perf\ncontent: c\nconfidence: ${raw}\n\`\`\``)[0] as
+      { confidence?: number }).confidence;
+
+  test("a non-numeric confidence is dropped (storage default applies), never NaN", () => {
+    expect(conf("high")).toBeUndefined();
+  });
+
+  test("an out-of-range confidence is clamped to [0, 1]", () => {
+    expect(conf("85")).toBe(1);
+    expect(conf("-0.4")).toBe(0);
+    expect(conf("0.7")).toBeCloseTo(0.7, 5);
+  });
+});
+
+describe("buildOodaPrompt — tolerates a learning with no numeric confidence", () => {
+  test("a null confidence row does not throw", () => {
+    // A NULL stored by the old parser reaches the prompt as null.
+    const ctx = minimalCtx({
+      agentLearnings: [{ category: "perf", content: "x", confidence: null as unknown as number, reinforcement_count: 1 }],
+      sharedInsights: [{ agent_name: "optimizer", content: "y", confidence: null as unknown as number }],
+    });
+    expect(() => buildOodaPrompt(ctx)).not.toThrow();
+  });
+});

@@ -812,3 +812,83 @@ describe("parseAgentJson preserves guardrail fields", () => {
     expect(a.max_tool_calls_per_run).toBeUndefined();
   });
 });
+
+// -- TOML override of a builtin ------------------------------------------------
+//
+// A minimal `[[agent]] name="optimizer" enabled=true` used to wipe the
+// builtin: parseTomlAgents emits "" for absent description/prompt and
+// undefined for every absent optional, and loadAgents spread that over the
+// builtin with `{...existing, ...a}`. The guardrail fields documented in
+// docs/config.md (autonomy_level, allowed_tool_categories,
+// max_tool_calls_per_run) were also never parsed from TOML at all.
+
+describe("TOML [[agent]] overriding a builtin", () => {
+  const asString = (val: unknown, _p: string, fb: string): string => typeof val === "string" ? val : fb;
+  const asNumber = (val: unknown, _p: string, fb: number): number => typeof val === "number" ? val : fb;
+  const asBool = (val: unknown, _p: string, fb: boolean): boolean => typeof val === "boolean" ? val : fb;
+  const asEnum = <T extends string>(val: unknown, valid: T[], _p: string, fb: T): T =>
+    valid.includes(val as T) ? (val as T) : fb;
+  const asStringArray = (val: unknown, _p: string, fb: string[]): string[] =>
+    Array.isArray(val) ? val.map(String) : fb;
+  const parse = (raw: Record<string, unknown>[]) =>
+    parseTomlAgents(raw, asString, asNumber, asBool, asEnum, asStringArray);
+
+  let fakeHome: string;
+  beforeEach(() => {
+    // Keep the developer's real ~/.claude/agents out of the user layer.
+    fakeHome = mkdtempSync(join(tmpdir(), "operad-toml-builtin-home-"));
+    _setUserAgentsHome(fakeHome);
+  });
+  afterEach(() => {
+    _setUserAgentsHome(null);
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test("enabling a builtin from TOML keeps its prompt, description and guardrails", () => {
+    const builtin = getBuiltinAgents().find((a) => a.name === "optimizer")!;
+    const merged = loadAgents(parse([{ name: "optimizer", enabled: true }]))
+      .find((a) => a.name === "optimizer")!;
+    expect(merged.enabled).toBe(true);
+    expect(merged.prompt).toBe(builtin.prompt);
+    expect(merged.description).toBe(builtin.description);
+    expect(merged.disallowed_tools).toEqual(builtin.disallowed_tools);
+    expect(merged.allowed_tool_categories).toEqual(builtin.allowed_tool_categories);
+    expect(merged.max_tool_calls_per_run).toBe(builtin.max_tool_calls_per_run);
+    expect(merged.autonomy_level).toBe(builtin.autonomy_level);
+    expect(merged.source).toBe("toml");
+  });
+
+  test("autonomy_level, allowed_tool_categories and max_tool_calls_per_run are parsed", () => {
+    const [a] = parse([{
+      name: "ro", description: "d", prompt: "p",
+      autonomy_level: "trusted",
+      allowed_tool_categories: ["observe", "analyze"],
+      max_tool_calls_per_run: 7,
+    }]);
+    expect(a.autonomy_level).toBe("trusted");
+    expect(a.allowed_tool_categories).toEqual(["observe", "analyze"]);
+    expect(a.max_tool_calls_per_run).toBe(7);
+  });
+
+  test("invalid guardrail values fall back to the most restrictive choice", () => {
+    const [a] = parse([{
+      name: "ro", description: "d", prompt: "p",
+      autonomy_level: "godmode",
+      allowed_tool_categories: ["observe", "root-shell"],
+    }]);
+    expect(a.autonomy_level).toBe("observe");
+    expect(a.allowed_tool_categories).toEqual(["observe"]);
+  });
+
+  test("a category list with no valid entry does not become [] (= all categories)", () => {
+    const [a] = parse([{ name: "ro", description: "d", prompt: "p", allowed_tool_categories: ["read-only"] }]);
+    expect(a.allowed_tool_categories).toEqual(["observe"]);
+  });
+
+  test("guardrails absent from TOML stay undefined", () => {
+    const [a] = parse([{ name: "ro", description: "d", prompt: "p" }]);
+    expect(a.autonomy_level).toBeUndefined();
+    expect(a.allowed_tool_categories).toBeUndefined();
+    expect(a.max_tool_calls_per_run).toBeUndefined();
+  });
+});

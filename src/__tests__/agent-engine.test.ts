@@ -392,6 +392,69 @@ describe("AgentEngine — OODA cycle re-entrancy", () => {
 });
 
 // ---------------------------------------------------------------------------
+// OODA inbox: what goes into the prompt is what gets marked read
+// ---------------------------------------------------------------------------
+//
+// The trigger marked only the >5-minute-old subset read, yet buildOodaContext
+// injected EVERY unread message into the prompt — so a fresh message was
+// answered once and then re-injected (and re-triggered a paid cycle) later.
+// And the master controller's own `to_agent='*'` broadcasts sat in its own
+// inbox, so it woke itself up.
+
+describe("AgentEngine — OODA inbox consumption", () => {
+  let runs: string[];
+  async function ctxWithRunningBridge() {
+    runs = [];
+    const bridge = {
+      isAttached: false,
+      isBusy: false,
+      runStandaloneAgent: async (_name: string, _def: unknown, _cwd: string, prompt: string) => {
+        runs.push(prompt);
+        return { sessionId: "s", costUsd: 0, inputTokens: 0, outputTokens: 0, turns: 1, responseText: "", thinkingText: "" };
+      },
+    };
+    return makeFakeContext({
+      withDb: true,
+      switchboard: { cognitive: true, oodaAutoTrigger: true },
+      agentConfigs: [makeAgent("master-controller", { enabled: true })],
+      sdkBridge: bridge,
+    });
+  }
+  const age = (id: number, seconds: number) =>
+    fc.db!.requireDb().prepare(`UPDATE agent_messages SET created_at = ? WHERE id = ?`)
+      .run(Math.floor(Date.now() / 1000) - seconds, id);
+
+  test("every message injected into the cycle's prompt is marked read, not just the urgent ones", async () => {
+    fc = await ctxWithRunningBridge();
+    eng = new AgentEngine(fc.ctx);
+    age(fc.db!.sendAgentMessage("optimizer", "master-controller", "old one"), 360);
+    fc.db!.sendAgentMessage("ideator", "master-controller", "fresh one");
+
+    await eng.maybeTriggerOoda();
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain("fresh one");
+    expect(fc.db!.getUnreadMessages("master-controller")).toHaveLength(0);
+  });
+
+  test("a cycle started without the message trigger also consumes its inbox", async () => {
+    fc = await ctxWithRunningBridge();
+    eng = new AgentEngine(fc.ctx);
+    fc.db!.sendAgentMessage("optimizer", "master-controller", "seen by a timer cycle");
+    expect(await eng.runOodaCycle()).toBe(true);
+    expect(fc.db!.getUnreadMessages("master-controller")).toHaveLength(0);
+  });
+
+  test("the master controller's own broadcast does not trigger a cycle", async () => {
+    fc = await ctxWithRunningBridge();
+    eng = new AgentEngine(fc.ctx);
+    age(fc.db!.sendAgentMessage("master-controller", "*", "status broadcast"), 360);
+    await eng.maybeTriggerOoda();
+    expect(runs).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Learning application must not double-count
 // ---------------------------------------------------------------------------
 

@@ -415,6 +415,9 @@ const SCHEMA_STATEMENTS: string[] = [
     content_hash TEXT,
     confidence REAL DEFAULT 0.5,
     source_run_id INTEGER,
+    -- Set only on cross-pollinated copies: the agent the learning came from.
+    -- NULL means the agent arrived at it itself.
+    source_agent TEXT,
     reinforcement_count INTEGER DEFAULT 1,
     created_at INTEGER DEFAULT (unixepoch()),
     last_reinforced_at INTEGER DEFAULT (unixepoch())
@@ -771,9 +774,12 @@ function hashContent(content: string): string {
  * NaN and hit `NOT NULL constraint failed: agent_personality.trait_value`,
  * which propagated out and failed the whole agent run.
  */
-function clamp01(v: number): number {
-  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+export function clamp01(v: number, fallback = 0): number {
+  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : fallback;
 }
+
+/** Schema default for agent_learnings.confidence — also the non-finite fallback. */
+const DEFAULT_LEARNING_CONFIDENCE = 0.5;
 
 /**
  * Escape SQL LIKE wildcards so caller-supplied text matches literally.
@@ -888,6 +894,27 @@ export class MemoryDb {
     // rejects a non-constant DEFAULT in ALTER TABLE ADD COLUMN, so existing
     // rows get NULL and decaySpecializations COALESCEs to updated_at.
     ensureColumn("agent_specializations", "last_reinforced_at", "INTEGER");
+
+    // 0.5.2 — provenance for cross-pollinated learnings, so consolidation can
+    // stop re-sharing copies (and echoing them back to their source).
+    ensureColumn("agent_learnings", "source_agent", "TEXT");
+
+    // 0.5.2 — repair learning confidences written before addLearning clamped
+    // them. A non-numeric `confidence: high` was stored as NULL (NaN binds as
+    // NULL) and made every later prompt build throw on `.toFixed`; `85` was
+    // stored as 85 and outranked every genuine learning. Idempotent: after
+    // one pass nothing matches.
+    try {
+      const fixed = this.db.prepare(
+        `UPDATE agent_learnings
+            SET confidence = CASE WHEN confidence IS NULL THEN ${DEFAULT_LEARNING_CONFIDENCE}
+                                  ELSE MIN(1.0, MAX(0.0, confidence)) END
+          WHERE confidence IS NULL OR confidence < 0 OR confidence > 1`,
+      ).run().changes;
+      if (fixed > 0) this.log.info(`Migrated: repaired ${fixed} out-of-range learning confidences`);
+    } catch (err) {
+      this.log.error(`Learning confidence repair failed: ${err}`);
+    }
   }
 
   /** Close the database */
@@ -1091,7 +1118,10 @@ export class MemoryDb {
    * delta, so the sum is identical and only the itemisation is lost.
    *
    * The compaction row is stamped at the cutoff, not at "now", so it is
-   * itself eligible for compaction on a later pass and cannot accumulate.
+   * itself eligible for compaction on a later pass and cannot accumulate —
+   * which only holds if earlier compaction rows are folded into the SUM and
+   * DELETE along with everything else. They used to be excluded from both,
+   * so each daily pass left another compaction row (~365/agent/year).
    */
   private compactTrustLedger(cutoffEpoch: number, removed: Record<string, number>): void {
     const db = this.requireDb();
@@ -1099,20 +1129,21 @@ export class MemoryDb {
       const stale = db.prepare(
         `SELECT agent_name, SUM(score_delta) AS delta, COUNT(*) AS n
            FROM agent_trust_ledger
-          WHERE created_at < ? AND reason != ?
+          WHERE created_at < ?
           GROUP BY agent_name`,
-      ).all(cutoffEpoch, TRUST_COMPACTION_REASON) as Array<{ agent_name: string; delta: number; n: number }>;
+      ).all(cutoffEpoch) as Array<{ agent_name: string; delta: number; n: number }>;
 
       let compacted = 0;
       for (const row of stale) {
         // One row is already as compact as it gets; rewriting it would just
-        // relabel a real reason as "compacted".
+        // relabel a real reason as "compacted". This is also what makes a
+        // repeat pass over a lone compaction row a no-op.
         if (row.n <= 1) continue;
         db.exec("BEGIN");
         try {
           db.prepare(
-            `DELETE FROM agent_trust_ledger WHERE agent_name = ? AND created_at < ? AND reason != ?`,
-          ).run(row.agent_name, cutoffEpoch, TRUST_COMPACTION_REASON);
+            `DELETE FROM agent_trust_ledger WHERE agent_name = ? AND created_at < ?`,
+          ).run(row.agent_name, cutoffEpoch);
           db.prepare(
             `INSERT INTO agent_trust_ledger (agent_name, score_delta, reason, created_at)
              VALUES (?, ?, ?, ?)`,
@@ -1716,14 +1747,20 @@ export class MemoryDb {
     return Number(result.lastInsertRowid);
   }
 
-  /** Get unread messages for an agent */
+  /**
+   * Get unread messages for an agent.
+   *
+   * Excludes what the agent sent itself. A `to_agent = '*'` broadcast from
+   * the master controller used to land in its own inbox, so its status
+   * broadcasts triggered the next paid OODA cycle five minutes later.
+   */
   getUnreadMessages(agentName: string): Record<string, unknown>[] {
     const db = this.requireDb();
     return db.prepare(
       `SELECT * FROM agent_messages
-       WHERE (to_agent = ? OR to_agent = '*') AND read_at IS NULL
+       WHERE (to_agent = ? OR to_agent = '*') AND from_agent != ? AND read_at IS NULL
        ORDER BY created_at ASC, id ASC`,
-    ).all(agentName);
+    ).all(agentName, agentName);
   }
 
   /** Mark messages as read */
@@ -1947,8 +1984,11 @@ export class MemoryDb {
     ).get(agentName, hash) as { id: number; confidence: number; reinforcement_count: number } | undefined;
 
     if (existing) {
-      // Reinforce: bump confidence (capped at 1.0), increment count
-      const newConfidence = Math.min(1.0, existing.confidence + 0.05);
+      // Reinforce: bump confidence (capped at 1.0), increment count. clamp01
+      // also guards a legacy NULL row (NULL + 0.05 is 0.05 in JS — wrong, but
+      // the open-time repair means it cannot occur; the fallback is belt and
+      // braces).
+      const newConfidence = clamp01(existing.confidence + 0.05, DEFAULT_LEARNING_CONFIDENCE);
       db.prepare(
         `UPDATE agent_learnings SET confidence = ?, reinforcement_count = reinforcement_count + 1, last_reinforced_at = unixepoch() WHERE id = ?`,
       ).run(newConfidence, existing.id);
@@ -1958,8 +1998,56 @@ export class MemoryDb {
     const result = db.prepare(
       `INSERT INTO agent_learnings (agent_name, category, content, content_hash, confidence, source_run_id)
        VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(agentName, category, content, hash, opts?.confidence ?? 0.5, opts?.sourceRunId ?? null);
+    ).run(
+      agentName, category, content, hash,
+      // Agent-stated confidence is free text upstream: NaN (`high`) used to
+      // bind as NULL and 85 as 85. Clamp, with the schema default for junk.
+      clamp01(opts?.confidence ?? DEFAULT_LEARNING_CONFIDENCE, DEFAULT_LEARNING_CONFIDENCE),
+      opts?.sourceRunId ?? null,
+    );
     return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Insert a learning only if the agent does not already hold one with the
+   * same content hash. Never reinforces.
+   *
+   * Cross-pollination used addLearning, whose duplicate path REINFORCES
+   * (+0.05, reinforcement_count++). Consolidation re-shares the same top
+   * insights every run, so each copy gained a reinforcement per run with no
+   * new evidence, crossed the core-knowledge floors, and was then shared back
+   * to its source. A copy is a single observation of someone else's claim.
+   *
+   * @returns the new row id, or null if the agent already had it.
+   */
+  addLearningIfAbsent(
+    agentName: string,
+    category: string,
+    content: string,
+    opts: { confidence: number; sourceAgent: string },
+  ): number | null {
+    const db = this.requireDb();
+    const result = db.prepare(
+      `INSERT OR IGNORE INTO agent_learnings
+         (agent_name, category, content, content_hash, confidence, source_agent)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      agentName, category, content, hashContent(content),
+      clamp01(opts.confidence, DEFAULT_LEARNING_CONFIDENCE), opts.sourceAgent,
+    );
+    return result.changes > 0 ? Number(result.lastInsertRowid) : null;
+  }
+
+  /**
+   * Overwrite a learning's confidence (clamped) without counting a
+   * reinforcement. Used by state import, where the bundle's confidence is a
+   * value to adopt, not new evidence. A non-finite value is ignored.
+   */
+  setLearningConfidence(id: number, confidence: number): void {
+    if (!Number.isFinite(confidence)) return;
+    this.requireDb().prepare(
+      `UPDATE agent_learnings SET confidence = ? WHERE id = ?`,
+    ).run(clamp01(confidence), id);
   }
 
   /** Get top learnings for an agent, sorted by confidence */
@@ -2027,12 +2115,27 @@ export class MemoryDb {
     ).run(agentName, cutoff).changes;
   }
 
-  /** Get high-confidence learnings from all agents except one (cross-pollination) */
+  /**
+   * Get high-confidence learnings from all agents except one (cross-pollination).
+   *
+   * Only ORIGINAL learnings qualify (source_agent IS NULL): a pollinated copy
+   * re-shared would launder one agent's claim into "insights from other
+   * agents" and echo it back to its source. Learnings the recipient already
+   * holds are skipped too — otherwise the same top-N fill every slot forever
+   * and nothing new is ever offered. NOT EXISTS rather than NOT IN, because
+   * content_hash is nullable and a NULL in a NOT IN list matches nothing.
+   */
   getSharedInsights(excludeAgent: string, minConfidence = 0.7, limit = 5): Record<string, unknown>[] {
     const db = this.requireDb();
     return db.prepare(
-      `SELECT * FROM agent_learnings WHERE agent_name != ? AND confidence >= ? ORDER BY confidence DESC LIMIT ?`,
-    ).all(excludeAgent, minConfidence, limit);
+      `SELECT * FROM agent_learnings l
+        WHERE l.agent_name != ? AND l.confidence >= ? AND l.source_agent IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM agent_learnings own
+             WHERE own.agent_name = ? AND own.content_hash = l.content_hash
+          )
+        ORDER BY l.confidence DESC LIMIT ?`,
+    ).all(excludeAgent, minConfidence, excludeAgent, limit);
   }
 
   // -- Agent specializations (domain expertise tracking) ----------------------

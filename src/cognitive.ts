@@ -8,7 +8,7 @@
  */
 
 import type { MemoryDb, QuotaStatus } from "./memory-db.js";
-import { computeQuotaStatus } from "./memory-db.js";
+import { computeQuotaStatus, clamp01 } from "./memory-db.js";
 import type { TmxState, OrchestratorConfig } from "./types.js";
 
 // -- Types --------------------------------------------------------------------
@@ -312,7 +312,7 @@ export function buildOodaPrompt(ctx: OodaContext): string {
     sections.push(`\n## Your Knowledge Base (${ctx.agentLearnings.length} learnings: ${catSummary})\n`);
     for (const l of ctx.agentLearnings) {
       const reinforced = l.reinforcement_count > 1 ? `, reinforced ${l.reinforcement_count}x` : "";
-      sections.push(`- [${l.category}] ${l.content} (confidence: ${l.confidence.toFixed(2)}${reinforced})`);
+      sections.push(`- [${l.category}] ${l.content} (confidence: ${formatConfidence(l.confidence)}${reinforced})`);
     }
   }
 
@@ -320,7 +320,7 @@ export function buildOodaPrompt(ctx: OodaContext): string {
   if (ctx.sharedInsights.length > 0) {
     sections.push(`\n## Insights from Other Agents\n`);
     for (const s of ctx.sharedInsights) {
-      sections.push(`- [${s.agent_name}] ${s.content} (${s.confidence.toFixed(2)})`);
+      sections.push(`- [${s.agent_name}] ${s.content} (${formatConfidence(s.confidence)})`);
     }
   }
 
@@ -461,6 +461,27 @@ function clamp(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}… [truncated]`;
 }
 
+/**
+ * Parse a model-written confidence. `confidence: high` is NaN and used to be
+ * stored as NULL, which made every later prompt build throw on `.toFixed`;
+ * `85` was stored as 85. Junk → undefined (the storage default applies),
+ * numbers → clamped to [0, 1].
+ */
+function parseConfidence(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? clamp01(n) : undefined;
+}
+
+/**
+ * Format a stored confidence for a prompt. Rows are read straight from
+ * SQLite, so a legacy NULL must render rather than throw out of the whole
+ * prompt build (and with it the agent run).
+ */
+export function formatConfidence(v: unknown): string {
+  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "n/a";
+}
+
 /** Clamp an optional field, preserving undefined. */
 function clampOpt(value: string | undefined, max: number): string | undefined {
   return value === undefined ? undefined : clamp(value, max);
@@ -563,7 +584,7 @@ export function parseOodaResponse(text: string): OodaAction[] {
             type: "learning",
             content: clamp(fields.content, FIELD_LIMITS.learningContent),
             category: clamp(fields.category, FIELD_LIMITS.learningCategory),
-            confidence: fields.confidence ? parseFloat(fields.confidence) : undefined,
+            confidence: parseConfidence(fields.confidence),
           });
         }
         break;

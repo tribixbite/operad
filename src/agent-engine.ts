@@ -3,6 +3,7 @@ import { computeQuotaStatus } from "./memory-db.js";
 import {
   buildOodaContext,
   buildOodaPrompt,
+  formatConfidence,
   parseOodaResponse,
   type OodaAction,
 } from "./cognitive.js";
@@ -185,31 +186,20 @@ export class AgentEngine {
     const urgentMessages = unread.filter((m) => (m.created_at as number) < fiveMinAgo);
 
     if (urgentMessages.length > 0) {
-      // Do not consume the trigger if a cycle cannot start. Messages are
-      // marked read BEFORE the cycle (see below), so calling into a cycle
-      // that immediately refuses would drop them for good.
+      // Do not consume the trigger if a cycle cannot start — runOodaCycle
+      // marks the inbox read only once it is past every guard, so a refused
+      // cycle leaves the messages for the next tick.
       if (this.cycleInFlight) {
         log.debug("OODA trigger deferred — a cycle is already running");
         return;
       }
       log.info(`OODA trigger: ${urgentMessages.length} unread messages older than 5min`);
-      // Mark them read BEFORE the cycle, not after.
-      //
       // markMessagesRead had no production caller at all, so the inbox never
       // drained: one message made the 60s cognitive timer fire a full paid SDK
-      // cycle forever. It self-fed too — getUnreadMessages matches to_agent
-      // '*', which the master controller's own broadcast blocks produce — and
-      // every unread message's full text is injected into the prompt, so the
-      // prompt grew without bound alongside the spend.
-      //
-      // Marking first (rather than in a finally) means a cycle that throws
-      // does not re-trigger on the same messages; they are still readable in
-      // the history, and a genuinely new message re-arms the trigger.
-      memoryDb.markMessagesRead(
-        urgentMessages
-          .map((m) => m.id as number)
-          .filter((id) => typeof id === "number"),
-      );
+      // cycle forever. Marking now happens inside runOodaCycle, for EVERY
+      // message its prompt includes — marking only this urgent subset here
+      // left fresh messages unread although they had already been injected,
+      // so they were answered again (and re-triggered) five minutes later.
       await this.runOodaCycle();
       return;
     }
@@ -287,6 +277,15 @@ export class AgentEngine {
     }
 
     const oodaPrompt = buildOodaPrompt(oodaCtx);
+
+    // The prompt now carries the whole unread inbox, so consume exactly that
+    // set. Done BEFORE the run, not in a finally: a cycle that throws must
+    // not re-trigger on the same messages (they remain in the history), and
+    // a genuinely new message re-arms the trigger.
+    const inboxIds = oodaCtx.inbox
+      .map((m) => m.id)
+      .filter((id): id is number => typeof id === "number");
+    if (inboxIds.length > 0) memoryDb.markMessagesRead(inboxIds);
 
     log.info("Running OODA cycle for master-controller");
     this.ctx.broadcast("ooda_status", { running: true });
@@ -681,7 +680,7 @@ export class AgentEngine {
     if (core.length > 0) {
       parts.push("## Core Knowledge (promoted via reinforcement)");
       for (const c of core) {
-        const conf = c.confidence.toFixed(2);
+        const conf = formatConfidence(c.confidence);
         parts.push(`- [${c.category}] ${c.content} (confidence: ${conf}, reinforced ${c.reinforcement_count}x)`);
       }
     }
@@ -693,7 +692,7 @@ export class AgentEngine {
     if (fresh.length > 0) {
       parts.push("## Your Accumulated Knowledge");
       for (const l of fresh) {
-        const conf = (l.confidence as number).toFixed(2);
+        const conf = formatConfidence(l.confidence);
         const reinforced = (l.reinforcement_count as number) > 1 ? ` (reinforced ${l.reinforcement_count}x)` : "";
         parts.push(`- [${l.category}] ${l.content} (confidence: ${conf}${reinforced})`);
       }
@@ -728,7 +727,7 @@ export class AgentEngine {
     if (shared.length > 0) {
       parts.push("## Insights from Other Agents");
       for (const s of shared) {
-        parts.push(`- [${s.agent_name}] ${s.content} (confidence: ${(s.confidence as number).toFixed(2)})`);
+        parts.push(`- [${s.agent_name}] ${s.content} (confidence: ${formatConfidence(s.confidence)})`);
       }
     }
 
