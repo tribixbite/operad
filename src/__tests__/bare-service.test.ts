@@ -14,7 +14,7 @@ import { bareServicePattern, pidHeldByOther } from "../bare-service.js";
 
 // The commands from the author's config, verbatim in shape.
 const X11 = `rm -f $PREFIX/tmp/.X1-lock; termux-x11 :1 -legacy-drawing -xstartup 'sh -c "xfwm4 & exec xfce4-session"'`;
-const X2D = `sh -c 'pgrep -f "Xtermux-x11 :1" >/dev/null || (termux-x11 :1 -ac &); cd ~/git/x2d && DISPLAY=:1 exec ./run_gui.sh'`;
+const X2D = `sh -c 'pgrep -f "[c]om[.]termux[.]x11[.]Loader :1" >/dev/null || (termux-x11 :1 -ac &); cd ~/git/x2d && DISPLAY=:1 exec ./run_gui.sh'`;
 const LOADER = "/system/bin/app_process -Xnoimage-dex2oat / com.termux.x11.Loader :1 -legacy-drawing";
 const GUI = "bash ./run_gui.sh";
 
