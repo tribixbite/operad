@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, openSync, closeSync, appendFileSync, writeFileSy
 import { dirname, join, resolve } from "node:path";
 import type { TmxConfig, IpcCommand, IpcResponse, SessionConfig, SessionStatus, Switchboard, HealthResult } from "./types.js";
 import { defaultSwitchboard } from "./types.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, getHealthConfig } from "./config.js";
 import { detectPlatform } from "./platform/platform.js";
 import { Logger } from "./log.js";
 import { StateManager, migrateState } from "./state.js";
@@ -91,6 +91,7 @@ import {
 } from "./session.js";
 import { exitRecordDirFor } from "./exit-record.js";
 import { retireUserExits } from "./user-exit.js";
+import { bareServicePattern, pidHeldByOther } from "./bare-service.js";
 import { getRuntime } from "./runtimes/index.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
@@ -922,9 +923,9 @@ export class Daemon {
     // We try to find the real process via command pattern matching.
     if (sessionConfig.bare) {
       // First check if the service is already running (e.g., started before daemon)
-      const pattern = this.getBareServicePattern(sessionConfig);
+      const pattern = this.bareServicePatternFor(sessionConfig);
       if (pattern) {
-        const existingPid = findBareServicePid(pattern);
+        const existingPid = this.findOwnBareServicePid(sessionConfig);
         if (existingPid) {
           this.log.info(`Bare session '${name}' already running (PID ${existingPid})`, { session: name });
           this.adoptedPids.set(name, existingPid);
@@ -951,7 +952,7 @@ export class Daemon {
           // existsSync here always said "dead" on macOS and Windows and
           // re-adopted whatever the pattern happened to match.
           if (!detectPlatform().isProcessAlive(pid)) {
-            const realPid = findBareServicePid(pattern);
+            const realPid = this.findOwnBareServicePid(sessionConfig);
             if (realPid) {
               this.log.info(`Bare session '${name}' shell exited, adopting real PID ${realPid}`, { session: name });
               this.adoptedPids.set(name, realPid);
@@ -1058,11 +1059,10 @@ export class Daemon {
       // Find all PIDs to kill: adopted PID + any matching service process
       const pidsToKill = new Set<number>();
       if (adoptedPid) pidsToKill.add(adoptedPid);
-      const pattern = cfg ? this.getBareServicePattern(cfg) : null;
-      if (pattern) {
-        const realPid = findBareServicePid(pattern);
-        if (realPid) pidsToKill.add(realPid);
-      }
+      // Only a process this service owns: another session's adopted PID is
+      // never a stop target for this one.
+      const realPid = cfg ? this.findOwnBareServicePid(cfg) : null;
+      if (realPid) pidsToKill.add(realPid);
 
       for (const pid of pidsToKill) {
         // Never signal a PID we cannot vouch for.
@@ -1220,8 +1220,7 @@ export class Daemon {
         const pid = this.adoptedPids.get(cfg.name)!;
         if (!detectPlatform().isProcessAlive(pid)) {
           // PID died — try to find replacement
-          const pattern = this.getBareServicePattern(cfg);
-          const newPid = pattern ? findBareServicePid(pattern) : null;
+          const newPid = this.findOwnBareServicePid(cfg);
           if (newPid) {
             this.log.info(`Bare service '${cfg.name}' PID ${pid} died, re-adopted as PID ${newPid}`, { session: cfg.name });
             this.adoptedPids.set(cfg.name, newPid);
@@ -1235,9 +1234,7 @@ export class Daemon {
       if (!s) continue;
       if (s.status !== "stopped" && s.status !== "failed" && s.status !== "pending") continue;
 
-      const pattern = this.getBareServicePattern(cfg);
-      if (!pattern) continue;
-      const pid = findBareServicePid(pattern);
+      const pid = this.findOwnBareServicePid(cfg);
       if (pid) {
         this.log.info(`Late-adopting bare service '${cfg.name}' (PID ${pid})`, { session: cfg.name });
         this.state.forceStatus(cfg.name, "running");
@@ -1248,26 +1245,23 @@ export class Daemon {
   }
 
   /**
-   * Build a regex pattern to find a bare service process in the process table.
-   * Returns null for sessions without a recognizable service command.
+   * The process that belongs to bare service `cfg`, or null. Matches on the
+   * session's health `process_pattern` when it has one, else on heuristics
+   * from its command (see bare-service.ts), and never returns a PID another
+   * session has already adopted — x2d once adopted termux-x11's X server, and
+   * stopping x2d would then have killed it.
    */
-  private getBareServicePattern(cfg: SessionConfig): RegExp | null {
-    if (!cfg.command) return null;
-    // termux-x11 runs as app_process with com.termux.x11.Loader
-    if (cfg.command.includes("termux-x11")) return /com\.termux\.x11\.Loader/;
-    // mcp-server-playwright / @playwright/mcp
-    if (cfg.command.includes("playwright")) return /playwright.*mcp|mcp.*playwright/;
-    // x2d → run_gui.sh which execs BambuStudio. Match either the wrapper
-    // or BS itself so force-cleanup can take down the whole tree even
-    // when the wrapper has exec'd away.
-    if (cfg.command.includes("run_gui.sh") || cfg.command.includes("/x2d")) {
-      return /run_gui\.sh|[Bb]ambu[Ss]tudio|bambu-studio/;
-    }
-    // Generic: match the first non-env non-cleanup token from the command
-    // e.g. "sleep 3 && DISPLAY=:1 bun foo" → match "bun foo" is too loose
-    return null;
+  private findOwnBareServicePid(cfg: SessionConfig): number | null {
+    const pattern = this.bareServicePatternFor(cfg);
+    if (!pattern) return null;
+    return findBareServicePid(pattern, (pid) => pidHeldByOther(pid, cfg.name, this.adoptedPids));
   }
 
+  /** The adoption pattern for a bare service (null when there is none). */
+  private bareServicePatternFor(cfg: SessionConfig): RegExp | null {
+    const health = getHealthConfig(cfg, this.config.health_defaults);
+    return bareServicePattern(cfg.command, health.check === "process" ? health.process_pattern : undefined);
+  }
 
   // -- Health & auto-restart --------------------------------------------------
 

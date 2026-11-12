@@ -209,9 +209,10 @@ export function discoverBareClaudeSessions(
  * as detached processes (app_process) and outlive their spawn shell.
  *
  * @param pattern - regex to match against process args (e.g., /termux.x11|com\.termux\.x11/)
+ * @param exclude - PIDs to pass over (e.g. those adopted by other sessions)
  * @returns PID of the matching process, or null if not found
  */
-export function findBareServicePid(pattern: RegExp): number | null {
+export function findBareServicePid(pattern: RegExp, exclude?: (pid: number) => boolean): number | null {
   try {
     const result = spawnSync("ps", ["-eo", "pid,args"], {
       encoding: "utf-8",
@@ -227,7 +228,9 @@ export function findBareServicePid(pattern: RegExp): number | null {
       const pid = parseInt(trimmed.slice(0, spaceIdx), 10);
       const args = trimmed.slice(spaceIdx + 1);
       if (isNaN(pid) || pid <= 1) continue;
-      if (pattern.test(args)) return pid;
+      // `exclude` skips processes another session already owns, so a second
+      // match is still found rather than the first one being stolen.
+      if (pattern.test(args) && !exclude?.(pid)) return pid;
     }
   } catch { /* ignore */ }
   return null;

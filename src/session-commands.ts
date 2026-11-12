@@ -249,7 +249,7 @@ export class SessionCommands {
    * Strategy:
    *   1. Run the normal stop path (kills tracked PIDs, group-kills
    *      anything matching the bare-service pattern from
-   *      getBareServicePattern).
+   *      bareServicePattern in bare-service.ts).
    *   2. Then a wider sweep — pkill -9 -f for every keyword the daemon
    *      knows for this session type. For x2d this means BambuStudio,
    *      run_gui.sh, bambu-studio. Catches orphans the regular stop
