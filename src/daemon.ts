@@ -90,6 +90,7 @@ import {
   applyAgentSessionOptions,
 } from "./session.js";
 import { exitRecordDirFor } from "./exit-record.js";
+import { retireUserExits } from "./user-exit.js";
 import { getRuntime } from "./runtimes/index.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
@@ -1332,43 +1333,20 @@ export class Daemon {
    * exit: that is what supervising them means.
    */
   private handleUserExits(results: HealthResult[]): void {
-    if (!this.config.boot.respect_manual_exit) return;
-
-    for (const result of results) {
-      if (result.healthy || !result.user_exited) continue;
-
-      const session = this.config.sessions.find((c) => c.name === result.session);
-      if (!session || !getRuntime(session.type)) continue;
-
-      const s = this.state.getSession(session.name);
-      if (!s || s.suspended) continue;
-      // Already retired by an earlier sweep — don't re-log every 30 s.
-      if (s.status === "stopped" || s.status === "failed") continue;
-
-      this.cancelRestart(session.name);
-      // Reap the dead pane `remain-on-exit` kept for us, so the session
-      // doesn't linger in tmux as a corpse.
-      void stopSession(session.name, this.log);
-      this.state.transition(session.name, "stopped", "Exited by user");
-      this.activity.remove(session.name);
-
-      // Unstar: an explicit exit is an explicit "not this one".
-      this.state.setAutostartOverride(session.name, false);
-      if (session.path) this.state.recordManualClose(resolve(session.path));
-
-      this.log.info(
-        `Session '${session.name}' was exited (${result.message}) — not restarting; ` +
-        `unstarred and excluded from auto-boot until you open it again`,
-        { session: session.name },
-      );
-      appendNotification({
+    retireUserExits(results, this.config.sessions, this.config.boot.respect_manual_exit, {
+      state: this.state,
+      log: this.log,
+      cancelRestart: (name) => this.cancelRestart(name),
+      stopSession: (name) => { void stopSession(name, this.log); },
+      forgetActivity: (name) => this.activity.remove(name),
+      notify: (name) => appendNotification({
         type: "session_stop",
-        title: `Session '${session.name}' exited`,
+        title: `Session '${name}' exited`,
         content: "Closed by you — unstarred, and it won't auto-boot. " +
-          `Run 'operad start ${session.name}' to bring it back.`,
-        session: session.name,
-      });
-    }
+          `Run 'operad start ${name}' to bring it back.`,
+        session: name,
+      }),
+    });
   }
 
   /** Run health sweep and handle auto-restarts for degraded sessions */

@@ -85,6 +85,13 @@ reading until its next restart. A missing tmux session is still treated as a
 fault, not an exit. `boot.respect_manual_exit = false` restores the old
 always-reopen behaviour.
 
+It also failed for a session the health sweep had already marked `degraded`
+(any failure threshold of 1): `degraded → stopped` is not a legal transition,
+the refusal was ignored, and the restart loop that runs next reopened the
+session milliseconds after logging "not restarting". Retirement now goes
+through `stopping`, and an end-to-end run against a real daemon (one probe
+exited, one SIGKILLed) shows the first retired and the second restarted.
+
 The first version of this shipped broken: `set-option -t '=name' remain-on-exit
 on` fails on tmux 3.5a ("no such window" — the session sigil does not resolve
 for `set-option`) and the error was discarded, so no session ever kept its
