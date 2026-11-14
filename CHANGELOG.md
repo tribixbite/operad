@@ -24,6 +24,9 @@ Found while bringing the author's `x2d` service (BambuStudio) back up:
 - **The wrong process was adopted.** The first match in PID order won, which
   can be a short-lived subshell carrying the script's cmdline. The service's
   own process-group leader, then the longest-running match, is preferred.
+  A match whose group leader is gone is a remnant of a stopped service and is
+  never taken for a running one: a restart once adopted such a subshell as
+  "already running" and was left stopped when it exited.
 - **Stopping a service left part of it running.** SIGTERM went to the
   service's process group, but the SIGKILL escalation only to its leader, so
   any member that handles SIGTERM survived — x2d's camera daemon outlived

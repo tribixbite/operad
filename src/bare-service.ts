@@ -128,8 +128,11 @@ export function parseElapsed(etime: string): number | null {
  *  1. process-group leaders first — operad spawns bare services detached,
  *     so the service leads its own group, and its subshells never do;
  *  2. then the longest-running, since a service outlives its helpers.
- * A non-leader still wins when no leader matches (termux-x11's X server
- * runs under the `sh -c` operad spawned).
+ * A non-leader still wins when no leader matches (a service run under a
+ * shell that did not exec it) — but only while its group leader is alive.
+ * A member of a group whose leader is gone is a remnant of a stopped
+ * service: a restart once took such a subshell for "already running",
+ * adopted it, and was left stopped when it exited.
  *
  * @param exclude  skips PIDs another session already owns.
  */
@@ -138,9 +141,11 @@ export function pickBareServicePid(
   pattern: RegExp,
   exclude?: (pid: number) => boolean,
 ): number | null {
+  const liveGroups = new Set(rows.filter((r) => r.pid === r.pgid).map((r) => r.pgid));
   let best: PsRow | null = null;
   for (const r of rows) {
     if (!pattern.test(r.args) || exclude?.(r.pid)) continue;
+    if (!liveGroups.has(r.pgid)) continue; // orphaned remnant
     if (best === null || outranks(r, best)) best = r;
   }
   return best?.pid ?? null;

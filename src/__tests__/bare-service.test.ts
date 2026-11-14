@@ -130,8 +130,9 @@ describe("pickBareServicePid", () => {
 
   test("among equals, prefers the longest-running", () => {
     const loose = [
-      { pid: 100, pgid: 1, elapsedS: 5, args: "bash ./run_gui.sh" },
-      { pid: 900, pgid: 1, elapsedS: 500, args: "bash ./run_gui.sh" },
+      { pid: 50, pgid: 50, elapsedS: 900, args: "sh -c some-launcher" }, // live, non-matching leader
+      { pid: 100, pgid: 50, elapsedS: 5, args: "bash ./run_gui.sh" },
+      { pid: 900, pgid: 50, elapsedS: 500, args: "bash ./run_gui.sh" },
     ];
     expect(pickBareServicePid(loose, P)).toBe(900);
   });
@@ -142,6 +143,14 @@ describe("pickBareServicePid", () => {
       { pid: 11, pgid: 10, elapsedS: 899, args: LOADER },
     ];
     expect(pickBareServicePid(x11, bareServicePattern(X11)!)).toBe(11);
+  });
+
+  test("an orphan whose group leader is gone is not a running service", () => {
+    // Seen live: a restart found a watchdog subshell left over from an older
+    // x2d group, called x2d "already running" and adopted it; it exited 43 s
+    // later and x2d was left stopped.
+    const orphaned = [{ pid: 9038, pgid: 29163, elapsedS: 600, args: "/usr/bin/bash ./run_gui.sh" }];
+    expect(pickBareServicePid(orphaned, P)).toBeNull();
   });
 
   test("excluded PIDs (owned by another session) are skipped", () => {
