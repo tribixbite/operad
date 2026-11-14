@@ -53,6 +53,8 @@ src/
   timezone.ts             — Sets TZ from the device at startup (bun on Termux is UTC)
   sqlite-readonly.ts      — Sync read-only SQLite for other tools' databases
   shell-quote.ts          — POSIX single-quoting
+  bare-service.ts         — Bare-service process identity: adoption pattern, PID choice, boot reconcile
+  process-group.ts        — SIGTERM→SIGKILL a whole process group
   bounded-exec.ts         — Subprocess with timeout/output cap/process-group kill
   runtimes/               — Agent adapters (claude, codex, opencode, agy), pane
                             runtime detection, agy/Codex conversation locators
@@ -159,6 +161,7 @@ tmx boot
 - **tmux spawnSync**: Use array args, not string concatenation. No shell quoting needed.
 - **tmux exact-match sigil**: `=name` works ONLY for target-session subcommands (has-session, kill-session, list-clients, switch-client, `list-panes -s`). Pane/window targets (send-keys, capture-pane, list-panes, select-window) need `=name:` (trailing colon → target-window → resolves to current pane). Bare `=name` on those errors with "can't find pane". **`set-option` and `set-hook` also need `=name:` on tmux 3.5a — even for session options** (`=name` fails "no such window"/"no such session"). `tmux()` swallows errors, so a wrong target fails silently: that is how remain-on-exit went unset.
 - **Tests that need tmux use a private server**: set `OPERAD_TMUX_SOCKET` (→ `tmux -L`) before the first call, assert `tmuxServerArgs()`, and in afterAll SIGKILL the server pid and unlink its socket — `kill-server` is a no-op when the server inherited the agent shell's blocked signal mask. See `session-tmux.test.ts`.
+- **Bare services are identified by the program they run, never by a name anywhere in a cmdline.** Heuristic patterns in `bare-service.ts` are anchored (`^…/bambu-studio`, `^sh run_gui.sh`); an unanchored one adopted — and on restart killed the process group of — a shell whose awk script mentioned the name. Output of bare services is in `<log_dir>/bare-<name>.log`.
 - **Never mutate `$HOME` in tests**: claude-session.ts has `_setClaudeHome()`, agents.ts `_setUserAgentsHome()`; bun caches `os.homedir()` process-wide.
 - **Symlink resolution**: Use `realpathSync(__filename)` to resolve repo root from symlinked `~/.local/bin/tmx`.
 - **Nested CC detection**: Daemon strips `CLAUDECODE`, `CLAUDE_CODE_*`, `ENABLE_CLAUDE_CODE_*`, `CLAUDE_TMPDIR` from env.
