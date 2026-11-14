@@ -52,6 +52,48 @@ describe("bareServicePattern", () => {
     expect(bareServicePattern("bunx @playwright/mcp --port 8931")!.test("node /x/@playwright/mcp/cli.js")).toBe(true);
   });
 
+  /**
+   * Found on the live daemon: `operad start x2d` reported "already running"
+   * and adopted PID 26434 — a shell running a status check whose awk script
+   * contained "bambu-studio|beambam\\.cli|run_gui". The restart then killed
+   * that shell's process group. A heuristic must identify the process by the
+   * program it runs, not by text anywhere in its arguments.
+   */
+  test("a command that only mentions the service's names is not the service", () => {
+    const x2d = bareServicePattern(X2D)!;
+    for (const bystander of [
+      `/usr/bin/bash -c ps -eo pid,args | awk '/bambu-studio|beambam\\.cli|run_gui/ && !/awk/'`,
+      "rg -n bambu-studio run_gui.sh",
+      "vim /home/u/git/x2d/run_gui.sh",
+      "tail -f /home/u/.local/share/tmx/logs/bare-x2d.log",
+    ]) {
+      expect({ bystander, matched: x2d.test(bystander) }).toEqual({ bystander, matched: false });
+    }
+    const x11 = bareServicePattern(X11)!;
+    expect(x11.test(`pgrep -f com.termux.x11.Loader :1`)).toBe(false);
+    expect(x11.test(`sh -c pgrep -f "com.termux.x11.Loader :1" || termux-x11 :1`)).toBe(false);
+    const pw = bareServicePattern("bunx @playwright/mcp --port 8931")!;
+    expect(pw.test("rg -n playwright.*mcp src/")).toBe(false);
+  });
+
+  test("the service's own process forms all match", () => {
+    const x2d = bareServicePattern(X2D)!;
+    for (const own of [
+      "/data/data/com.termux/files/home/git/x2d/bs-bionic/build/src/bambu-studio",
+      "/opt/x2d/BambuStudio --gl",
+      "bash ./run_gui.sh",
+      "/data/data/com.termux/files/usr/bin/bash ./run_gui.sh",
+      "sh /home/u/git/x2d/run_gui.sh --debug",
+    ]) {
+      expect({ own, matched: x2d.test(own) }).toEqual({ own, matched: true });
+    }
+    expect(bareServicePattern(X11)!.test(LOADER)).toBe(true);
+    const pw = bareServicePattern("bunx @playwright/mcp --port 8931")!;
+    expect(pw.test("npx @playwright/mcp --port 8931")).toBe(true);
+    expect(pw.test("/usr/bin/node /x/node_modules/@playwright/mcp/cli.js --port 8931")).toBe(true);
+    expect(pw.test("node /x/mcp-server-playwright/dist/index.js")).toBe(true);
+  });
+
   test("an unrecognised command has no pattern (too loose to guess)", () => {
     expect(bareServicePattern("sleep 3 && DISPLAY=:1 bun foo")).toBeNull();
     expect(bareServicePattern(undefined)).toBeNull();

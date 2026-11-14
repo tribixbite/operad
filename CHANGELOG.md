@@ -25,8 +25,16 @@ Found while bringing the author's `x2d` service (BambuStudio) back up:
   can be a short-lived subshell carrying the script's cmdline. The service's
   own process-group leader, then the longest-running match, is preferred.
   A match whose group leader is gone is a remnant of a stopped service and is
-  never taken for a running one: a restart once adopted such a subshell as
-  "already running" and was left stopped when it exited.
+  no longer taken for a running one.
+- **Bystanders were adopted — and killed.** The x2d and termux-x11/playwright
+  heuristics matched their names anywhere in a cmdline, so `operad start x2d`
+  took a shell whose awk script mentioned "bambu-studio" for the running
+  service, and the restart after it killed that shell's process group. (An
+  earlier "already running" adoption blamed on a leftover subshell was most
+  likely the same thing.) The heuristics now identify the program a process
+  runs — `…/bambu-studio`, `sh run_gui.sh`, `app_process … Loader`,
+  `node|npx … @playwright/mcp` — anchored at the start of the cmdline. A
+  configured `process_pattern` still matches anywhere, as `pgrep -f` does.
 - **Stopping a service left part of it running.** SIGTERM went to the
   service's process group, but the SIGKILL escalation only to its leader, so
   any member that handles SIGTERM survived — x2d's camera daemon outlived

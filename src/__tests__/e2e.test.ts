@@ -140,7 +140,11 @@ afterAll(async () => {
   if (daemonProcess) {
     daemonProcess.kill("SIGTERM");
     await new Promise(r => setTimeout(r, 1500));
-    if (!daemonProcess.killed && daemonProcess.exitCode === null) {
+    // `killed` only says a signal was sent, so it is already true here and
+    // can't tell whether the daemon exited. A daemon that ignored SIGTERM
+    // (e.g. a blocked signal mask inherited from the shell) has neither an
+    // exit code nor a terminating signal yet.
+    if (daemonProcess.exitCode === null && daemonProcess.signalCode === null) {
       daemonProcess.kill("SIGKILL");
     }
   }

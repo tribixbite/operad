@@ -306,7 +306,11 @@ describe("checkSessionHealth — http checks", () => {
   });
 
   afterEach(() => {
-    pyProc?.kill("SIGTERM");
+    // SIGKILL, not SIGTERM: a test runner started from a shell that blocks
+    // signals (Claude Code's Bash tool does) passes the mask on, the server
+    // never sees SIGTERM, and every run leaked one python3 per test — 150
+    // had piled up on the author's device. The stub needs no clean shutdown.
+    pyProc?.kill("SIGKILL");
     pyProc = null;
   });
 

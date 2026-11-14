@@ -17,7 +17,34 @@
  *     its own entry point (`run_gui.sh`) is about that, whatever helpers it
  *     also starts;
  *  3. otherwise no pattern — a generic guess would adopt strangers.
+ *
+ * The heuristics identify a process by the PROGRAM it runs — its executable,
+ * or the script/class/package an interpreter was started on — anchored at
+ * the start of the cmdline. Matching the names anywhere adopted bystanders:
+ * `operad start x2d` once took a shell whose awk script mentioned
+ * "bambu-studio" for the running service, and the restart that followed
+ * killed that shell's process group.
  */
+
+/** Optional directory prefix of an executable path in a cmdline. */
+const DIR = String.raw`(?:\S*/)?`;
+/** End of a cmdline token. */
+const END = String.raw`(?=\s|$)`;
+/** A POSIX shell executable, as the first cmdline token. */
+const SHELL = String.raw`^${DIR}(?:ba|da|z|k|mk)?sh\s+`;
+/** A JS launcher, as the first cmdline token. */
+const JS_LAUNCHER = String.raw`^${DIR}(?:node|bun|bun-termux|npx|bunx)\s+(?:-\S+\s+)*`;
+
+/** x2d: BambuStudio itself, or a shell running run_gui.sh (which execs it). */
+const X2D_PROCESS = new RegExp(
+  String.raw`^${DIR}(?:bambu-studio|[Bb]ambu[Ss]tudio)${END}|${SHELL}${DIR}run_gui\.sh${END}`,
+);
+/** termux-x11's X server: app_process running the Loader class. */
+const TERMUX_X11_PROCESS = new RegExp(String.raw`^${DIR}app_process\S*\s(?:.*\s)?com\.termux\.x11\.Loader${END}`);
+/** The Playwright MCP server, run from node/bun/npx/bunx by package or path. */
+const PLAYWRIGHT_MCP_PROCESS = new RegExp(
+  String.raw`${JS_LAUNCHER}\S*(?:@playwright/mcp|mcp-server-playwright)\S*${END}`,
+);
 
 import type { SessionStatus } from "./types.js";
 
@@ -47,13 +74,11 @@ export function bareServicePattern(command: string | undefined, healthPattern?: 
   // BS itself so force-cleanup can take down the whole tree even when the
   // wrapper has exec'd away. Tested BEFORE termux-x11: this command starts
   // the X server too, but it is not the X server.
-  if (command.includes("run_gui.sh") || command.includes("/x2d")) {
-    return /run_gui\.sh|[Bb]ambu[Ss]tudio|bambu-studio/;
-  }
+  if (command.includes("run_gui.sh") || command.includes("/x2d")) return X2D_PROCESS;
   // mcp-server-playwright / @playwright/mcp
-  if (command.includes("playwright")) return /playwright.*mcp|mcp.*playwright/;
+  if (command.includes("playwright")) return PLAYWRIGHT_MCP_PROCESS;
   // termux-x11 runs as app_process with com.termux.x11.Loader
-  if (command.includes("termux-x11")) return /com\.termux\.x11\.Loader/;
+  if (command.includes("termux-x11")) return TERMUX_X11_PROCESS;
   // Anything else: matching e.g. the first token of "sleep 3 && bun foo"
   // would be far too loose.
   return null;
