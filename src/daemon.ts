@@ -92,6 +92,7 @@ import {
 import { exitRecordDirFor } from "./exit-record.js";
 import { retireUserExits } from "./user-exit.js";
 import { bareServiceBootDecision, bareServicePattern, pidHeldByOther } from "./bare-service.js";
+import { terminateProcessGroup } from "./process-group.js";
 import { getRuntime } from "./runtimes/index.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
@@ -1067,6 +1068,7 @@ export class Daemon {
       const realPid = cfg ? this.findOwnBareServicePid(cfg) : null;
       if (realPid) pidsToKill.add(realPid);
 
+      const vetted: number[] = [];
       for (const pid of pidsToKill) {
         // Never signal a PID we cannot vouch for.
         //
@@ -1085,23 +1087,12 @@ export class Daemon {
           continue;
         }
         this.log.info(`Killing bare process '${name}' (PID ${pid})`, { session: name });
-        try {
-          // Kill process group first (catches children like xfce4-session, dbus-launch)
-          process.kill(-pid, "SIGTERM");
-        } catch {
-          // Process group kill may fail — fall back to direct PID kill
-          try { process.kill(pid, "SIGTERM"); } catch { /* already dead — race between PID check and kill */ }
-        }
+        vetted.push(pid);
       }
-      await sleep(1500);
-      // Force-kill any survivors. Was a /proc check, so on macOS and Windows
-      // the SIGKILL escalation never ran and processes that ignore SIGTERM
-      // leaked.
-      for (const pid of pidsToKill) {
-        if (detectPlatform().isProcessAlive(pid)) {
-          try { process.kill(pid, "SIGKILL"); } catch { /* already dead — race between PID check and kill */ }
-        }
-      }
+      // SIGTERM each group (catches children like xfce4-session, dbus-launch),
+      // then SIGKILL whatever of the group survived — not just the leader.
+      // Only vetted PIDs: one found dead above may be reused by now.
+      await Promise.all(vetted.map((pid) => terminateProcessGroup(pid, 1500)));
       this.adoptedPids.delete(name);
     }
 

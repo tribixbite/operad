@@ -24,6 +24,10 @@ Found while bringing the author's `x2d` service (BambuStudio) back up:
 - **The wrong process was adopted.** The first match in PID order won, which
   can be a short-lived subshell carrying the script's cmdline. The service's
   own process-group leader, then the longest-running match, is preferred.
+- **Stopping a service left part of it running.** SIGTERM went to the
+  service's process group, but the SIGKILL escalation only to its leader, so
+  any member that handles SIGTERM survived — x2d's camera daemon outlived
+  every stop. `terminateProcessGroup` escalates on the whole group.
 - **Misleading health messages.** A bare service with no tracked process
   reported "tmux session not found", and a dead tmux server marked bare
   services failed. Neither involves tmux.
