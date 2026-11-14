@@ -91,7 +91,7 @@ import {
 } from "./session.js";
 import { exitRecordDirFor } from "./exit-record.js";
 import { retireUserExits } from "./user-exit.js";
-import { bareServicePattern, pidHeldByOther } from "./bare-service.js";
+import { bareServiceBootDecision, bareServicePattern, pidHeldByOther } from "./bare-service.js";
 import { getRuntime } from "./runtimes/index.js";
 import { AgentEngine } from "./agent-engine.js";
 import { ToolEngine } from "./tool-engine.js";
@@ -935,7 +935,10 @@ export class Daemon {
         }
       }
 
-      const pid = spawnBareProcess(sessionConfig, this.log);
+      // Output goes to <log_dir>/bare-<name>.log — with nowhere to write, a
+      // service that dies at launch (e.g. a missing shared library) leaves
+      // no trace at all.
+      const pid = spawnBareProcess(sessionConfig, this.log, this.config.orchestrator.log_dir);
       if (!pid) {
         this.state.transition(name, "failed", "Failed to spawn bare process");
         return false;
@@ -1169,11 +1172,23 @@ export class Daemon {
     // Recover sessions whose state claims they're active but tmux session is gone
     // AND no bare process was found. Handles: post-reboot (state.json persists but
     // tmux is dead), OOM kills, and sessions stuck in transient states.
-    // Skip bare-config sessions — they don't use tmux at all.
     for (const cfg of this.config.sessions) {
-      if (cfg.bare) continue; // bare sessions are tracked via adoptedPids
       const s = this.state.getSession(cfg.name);
       if (!s) continue;
+      if (cfg.bare) {
+        // No tmux to consult: find the service's own process instead. This
+        // daemon has adopted nothing yet, so a persisted "running" proves
+        // nothing on its own.
+        const decision = bareServiceBootDecision(s.status, this.findOwnBareServicePid(cfg));
+        if (decision.kind === "adopt") {
+          this.log.info(`Adopting running bare service '${cfg.name}' (PID ${decision.pid})`, { session: cfg.name });
+          this.adoptedPids.set(cfg.name, decision.pid);
+        } else if (decision.kind === "stale") {
+          this.log.info(`Recovering stale '${s.status}' bare service '${cfg.name}' → stopped`, { session: cfg.name });
+          this.state.forceStatus(cfg.name, "stopped");
+        }
+        continue;
+      }
       const isActiveState = s.status === "running" || s.status === "degraded" ||
         s.status === "stopping" || s.status === "starting";
       if (isActiveState && !existingSessions.has(cfg.name) && !adoptedNames.has(cfg.name)) {

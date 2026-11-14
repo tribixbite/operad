@@ -139,6 +139,13 @@ interval_s = 30
 | `service` | optional | required | yes | Runs an arbitrary command in tmux. |
 
 For `bare = true` sessions, the command is spawned as a detached process instead of a tmux session.
+Its stdout and stderr go to `<log_dir>/bare-<name>.log` (a header line per
+start; rotated to `.1` past 1 MiB). operad finds and health-checks the
+service's process by its health `process_pattern` when set, otherwise by what
+the command is known to become (e.g. `run_gui.sh` → BambuStudio), preferring
+the process-group leader it spawned over that process's own subshells. At
+daemon start a bare service persisted as running is adopted if its process is
+alive and started again if not.
 
 Agent sessions (the first four types) keep their dead panes after the shell
 exits and run that shell under a small exit recorder (records under

@@ -624,6 +624,48 @@ describe("runHealthSweep — adopted bare-PID sessions", () => {
   });
 });
 
+// A bare service never runs in tmux, so with no tracked process the sweep
+// used to fall through to the tmux check and report "tmux session not found"
+// for x2d — true, but irrelevant, and it hid what was actually wrong.
+describe("runHealthSweep — bare service with no tracked process", () => {
+  test("is unhealthy with a reason about its process, not tmux", () => {
+    const session = makeSession("svc", { bare: true, command: "sleep 1", max_restarts: 99 });
+    const cfg = setupSweep([session]);
+    setSweepState("svc", "running", 0);
+
+    const results = runHealthSweep(cfg, state, silentLog(), new Map());
+
+    const r = results.find((x) => x.session === "svc")!;
+    expect(r.healthy).toBe(false);
+    expect(r.message).toBe("bare service has no tracked process");
+    expect(state.getSession("svc")!.consecutive_failures).toBe(1);
+  });
+
+  test("a dead tmux server does not fail a bare service", () => {
+    const session = makeSession("svc", { bare: true, command: "sleep 1", max_restarts: 99 });
+    const cfg = setupSweep([session]);
+    setSweepState("svc", "running", 0);
+
+    const results = runHealthSweep(cfg, state, silentLog(), new Map(), { tmuxAlive: () => false });
+
+    expect(results.filter((x) => x.session === "svc").map((x) => x.message)).toEqual([
+      "bare service has no tracked process",
+    ]);
+    expect(state.getSession("svc")!.status).toBe("running");
+  });
+
+  test("a dead tmux server still fails a tmux session", () => {
+    const session = makeSession("tm", { max_restarts: 99 });
+    const cfg = setupSweep([session]);
+    setSweepState("tm", "running", 0);
+
+    const results = runHealthSweep(cfg, state, silentLog(), new Map(), { tmuxAlive: () => false });
+
+    expect(results.find((x) => x.session === "tm")!.message).toBe("Tmux server not running");
+    expect(state.getSession("tm")!.status).toBe("failed");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // runHealthSweep — adopted bare-PID sessions with explicit process_pattern
 //
@@ -658,6 +700,39 @@ async function waitForCmdline(pid: number, token: string, tries = 50): Promise<b
   }
   return false;
 }
+
+/**
+ * Found on the live daemon: x2d's command ends `exec ./run_gui.sh`, and
+ * run_gui.sh itself execs BambuStudio, so the adopted PID's cmdline becomes
+ * `…/bambu-studio`. The derived marker "run_gui.sh" then failed every sweep
+ * and a healthy x2d was restarted on a loop. Adoption already matches either
+ * name (bareServicePattern); the health check must use the same pattern.
+ */
+describe("runHealthSweep — bare service whose wrapper exec'd its program", () => {
+  test.skipIf(!hasProcCmdline)("matches with the adoption pattern, not only the derived marker", async () => {
+    const child = spawnAsync("bash", ["-c", "exec -a /x2d/bs-bionic/build/src/bambu-studio sleep 300"], {
+      stdio: "ignore",
+    });
+    try {
+      await waitForCmdline(child.pid!, "bambu-studio");
+      const session = makeSession("x2dsvc", {
+        bare: true,
+        command: `sh -c 'pgrep -f "[c]om[.]termux[.]x11[.]Loader :1" >/dev/null || (termux-x11 :1 -ac &); cd ~/git/x2d && DISPLAY=:1 exec ./run_gui.sh'`,
+        max_restarts: 99,
+      });
+      const cfg = setupSweep([session]);
+      setSweepState("x2dsvc", "running", 0);
+
+      const results = runHealthSweep(cfg, state, silentLog(), new Map([["x2dsvc", child.pid!]]));
+
+      const r = results.find((x) => x.session === "x2dsvc")!;
+      expect(r.message).toBe(`Process PID ${child.pid} alive`);
+      expect(r.healthy).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+});
 
 describe("runHealthSweep — adopted bare-PID with explicit process_pattern", () => {
   test.skipIf(!hasProcCmdline)(

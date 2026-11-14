@@ -16,6 +16,7 @@ import type { Logger } from "./log.js";
 import type { StateManager } from "./state.js";
 import { isTmuxServerAlive, paneLiveness } from "./session.js";
 import { getHealthConfig } from "./config.js";
+import { bareServicePattern } from "./bare-service.js";
 import { getRuntime } from "./runtimes/index.js";
 
 /** Run a single health check for a session */
@@ -235,7 +236,7 @@ function pidAliveCheck(
   sessionName: string,
   pid: number,
   startMs: number,
-  expectedCmdline?: string | null,
+  expectedCmdline?: string | RegExp | null,
 ): HealthResult {
   const alive = detectPlatform().isProcessAlive(pid);
   if (!alive) {
@@ -252,7 +253,10 @@ function pidAliveCheck(
       const raw = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
       // /proc cmdline uses NUL separators; flatten to single string for substring match.
       const flat = raw.replace(/\0/g, " ").trim();
-      if (flat && !flat.includes(expectedCmdline)) {
+      const matches = typeof expectedCmdline === "string"
+        ? flat.includes(expectedCmdline)
+        : expectedCmdline.test(flat);
+      if (flat && !matches) {
         return {
           session: sessionName,
           healthy: false,
@@ -446,18 +450,19 @@ export function runHealthSweep(
   state: StateManager,
   log: Logger,
   adoptedPids?: Map<string, number>,
+  deps: { tmuxAlive?: () => boolean } = {},
 ): HealthResult[] {
   const results: HealthResult[] = [];
   const adopted = adoptedPids ?? new Map<string, number>();
 
   // First, verify tmux server is alive (only affects non-adopted sessions)
-  const tmuxAlive = isTmuxServerAlive();
+  const tmuxAlive = (deps.tmuxAlive ?? isTmuxServerAlive)();
   if (!tmuxAlive) {
     for (const session of config.sessions) {
       const s = state.getSession(session.name);
       if (!s) continue;
-      // Skip adopted sessions — they don't need tmux
-      if (adopted.has(session.name)) continue;
+      // Skip adopted and bare sessions — they don't need tmux
+      if (adopted.has(session.name) || session.bare) continue;
       if (s.status === "running" || s.status === "degraded" || s.status === "starting") {
         log.error(`Tmux server not running — marking '${session.name}' as failed`);
         state.transition(session.name, "failed", "Tmux server not running");
@@ -492,11 +497,29 @@ export function runHealthSweep(
       // otherwise wedge the service in an endless restart loop despite
       // the process being perfectly alive. Fall back to the heuristic
       // marker when no pattern is configured.
+      //
+      // A bare service is checked with the same pattern that adopted it
+      // (bareServicePattern: the process_pattern, else what its command is
+      // known to become). Its launch command routinely execs into another
+      // program — x2d's run_gui.sh becomes BambuStudio — so a marker taken
+      // from the command alone fails every sweep and restarts a healthy
+      // service forever.
+      const processPattern = healthConfig.check === "process" ? healthConfig.process_pattern : undefined;
       const marker =
-        healthConfig.check === "process" && healthConfig.process_pattern
-          ? healthConfig.process_pattern
-          : deriveCmdlineMarker(session.name, session.command, session);
+        (session.bare ? bareServicePattern(session.command, processPattern) : null) ??
+        processPattern ??
+        deriveCmdlineMarker(session.name, session.command, session);
       result = pidAliveCheck(session.name, adoptedPid, Date.now(), marker);
+    } else if (session.bare) {
+      // A bare service never has a tmux session, so the tmux check below
+      // could only report "tmux session not found". With no tracked
+      // process it is down; count the failure with the real reason.
+      result = {
+        session: session.name,
+        healthy: false,
+        message: "bare service has no tracked process",
+        duration_ms: 0,
+      };
     } else if (!tmuxAlive) {
       continue; // Already handled above
     } else {

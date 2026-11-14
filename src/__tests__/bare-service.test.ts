@@ -10,7 +10,13 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { bareServicePattern, pidHeldByOther } from "../bare-service.js";
+import {
+  bareServicePattern,
+  pidHeldByOther,
+  bareServiceBootDecision,
+  parseElapsed,
+  pickBareServicePid,
+} from "../bare-service.js";
 
 // The commands from the author's config, verbatim in shape.
 const X11 = `rm -f $PREFIX/tmp/.X1-lock; termux-x11 :1 -legacy-drawing -xstartup 'sh -c "xfwm4 & exec xfce4-session"'`;
@@ -58,5 +64,110 @@ describe("pidHeldByOther", () => {
     expect(pidHeldByOther(28305, "x2d", adopted)).toBe(true);
     expect(pidHeldByOther(28305, "termux-x11", adopted)).toBe(false);
     expect(pidHeldByOther(999, "x2d", adopted)).toBe(false);
+  });
+});
+
+/**
+ * Found on the live daemon: a daemon restart left `x2d` "running" in
+ * state.json with no process behind it. Boot's stale-state recovery skipped
+ * bare services ("tracked via adoptedPids") — but a fresh daemon's
+ * adoptedPids is empty, so startSession returned early on "running" and
+ * nothing started it until two failed health checks and a restart backoff.
+ */
+describe("bareServiceBootDecision", () => {
+  test("an active service whose process is alive is adopted", () => {
+    for (const status of ["running", "degraded", "starting", "stopping"] as const) {
+      expect(bareServiceBootDecision(status, 4242)).toEqual({ kind: "adopt", pid: 4242 });
+    }
+  });
+
+  test("an active service with no process is stale, so boot starts it", () => {
+    for (const status of ["running", "degraded", "starting", "stopping"] as const) {
+      expect(bareServiceBootDecision(status, null)).toEqual({ kind: "stale" });
+    }
+  });
+
+  test("a stopped or not-yet-started service is left alone, process or not", () => {
+    for (const status of ["stopped", "pending", "waiting", "failed", undefined] as const) {
+      expect(bareServiceBootDecision(status, 4242)).toEqual({ kind: "leave" });
+      expect(bareServiceBootDecision(status, null)).toEqual({ kind: "leave" });
+    }
+  });
+});
+
+describe("parseElapsed", () => {
+  test("reads every ps etime form", () => {
+    expect(parseElapsed("04:01")).toBe(241);
+    expect(parseElapsed("1:02:03")).toBe(3723);
+    expect(parseElapsed("2-06:38:23")).toBe(2 * 86400 + 6 * 3600 + 38 * 60 + 23);
+  });
+
+  test("an unreadable value is null", () => {
+    expect(parseElapsed("")).toBeNull();
+    expect(parseElapsed("soon")).toBeNull();
+  });
+});
+
+/**
+ * Found on the live daemon: boot adopted `x2d` as PID 8978 — a `bash
+ * ./run_gui.sh` subshell from its bridge watchdog loop, which died a minute
+ * later — instead of PID 29163, the service operad had spawned (run_gui.sh
+ * exec's BambuStudio, keeping that PID). Subshells keep the script's
+ * cmdline, and the first match in ps's PID order won: PIDs wrap, so a fresh
+ * subshell can sort first.
+ */
+describe("pickBareServicePid", () => {
+  const P = bareServicePattern(X2D)!;
+  const rows = [
+    { pid: 8978, pgid: 29163, elapsedS: 2, args: "/usr/bin/bash ./run_gui.sh" },
+    { pid: 29163, pgid: 29163, elapsedS: 241, args: "/x2d/bs-bionic/build/src/bambu-studio" },
+    { pid: 29199, pgid: 29163, elapsedS: 241, args: "/usr/bin/bash ./run_gui.sh" },
+  ];
+
+  test("prefers the process-group leader over its own subshells", () => {
+    expect(pickBareServicePid(rows, P)).toBe(29163);
+  });
+
+  test("among equals, prefers the longest-running", () => {
+    const loose = [
+      { pid: 100, pgid: 1, elapsedS: 5, args: "bash ./run_gui.sh" },
+      { pid: 900, pgid: 1, elapsedS: 500, args: "bash ./run_gui.sh" },
+    ];
+    expect(pickBareServicePid(loose, P)).toBe(900);
+  });
+
+  test("a non-leader is still found when no leader matches (termux-x11's Loader under sh)", () => {
+    const x11 = [
+      { pid: 10, pgid: 10, elapsedS: 900, args: "sh -c rm -f lock; termux-x11 :1" },
+      { pid: 11, pgid: 10, elapsedS: 899, args: LOADER },
+    ];
+    expect(pickBareServicePid(x11, bareServicePattern(X11)!)).toBe(11);
+  });
+
+  test("excluded PIDs (owned by another session) are skipped", () => {
+    expect(pickBareServicePid(rows, P, (pid) => pid === 29163)).toBe(29199);
+  });
+
+  test("no match is null", () => {
+    expect(pickBareServicePid(rows, /nothing-here/)).toBeNull();
+  });
+});
+
+describe("findBareServicePid (real ps)", () => {
+  test("finds a detached service's group leader, not its subshell", async () => {
+    const { spawn } = await import("node:child_process");
+    const { findBareServicePid } = await import("../session.js");
+    const marker = `operad-bare-pick-${process.pid}-${Date.now()}`;
+    // bash keeps its script cmdline in the forked subshell, like run_gui.sh.
+    const child = spawn("bash", ["-c", `( sleep 30 ) & sleep 30 # ${marker}`], {
+      detached: true,
+      stdio: "ignore",
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      expect(findBareServicePid(new RegExp(marker))).toBe(child.pid!);
+    } finally {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already gone */ }
+    }
   });
 });

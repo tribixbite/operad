@@ -19,6 +19,8 @@
  *  3. otherwise no pattern — a generic guess would adopt strangers.
  */
 
+import type { SessionStatus } from "./types.js";
+
 /** Escape a string for use as a literal inside a RegExp. */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -67,4 +69,87 @@ export function pidHeldByOther(pid: number, name: string, adopted: ReadonlyMap<s
     if (other !== name && held === pid) return true;
   }
   return false;
+}
+
+/** What a starting daemon should do with a bare service's persisted state. */
+export type BareBootDecision =
+  /** Its process is alive: track this PID; the "running" state is true. */
+  | { kind: "adopt"; pid: number }
+  /** State says active but nothing is running: reset to stopped so boot starts it. */
+  | { kind: "stale" }
+  /** Not active (stopped by the user, failed, not yet started): not boot's business. */
+  | { kind: "leave" };
+
+/**
+ * Reconcile a bare service's persisted status with reality at daemon start.
+ *
+ * A bare service has no tmux session to check, and a fresh daemon starts
+ * with no adopted PIDs, so "running" in state.json says nothing about
+ * whether its process survived the restart. Left alone, startSession
+ * returns early on "running" and the service stays down until the health
+ * check notices. A stopped service is never adopted here, even if a
+ * matching process exists: the user stopped it.
+ *
+ * @param status   the session's persisted status.
+ * @param livePid  the service's own process (see bareServicePattern), or null.
+ */
+export function bareServiceBootDecision(status: SessionStatus | undefined, livePid: number | null): BareBootDecision {
+  const active = status === "running" || status === "degraded" || status === "starting" || status === "stopping";
+  if (!active) return { kind: "leave" };
+  return livePid !== null ? { kind: "adopt", pid: livePid } : { kind: "stale" };
+}
+
+/** One process from `ps -eo pid,pgid,etime,args`. */
+export interface PsRow {
+  pid: number;
+  pgid: number;
+  /** Seconds since the process started; null when ps gave nothing readable. */
+  elapsedS: number | null;
+  args: string;
+}
+
+/**
+ * Seconds from a ps `etime` value: `mm:ss`, `hh:mm:ss` or `dd-hh:mm:ss`.
+ * (`etimes` would give seconds directly, but macOS ps has no such field.)
+ */
+export function parseElapsed(etime: string): number | null {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(etime.trim());
+  if (!m) return null;
+  const [, d, h, min, s] = m;
+  return Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(min) * 60 + Number(s);
+}
+
+/**
+ * The process that IS a bare service, among everything matching its pattern.
+ *
+ * A match is not enough: a shell script's subshells (`( … ) &` loops,
+ * `$(…)`) keep the script's cmdline, and on the author's device boot
+ * adopted x2d's short-lived watchdog subshell instead of the service. So:
+ *  1. process-group leaders first — operad spawns bare services detached,
+ *     so the service leads its own group, and its subshells never do;
+ *  2. then the longest-running, since a service outlives its helpers.
+ * A non-leader still wins when no leader matches (termux-x11's X server
+ * runs under the `sh -c` operad spawned).
+ *
+ * @param exclude  skips PIDs another session already owns.
+ */
+export function pickBareServicePid(
+  rows: readonly PsRow[],
+  pattern: RegExp,
+  exclude?: (pid: number) => boolean,
+): number | null {
+  let best: PsRow | null = null;
+  for (const r of rows) {
+    if (!pattern.test(r.args) || exclude?.(r.pid)) continue;
+    if (best === null || outranks(r, best)) best = r;
+  }
+  return best?.pid ?? null;
+}
+
+/** True when `a` is a better candidate than `b` (see pickBareServicePid). */
+function outranks(a: PsRow, b: PsRow): boolean {
+  const aLeader = a.pid === a.pgid;
+  const bLeader = b.pid === b.pgid;
+  if (aLeader !== bLeader) return aLeader;
+  return (a.elapsedS ?? -1) > (b.elapsedS ?? -1);
 }

@@ -7,10 +7,22 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import type { SessionConfig, SessionType } from "./types.js";
 import type { Logger } from "./log.js";
+import { parseElapsed, pickBareServicePid } from "./bare-service.js";
+import type { PsRow } from "./bare-service.js";
 import { detectPlatform } from "./platform/platform.js";
 import { getRuntime } from "./runtimes/index.js";
 import type { SessionRuntime } from "./runtimes/index.js";
@@ -214,24 +226,24 @@ export function discoverBareClaudeSessions(
  */
 export function findBareServicePid(pattern: RegExp, exclude?: (pid: number) => boolean): number | null {
   try {
-    const result = spawnSync("ps", ["-eo", "pid,args"], {
+    const result = spawnSync("ps", ["-eo", "pid,pgid,etime,args"], {
       encoding: "utf-8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (result.status !== 0 || !result.stdout) return null;
+    const rows: PsRow[] = [];
     for (const line of result.stdout.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const spaceIdx = trimmed.indexOf(" ");
-      if (spaceIdx < 0) continue;
-      const pid = parseInt(trimmed.slice(0, spaceIdx), 10);
-      const args = trimmed.slice(spaceIdx + 1);
-      if (isNaN(pid) || pid <= 1) continue;
-      // `exclude` skips processes another session already owns, so a second
-      // match is still found rather than the first one being stolen.
-      if (pattern.test(args) && !exclude?.(pid)) return pid;
+      // pid, pgid and etime are single tokens; args is the rest of the line.
+      const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+      if (!m) continue; // header and blank lines
+      const pid = parseInt(m[1], 10);
+      if (pid <= 1) continue;
+      rows.push({ pid, pgid: parseInt(m[2], 10), elapsedS: parseElapsed(m[3]), args: m[4] });
     }
+    // `exclude` skips processes another session already owns, so a second
+    // match is still found rather than the first one being stolen.
+    return pickBareServicePid(rows, pattern, exclude);
   } catch { /* ignore */ }
   return null;
 }
@@ -418,11 +430,22 @@ export function sendKeys(sessionName: string, text: string, pressEnter = true): 
   return true;
 }
 
+/** Size at which a bare service's log is rotated to `.1` on its next start. */
+export const BARE_LOG_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Log file for a bare service's stdout/stderr. The session name is reduced
+ * to a safe file-name alphabet so it can never point outside `logDir`.
+ */
+export function bareLogPath(logDir: string, name: string): string {
+  return join(logDir, `bare-${name.replace(/[^A-Za-z0-9._-]/g, "_")}.log`);
+}
+
 /**
  * Spawn a bare (non-tmux) detached process for sessions that crash inside tmux PTY.
  * Returns the child PID, or null on failure.
  */
-export function spawnBareProcess(config: SessionConfig, log: Logger): number | null {
+export function spawnBareProcess(config: SessionConfig, log: Logger, logDir?: string): number | null {
   const { name, command, env: sessionEnv } = config;
   if (!command) {
     log.error(`Bare session '${name}' has no command`, { session: name });
@@ -432,11 +455,12 @@ export function spawnBareProcess(config: SessionConfig, log: Logger): number | n
   // Merge session env with platform-clean env (handles LD_PRELOAD on Android)
   const cleanBase = detectPlatform().cleanEnv();
   const mergedEnv = { ...cleanBase, ...sessionEnv };
+  const logFd = logDir ? openBareLog(logDir, name, command, log) : null;
   try {
     const child = spawn("sh", ["-c", command], {
       cwd: config.path ?? process.env.HOME,
       env: mergedEnv,
-      stdio: "ignore",
+      stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
       detached: true,
     });
     child.unref();
@@ -449,6 +473,31 @@ export function spawnBareProcess(config: SessionConfig, log: Logger): number | n
     return null;
   } catch (err) {
     log.error(`Failed to spawn bare session '${name}': ${err}`, { session: name });
+    return null;
+  } finally {
+    // The child holds its own copy of the descriptor.
+    if (logFd !== null) closeSync(logFd);
+  }
+}
+
+/**
+ * Open a bare service's log for appending, rotating it to `.1` first when it
+ * has grown past BARE_LOG_MAX_BYTES, and write a header line for this start.
+ * Returns null (output discarded, as before) if the log cannot be opened —
+ * a log problem must never stop the service from starting.
+ */
+function openBareLog(logDir: string, name: string, command: string, log: Logger): number | null {
+  const path = bareLogPath(logDir, name);
+  try {
+    mkdirSync(logDir, { recursive: true });
+    if (existsSync(path) && statSync(path).size > BARE_LOG_MAX_BYTES) {
+      renameSync(path, `${path}.1`);
+    }
+    const fd = openSync(path, "a");
+    writeSync(fd, `=== ${new Date().toISOString()} start ${name}: ${command}\n`);
+    return fd;
+  } catch (err) {
+    log.warn(`Cannot open log ${path} for bare session '${name}': ${err}`, { session: name });
     return null;
   }
 }

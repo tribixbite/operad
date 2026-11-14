@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — bare services: silent failures, stale state, and restarts of healthy ones
+
+Found while bringing the author's `x2d` service (BambuStudio) back up:
+
+- **Output was discarded.** Bare services ran with no stdout/stderr, so x2d
+  exiting 16 s after every launch left nothing to read. The cause was one
+  line — `CANNOT LINK EXECUTABLE … libavcodec.so.61 not found` after an
+  ffmpeg upgrade. Output now goes to `<log_dir>/bare-<name>.log`.
+- **A daemon restart could leave a bare service down.** Boot's stale-state
+  recovery skipped bare services, but a fresh daemon tracks no processes, so
+  a persisted "running" was believed and the service was not started until
+  two failed health checks later. Boot now adopts the live process or resets
+  the service so it starts.
+- **A healthy service was restarted every health cycle.** The check matched a
+  marker taken from the launch command (`run_gui.sh`); the script execs
+  BambuStudio, so the PID's cmdline never matched. Bare services are now
+  checked with the same pattern that adopts them.
+- **The wrong process was adopted.** The first match in PID order won, which
+  can be a short-lived subshell carrying the script's cmdline. The service's
+  own process-group leader, then the longest-running match, is preferred.
+- **Misleading health messages.** A bare service with no tracked process
+  reported "tmux session not found", and a dead tmux server marked bare
+  services failed. Neither involves tmux.
+
 ### Fixed — opening a historical prompt showed the latest conversation
 
 Tapping a prompt in the library opened the project's most recent conversation
