@@ -1,135 +1,140 @@
 # Crash Resilience on Termux/Android
 
-How operad keeps tmux sessions running continuously on a device whose OS is
-actively trying to stop them.
+How operad keeps its tmux sessions, and the Claude Code instances running in
+them, alive on a device whose OS is actively trying to stop them, and where
+it cannot.
 
-There are **two independent failure domains**, and surviving one says nothing
-about surviving the other:
+There are **two independent failure domains**:
 
-| Domain | What kills you | What saves you |
-| ------ | -------------- | -------------- |
-| **App death** — Android reaps `com.termux` | `ActivityManager` `kill -9`s every PID in the app's cgroup | Being in a *different* app's cgroup ([The model](#the-model)) |
-| **Process death** — lmkd/OOM kills the daemon itself | Memory pressure; the daemon is a fat Node process | Something noticing and restarting it ([The supervision loop](#the-supervision-loop)) |
+| Domain | What dies | What can be done |
+| ------ | --------- | ---------------- |
+| **App death**: Android kills `com.termux` | Everything Termux started: the tmux server, **every Claude Code instance in it**, the daemon, the watchdog | Without root, nothing prevents it. Lower the kill rate, and recover afterwards ([App death](#app-death-the-cgroup-sweep)) |
+| **Process death**: lmkd or the OOM killer kills one process, usually the daemon | That process only. The tmux server and its sessions keep running | The watchdog restarts the daemon, which re-adopts the running sessions ([The supervision loop](#the-supervision-loop)) |
 
-The first is structural: get it right once at install time and it holds. The
-second is a live control loop, and a control loop can fail *silently* — which
-is the harder problem, and the one most of the second half of this page is
-about. It can also be killed outright by the same pressure that killed what it
-was watching, in which case nothing is left running to notice
-([When the watchdog goes too](#when-the-watchdog-goes-too)).
+Only the second is survivable. In the first the sessions are lost, not just
+the supervision. A recreated session resumes its conversation from the
+transcript on disk (`claude --resume <id>`), but whatever that Claude was doing
+at the moment of the kill, such as a running tool call, a build it had started
+or an unsent turn, is gone.
 
 > **Each section states what has actually been observed on real hardware.**
 > Every "this happened" here is measured, not hypothesised; the numbers come
-> from the author's Samsung device.
+> from the author's Samsung device (S25 Ultra, unrooted).
 
-## The model
+## App death: the cgroup sweep
 
-This section corrects the older "PPid:1 = independence" framing. The actual
-load-bearing property is **which APK's process spawns the daemon**, because
-that determines its Android app cgroup. PPid:1 detachment alone is not enough
-on Android 12+.
-
-Android places every process spawned by an app into a unified cgroup:
+Android places every process an app spawns into that app's cgroup:
 
 ```
 /sys/fs/cgroup/apps/uid_<UID>/pid_<APP_LAUNCH_PID>/cgroup.procs
 ```
 
-Two facts about this:
+Reparenting to init (PPid=1), `setsid` and `detached: true` do not move a
+process out of it, and an unrooted app cannot move one either: the cgroup
+files belong to `system`.
 
-1. **Two APKs that share a UID get separate cgroups**, keyed on each APK's own
-   launch PID. `com.termux` (PID X) and `com.termux.boot` (PID Y) live in
-   `pid_X` and `pid_Y` respectively, even though both run as `u0_a364`.
-2. **When `ActivityManager` reaps an app**, it iterates that app's
-   `cgroup.procs` file and `kill -9`s every PID listed. Reparenting to init
-   (PPid=1) does not move a process out of the cgroup.
-3. **But the cgroup outlives the app process that created it.** That sweep is
-   what an app *kill command* does — a force-stop, a package kill — not what a
-   routine cached-process or lmkd kill does. `com.termux.boot` exists only to
-   run its `BootReceiver` and goes empty immediately afterwards: measured here,
-   it exec'd the watchdog at 19:50:58 and was itself killed six seconds later
-   (`reason=13 (OTHER KILLS BY SYSTEM) subreason=3 (TOO MANY EMPTY PROCS)`).
-   The daemon it had started ran for another **7 d 17 h**. So the spawn-root
-   APK does not need to stay alive — which is the only reason booting from a
-   receiver works at all.
-
-Detached children with PPid=1 still appear in the launch cgroup of the app
-that spawned them. So if `com.termux` spawns the daemon, the daemon dies with
-`com.termux`. If `com.termux.boot` spawns it, the daemon survives `com.termux`
-death untouched, because nothing reaps `pid_<termux.boot launch PID>`.
-
-## What survives Termux death — and what doesn't
-
-| Daemon spawn-root              | Survives `com.termux` death? |
-| ------------------------------ | ---------------------------- |
-| `com.termux.boot` (BootReceiver via `Runtime.exec`) | **Yes**       |
-| `com.termux` shell (`operad stream` typed in a tab)  | No            |
-| `com.termux.tasker` Termux:Tasker plugin            | No (delegates back to `com.termux` RunCommandService) |
-| `com.termux.widget` Termux:Widget shortcut          | No (same delegation)          |
-| `am startservice → com.termux/.app.RunCommandService` | No (runs in `com.termux`)   |
-
-**Only Termux:Boot escapes**, because its `BootReceiver` calls
-`Runtime.getRuntime().exec()` from inside its own process — which means script
-children inherit `com.termux.boot`'s cgroup. Every other entry point ultimately
-runs scripts inside `com.termux`'s `RunCommandService`.
-
-## The bootstrap chain
+When lmkd kills `com.termux`, `ActivityManager` kills every PID in that
+cgroup. Measured 2026-11-15 in logcat:
 
 ```
-device boot  →  BOOT_COMPLETED broadcast  →  com.termux.boot/.BootReceiver
-                                                  │
-                                              Runtime.exec(~/.termux/boot/startup.sh)
-                                                  │   (in com.termux.boot's cgroup)
-                                                  ▼
-                                            watchdog.sh loop
-                                                  │
-                                              operad stream
-                                                  │
-                                              spawn(daemon, { detached: true }); child.unref()
-                                                  │   (PPid=1, but still in com.termux.boot's cgroup)
-                                                  ▼
-                                              daemon  →  tmux server  →  Claude sessions
+lmkd: Reclaim 'com.termux' (26899) ...
+ActivityManager: ... PhantomProcessRecord ... died      (every Termux child, within 80 ms)
+libprocessgroup: Removed cgroup .../uid_10364/pid_26899
 ```
 
-Once the daemon is running in `com.termux.boot`'s cgroup it stays there
-until that cgroup is torn down. `com.termux` can be killed and relaunched
-by Android any number of times; the daemon and tmux are unaffected. Reopening
-a Termux terminal tab does an `attach` to the existing tmux server.
+The daemon, the watchdog, crond, the tmux server and every Claude Code
+session went in the same 80 ms. The trees that died on 2026-10-02, 10-10,
+11-03, 11-11, 11-15 (twice) and 11-18 were each in the cgroup of the
+`com.termux` instance that was killed, on three firmware builds.
 
-## What breaks the chain
+### Every entry point lands in `com.termux`'s cgroup
 
-- **The boot symlink (`~/.termux/boot/startup.sh`) is missing or dead.**
-  `BootReceiver` runs but has nothing to exec, so no daemon ever lands in
-  the right cgroup. Manual `operad stream` from a Termux shell will then put the
-  daemon in `com.termux`'s cgroup, where it dies with the app on the next
-  Termux crash.
-- **The daemon process tree in `com.termux.boot`'s cgroup is fully terminated**
-  (e.g., a phone reboot, an overzealous memory sweep, or a `pkill -f watchdog`).
-  After that point only the next BOOT_COMPLETED broadcast can re-create the
-  process tree in the right cgroup; `operad stream` from a terminal cannot.
+| How the tree was started | Survives `com.termux` death? |
+| ------------------------ | ---------------------------- |
+| `operad stream` typed in a Termux tab | No |
+| Termux:Boot (`~/.termux/boot/startup.sh`) | **No.** `BootJobService` sends an execute intent to `com.termux/.app.TermuxService`, which runs the script |
+| Termux:Tasker, Termux:Widget | No (they delegate to `com.termux` the same way) |
+| `am startservice → com.termux/.app.RunCommandService` | No |
+| `termux-job-scheduler` | No (the job runs via TermuxService too) |
 
-  And that broadcast cannot be faked without root — it is a protected
-  broadcast, so `am broadcast -a android.intent.action.BOOT_COMPLETED` fails
-  with `SecurityException: Permission Denial … uid=2000`. A tree rebuilt from a
-  terminal therefore runs in `com.termux`'s cgroup, exposed to **both** failure
-  domains, until the next reboot. Worth knowing before deciding whether a
-  restart is "fixed".
+> **Correction.** From April to November 2026 this page said that
+> Termux:Boot's `BootReceiver` calls `Runtime.exec()` in its own process, so
+> a boot-started tree sits in `com.termux.boot`'s cgroup and "survives
+> `com.termux` death untouched". That is not how Termux:Boot 0.8.1 works, and
+> it was never measured: until mid-August the boot script could not even start
+> operad (exit 126/127, see [failure mode 1](#four-ways-the-watchdog-silently-stops-working)),
+> so no tree on this device had been boot-started when it was written.
+> operad's own log shows the whole tree, tmux included, recreated after an
+> abrupt death about 30 times between May and 2026-08-17. The
+> quiet periods that looked like immunity (2026-08-17 to 09-18, 10-11 to 10-26)
+> were not produced by any code change; nothing changed in operad's runtime
+> between 2026-09-05 and 2026-11-09.
 
-If you find sessions are no longer surviving Termux crashes, check:
+### The one observed exception
+
+A tree started under app pid 4631 survived five `com.termux` deaths between
+2026-10-11 and 10-26. That pid has no exit record, so its cgroup was never
+swept: it ended in some event Android did not process as an app death (a
+binder-count kill and a wake-lock drop are the candidates). The mechanism is
+unknown and it cannot be triggered on purpose, so it is not a defence.
+
+### What the boot hook is for
+
+`~/.termux/boot/startup.sh` (a symlink to `watchdog.sh`) brings the tree back
+**after a phone reboot**. Without it nothing does until someone runs
+`operad stream`. `operad doctor` checks that the link exists, resolves and is
+executable.
+
+```
+device boot → BOOT_COMPLETED → com.termux.boot/.BootJobService
+                                     │  execute intent
+                                     ▼
+                          com.termux/.app.TermuxService      (com.termux's cgroup)
+                                     │
+                               watchdog.sh loop
+                                     │
+                               operad stream → daemon → tmux server → Claude sessions
+```
+
+### What helps with app death
+
+- **Fewer kills of `com.termux`.** The rate is driven by memory pressure, and
+  most of it is ours: Gradle JVMs (~2 GB), x2d and each Claude Code instance
+  (~370 MB) all run inside the same cgroup. The
+  [defensive layers](#defensive-layers-still-useful-but-secondary) lower the
+  priority Android gives the kill; they do not prevent it.
+- **Faster recovery.** Once Termux is dead nothing inside it can notice.
+  A persisted `termux-job-scheduler` job re-runs the boot script every
+  15 minutes; when a watchdog is already live, the script exits at once:
+
+  ```sh
+  timeout -s KILL 30 termux-job-scheduler --job-id 4242 \
+    -s ~/.termux/boot/startup.sh --period-ms 900000 \
+    --persisted true --network none --battery-not-low false
+  ```
+
+  The client can hang under memory pressure after the job is registered,
+  hence the `timeout`. Whether the job starts Termux again after `com.termux`
+  has died has not been tested yet.
+- **A suspected trigger, not yet confirmed.** The Samsung camera was the focused app
+  at the 2026-11-15 11:05 kill and opened 1.6 s before the 2026-11-18 09:07
+  kill; Samsung's lmkd has a camera kill-boost mode
+  (`CameraMode … camerakillboostmode`). Other camera opens did not kill Termux.
+
+To see where the tree is:
 
 ```sh
-readlink -f ~/.termux/boot/startup.sh                         # must point at a real script
-cat /proc/$(pidof -s com.termux)/cgroup | rg apps             # note the pid_<X>
-cat /proc/$(pgrep -f 'tmx.js daemon')/cgroup | rg apps        # if pid_<X> matches above, the daemon will die with Termux
+cat /proc/$(pidof -s com.termux)/cgroup | rg apps                  # pid_<X>
+cat /proc/$(tmux display-message -p '#{pid}')/cgroup | rg apps     # same pid_<X>: dies with Termux
 ```
 
-A daemon in the same `pid_X` bucket as `com.termux` is a daemon that won't
-survive the next app death.
+A tmux server in a different `pid_<Y>` is in an orphaned cgroup, like the
+exception above.
 
 ## Defensive layers (still useful, but secondary)
 
-Even with the right spawn-root, operad applies a stack of ADB-driven
-protections to reduce the rate at which `com.termux` itself gets killed.
+operad applies a stack of ADB-driven protections to reduce the rate at which
+`com.termux` itself gets killed.
 These are applied by `applyPhantomFix()` in `src/android-engine.ts` during
 boot, via `fixAdb`:
 
@@ -159,8 +164,10 @@ comparing `/proc/sys/kernel/random/boot_id`, and skips rather than report
 another handset's protection state as ours.
 
 These reduce the *probability* of `com.termux` being killed under memory
-pressure. They do not prevent it. When the app does eventually die, the
-spawn-root cgroup is what determines whether the daemon goes with it.
+pressure. They do not prevent it, and when the app does die the tmux sessions
+and their Claude Code instances go with it ([App death](#app-death-the-cgroup-sweep)).
+Keeping Termux "open" in Samsung's battery settings did not prevent the
+November kills either.
 
 All six target `com.termux` itself. Nothing applies them to the daemon, the
 watchdog or the tmux server: those are not app processes, so
@@ -169,9 +176,9 @@ one at fork and keeps it for life.
 
 ## The supervision loop
 
-Correct spawn-root keeps the daemon out of `com.termux`'s blast radius. It
-does nothing about lmkd killing the daemon directly under memory pressure,
-which on Android is the *normal* way it dies. That is `watchdog.sh`'s job.
+This covers the survivable domain: lmkd killing the daemon on its own while
+`com.termux`, and so the tmux server, stays alive. That is `watchdog.sh`'s
+job.
 
 ```
 watchdog.sh  ── every 60 s, or at once on SIGWINCH ──▶  operad status
@@ -191,8 +198,10 @@ than recreating them, so an OOM kill of the daemon costs supervision, not work.
 
 **What starts the watchdog:**
 
-- `com.termux.boot` at device boot, via `~/.termux/boot/startup.sh` (a symlink
-  to `watchdog.sh`) — the only path that lands in the right cgroup.
+- Termux:Boot at device boot, via `~/.termux/boot/startup.sh` (a symlink to
+  `watchdog.sh`).
+- The `termux-job-scheduler` job, every 15 minutes, via the same script
+  ([What helps with app death](#what-helps-with-app-death)).
 - `operad stream`, which spawns one if none is running. The dependency used to
   run only one way — the watchdog started the daemon, but nothing started the
   watchdog — so a watchdog that died stayed dead. Guarded by `OPERAD_WATCHDOG=1`
@@ -354,22 +363,19 @@ exists to avoid.
 
 Three things about it are worth keeping:
 
-- **Correct cgroup placement did not help.** `com.termux.boot` has no exit
-  record for that day, so the spawn-root cgroup was intact. The tree was in it
-  — started by Termux:Boot a week earlier, log line *"direct exec unavailable
-  — no exec shim in this process"* — and died anyway. Domain 1's defence is
-  not a defence against domain 2.
+- **The tree was boot-started, and that did not help.** Its watchdog came from
+  Termux:Boot a week earlier (log line *"direct exec unavailable — no exec shim
+  in this process"*). Boot-started trees run in `com.termux`'s cgroup
+  ([App death](#app-death-the-cgroup-sweep)), so this was the sweep, not a
+  separate kill of each process.
 - **A low `oom_score_adj` was not protection either.** The daemon, watchdog and
   tmux server all read `0`, the *least* killable tier, inherited at fork and
-  never updated, while `com.termux` itself read `200`. Under a critical sweep
-  that margin ran out.
-- **Nothing attests which killer it was.** `exit-info` records app processes
-  only, so a dead daemon leaves no entry; the candidates are lmkd's last-resort
-  tier and the kernel OOM killer. The operational conclusion is the same
-  either way: the supervisor is exactly as killable as the thing it supervises,
-  and the only things that can replace a dead watchdog are the next
-  BOOT_COMPLETED and the next `operad stream` — which in this scenario means a
-  human, because the daemon that would otherwise spawn one is dead as well.
+  never updated, while `com.termux` itself read `200`. It made no difference:
+  the sweep kills by cgroup membership, not by score.
+- **The supervisor dies with what it supervises.** The watchdog, the daemon
+  and tmux share one cgroup, so the only things that can bring the tree back
+  are the next boot, the next `operad stream`, and the periodic
+  `termux-job-scheduler` job, which was added for exactly this case.
 
 The usable signal is the **rate**, not the event. `dumpsys activity exit-info`
 persists across reboots — back to February 2025 on this device — so the trend
@@ -405,6 +411,11 @@ RAM and a device whose swap was already 4 GB deep.
   functional", which was wrong. It also requires the watchdog to still exist,
   which under memory pressure is not given
   ([When the watchdog goes too](#when-the-watchdog-goes-too)).
+- **Periodic re-run of the boot script.** The persisted `termux-job-scheduler`
+  job 4242 runs `~/.termux/boot/startup.sh` every 15 minutes. It is the only
+  recovery path that does not depend on a process inside Termux still being
+  alive, but it only brings the tree back; it does not save the sessions that
+  died ([What helps with app death](#what-helps-with-app-death)).
 - **Deliberate restart.** `operad upgrade` rebuilds, stops the daemon, and lets
   the watchdog restart it on the new bundle — running tmux sessions stay up
   throughout, because the tmux server is not what restarted. It signals the
@@ -435,9 +446,10 @@ WDLOG=~/.local/share/tmx/logs/watchdog.log   # Android; elsewhere .../operad/log
 # 2. Has the device been suspending out from under supervision?
 rg "SUSPENDED|Wake lock not held" "$WDLOG" | tail
 
-# 3. Is the daemon in a cgroup that survives Termux death?
+# 3. Which app cgroup holds the tmux server? Matching com.termux's pid_<X>
+#    (the normal case) means the sessions die with the app.
 cat /proc/$(pidof -s com.termux)/cgroup | rg apps
-cat /proc/$(pgrep -f 'tmx.js daemon')/cgroup | rg apps   # must NOT match above
+cat /proc/$(tmux display-message -p '#{pid}')/cgroup | rg apps
 
 # 4. Exactly one watchdog, and can it invoke the binary?
 #    Confirm each candidate by its argv, not by the -f pattern: `pgrep -f
@@ -454,9 +466,12 @@ rg -i SigBlk /proc/$(cat "${TMPDIR:-$PREFIX/tmp}/operad-watchdog.pid")/status
 
 # 6. Has the whole tree been killed and rebuilt at some point? Every
 #    "Supervising via" line is a NEW watchdog. One carrying "no exec shim in
-#    this process" came from Termux:Boot (right cgroup); one without it came
-#    from a terminal (wrong cgroup — see "When the watchdog goes too").
+#    this process" came from Termux:Boot or the job scheduler; one without it
+#    came from a terminal. Either way it is in com.termux's cgroup.
 rg -n 'Supervising via' "$WDLOG" | tail -5
+
+# 7. Is the recovery job registered?
+timeout -s KILL 30 termux-job-scheduler --pending
 ```
 
 Two Termux notes on the above: `dumpsys` needs its absolute path, because
@@ -465,9 +480,9 @@ shell function that injects flags and survives into non-interactive bash, which
 is why every snippet on this page uses `rg` or `awk`.
 
 Silence from (2) means the lock held. Repeated `SUSPENDED` lines mean something
-is taking the lock away that re-acquiring does not stop — at which point the
-next step is `termux-job-scheduler`, which uses Android's own AlarmManager and
-is suspend-proof by design, rather than a userspace `sleep` loop.
+is taking the lock away that re-acquiring does not stop. The job from (7) runs
+on Android's JobScheduler, so it still fires when the userspace `sleep` loop is
+frozen.
 
 `operad doctor` checks the ADB-side protections listed under
 [Defensive layers](#defensive-layers-still-useful-but-secondary).

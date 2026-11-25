@@ -549,15 +549,16 @@ import Layout from "../layouts/Layout.astro";
         </h2>
 
         <p class="mb-6 text-sm text-terminal-dim">
-          Designed so that <strong class="text-terminal-bright">every running session survives</strong> host app crashes.
-          The daemon, watchdog, and tmux server all run as independent processes (PPid: 1).
+          When the daemon is killed, <strong class="text-terminal-bright">running sessions keep going</strong> in tmux and are re-adopted.
+          When Android kills the Termux app itself, every process in its cgroup goes with it, tmux included; operad
+          lowers how often that happens and rebuilds the sessions afterwards.
         </p>
 
         <div class="grid gap-3 sm:grid-cols-2">
           {[
-            { layer: "Wake lock", desc: "Acquired once, never released. Prevents OS from killing background processes." },
+            { layer: "Wake lock", desc: "Acquired once, never released, re-taken if the OS drops it. Keeps the CPU from suspending supervision." },
             { layer: "Phantom fix", desc: "Android: disables phantom process killer, Doze standby, and app idle." },
-            { layer: "Process detach", desc: "Daemon, watchdog, and tmux all run as PPid: 1 — independent of host app." },
+            { layer: "Process detach", desc: "tmux runs apart from the daemon, so a daemon kill leaves sessions running. It does not escape the app's cgroup." },
             { layer: "Socket self-heal", desc: "IPC socket recreated via HTTP API when tmpfs is cleaned. Recovery in <1s." },
             { layer: "Watchdog loop", desc: "Bash loop restarts daemon after OOM kill. Sessions persist in tmux for re-adoption." },
             { layer: "Trace log", desc: "appendFileSync log survives crashes. Check last line for daemon state before SIGKILL." },

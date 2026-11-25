@@ -194,14 +194,12 @@ Windows requires tmux via MSYS2 (`pacman -S tmux`) or WSL. See [docs/windows.md]
 
 ## Crash Resilience
 
-On Android the tmux server is its own process and outlives the daemon, so when Android kills the Termux app only the terminal UI dies — sessions keep running, and a restarted daemon re-adopts them rather than recreating them.
+On Android there are two separate ways to die, and only one is survivable:
 
-Two separate things have to hold, and surviving one says nothing about the other:
+- **The daemon is killed on its own** (lmkd, OOM). The tmux server is its own process and outlives it, so the Claude Code sessions keep running and a restarted daemon re-adopts them. This depends on `watchdog.sh` still polling. That is a live control loop, and it can stop working without stopping *running*, most importantly when the device suspends, since `sleep` does not advance across suspend.
+- **Android kills the Termux app.** `ActivityManager` kills every process in the app's cgroup, and every Termux process is in it, including trees started by Termux:Boot (it delegates to Termux's own service). Detaching to PPid 1 does not move a process out, and without root nothing can. So the tmux server and every Claude Code instance in it die with the app. The ADB protections lower how often that happens; the boot hook and a periodic `termux-job-scheduler` job (registered by hand, see the doc) bring the tree back afterwards. Recreated sessions resume their conversations with `claude --resume`, but work in progress at the moment of the kill is lost.
 
-- **Surviving app death** depends on *which APK spawned the daemon*, because that fixes its Android cgroup — `ActivityManager` reaps every PID in the app's cgroup, and detaching to PPid 1 does not move a process out of it. Only Termux:Boot escapes.
-- **Surviving an OOM kill of the daemon** depends on `watchdog.sh` still polling. That is a live control loop, and it can stop working without stopping *running* — most importantly when the device suspends, since `sleep` does not advance across suspend.
-
-Defense layers: correct spawn-root, verified wake lock with re-acquire, phantom process killer fix, Doze whitelist, IPC socket self-healing, watchdog loop with suspend self-reporting, crash-safe trace log.
+Defense layers: verified wake lock with re-acquire, phantom process killer fix, Doze whitelist, IPC socket self-healing, watchdog loop with suspend self-reporting, crash-safe trace log.
 
 **[docs/persistence.md](docs/persistence.md)** covers all of this in detail, including the failure modes each layer was added for and how to verify the layers are actually holding.
 
