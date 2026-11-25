@@ -923,7 +923,7 @@ function checkEdgeCanary(): CheckResult {
  * kill of `com.termux` takes the tmux server and every Claude Code instance in
  * it (measured 2026-11-15). Nothing an unrooted app can do moves a process out
  * of that cgroup; a tree only outlives the app when a framework soft restart
- * orphans the cgroup, which cannot be triggered without root. See
+ * orphans the cgroup (`adb shell am hang --allow-restart` causes one). See
  * docs/persistence.md.
  *
  * Reports warn rather than fail for a missing hook, since users may

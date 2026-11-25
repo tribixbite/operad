@@ -8,7 +8,7 @@ There are **two independent failure domains**:
 
 | Domain | What dies | What can be done |
 | ------ | --------- | ---------------- |
-| **App death**: Android kills `com.termux` | Everything in the app's cgroup: the tmux server, **every Claude Code instance in it**, the daemon, the watchdog | Only an orphaned cgroup protects the tree ([How the sessions used to survive](#how-the-sessions-used-to-survive)), and there is no unrooted way to get one on demand. Otherwise: lower the kill rate and recover afterwards |
+| **App death**: Android kills `com.termux` | Everything in the app's cgroup: the tmux server, **every Claude Code instance in it**, the daemon, the watchdog | Only an orphaned cgroup protects the tree ([How the sessions used to survive](#how-the-sessions-used-to-survive)), which `am hang --allow-restart` over adb produces (it restarts every app on the device). Otherwise: lower the kill rate and recover afterwards |
 | **Process death**: lmkd or the OOM killer kills one process, usually the daemon | That process only. The tmux server and its sessions keep running | The watchdog restarts the daemon, which re-adopts the running sessions ([The supervision loop](#the-supervision-loop)) |
 
 The second is always survivable. The first is survivable only in the case
@@ -114,14 +114,33 @@ but the audit records that the device still soft-reset from the picker.
 There has been no soft restart since the Android 17 update; the device now
 has 10 keyboards installed.
 
-**It cannot be produced on purpose without root.** `am restart` from adb fails
-with `SecurityException: Requires permission android.permission.SHUTDOWN`
-(tried 2026-11-25), and `stop; start` and `setprop ctl.restart zygote` need
-root. The keyboard-picker crash was the only candidate, and it no longer
-reproduces: on 2026-11-25, with the uninstalled keyboards reinstalled (14 in
-the picker), opening the picker did not restart the framework. Android 17 most
-likely fixed the system_server crash. Treat an orphaned tree as luck, not a
-defence.
+**It can be produced on purpose over adb, without root:**
+
+```sh
+adb -s 127.0.0.1:5555 shell am hang --allow-restart
+```
+
+This hangs the ActivityManager until system_server's watchdog kills it, and
+zygote then restarts the framework with no kernel reboot. It was run on
+2026-11-25 at 10:32. About 90 s later system_server had gone from pid 2914 to
+24227, and the boot ID had not changed. com.termux (pid 4663) died and left no
+exit record. Everything in its cgroup kept running: the tmux server, all 8
+Claude sessions, and a 1 s tick logger with no gap longer than its interval.
+The cgroup is still `/apps/uid_10364/pid_4663`, now an orphan. While it runs,
+the phone freezes for about a minute, and then every app on the device
+restarts.
+
+These do not work:
+
+- `am restart` fails with `SecurityException: Requires permission
+  android.permission.SHUTDOWN`.
+- `am crash <system_server pid>` is silently ignored.
+- `stop; start` and `setprop ctl.restart zygote` need root.
+- The keyboard-picker crash no longer reproduces on Android 17 (14 keyboards
+  reinstalled, 2026-11-25).
+
+An orphaned tree still dies with a full reboot. It probably also dies with a
+force-stop of com.termux, which kills by uid rather than by cgroup (untested).
 
 Before August the logs cannot separate app kills from battery deaths, so how
 often trees died then is not known.
