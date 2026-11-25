@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { existsSync, accessSync, constants, readFileSync, readdirSync, realpathSync } from "fs";
+import { existsSync, accessSync, constants, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import * as net from "net";
@@ -714,9 +714,9 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
     // Patched Edge Canary — used for opening the dashboard from the status notification
     results.push(checkEdgeCanary());
 
-    // Termux:Boot symlink — only this path produces a daemon in com.termux.boot's
-    // cgroup (the property that lets sessions survive Termux app death). See
-    // docs/persistence.md.
+    // Termux:Boot symlink — restarts the tree after a reboot. It does not keep
+    // tmux or its Claude sessions alive through Termux app death: boot scripts
+    // run in com.termux's cgroup. See docs/persistence.md.
     results.push(checkBootHook());
 
     // Process protections — read live state vs what applyPhantomFix tries to set.
@@ -912,38 +912,61 @@ function checkEdgeCanary(): CheckResult {
 }
 
 /**
- * Termux:Boot hook — `~/.termux/boot/startup.sh` is the only path that places
- * the daemon in com.termux.boot's cgroup (separate from com.termux's). Without
- * a working hook, sessions can't survive Termux app death; manual `tmx stream`
- * spawns the daemon as a child of com.termux. See docs/persistence.md.
+ * Termux:Boot hook — `~/.termux/boot/startup.sh` starts the watchdog (and so
+ * the daemon, the tmux server and its Claude Code sessions) after a phone
+ * reboot. Without it nothing brings them back until someone runs
+ * `operad stream`.
  *
- * Reports info-level state — does not fail the doctor run, since users may
- * intentionally avoid the boot hook (per project history, the user does).
+ * It is NOT protection against Termux app death. Termux:Boot 0.8.1 hands boot
+ * scripts to `com.termux/.app.TermuxService`, so a boot-started tree lives in
+ * `com.termux`'s cgroup exactly like one started from a terminal, and an lmkd
+ * kill of `com.termux` takes the tmux server and every Claude Code instance in
+ * it (measured 2026-11-15). Nothing an unrooted app can do moves a process out
+ * of that cgroup. See docs/persistence.md.
+ *
+ * Reports warn rather than fail for a missing hook, since users may
+ * intentionally avoid the boot hook.
+ *
+ * @param hookPath Path of the hook; defaults to `~/.termux/boot/startup.sh`.
+ *   Tests pass a temp path (never mutate `$HOME`: bun caches `os.homedir()`).
  */
-function checkBootHook(): CheckResult {
-  const hookPath = join(homedir(), ".termux", "boot", "startup.sh");
-  if (!existsSync(hookPath)) {
+export function checkBootHook(
+  hookPath: string = join(homedir(), ".termux", "boot", "startup.sh"),
+): CheckResult {
+  // lstat, not existsSync: existsSync follows the link, so a dangling
+  // startup.sh used to be reported as "not present" and the broken-symlink
+  // branch below was unreachable.
+  let isPresent = true;
+  try {
+    lstatSync(hookPath);
+  } catch {
+    isPresent = false;
+  }
+  if (!isPresent) {
     return {
       name: "termux-boot-hook",
       status: "warn",
-      message: "~/.termux/boot/startup.sh not present — sessions will not survive Termux app death",
+      message:
+        "~/.termux/boot/startup.sh not present — after a reboot nothing restarts " +
+        "the daemon, tmux or its Claude sessions until `operad stream` is run",
       fix:
         "Install Termux:Boot APK from F-Droid, then create the hook:\n" +
         "  ln -sf ~/git/operad/watchdog.sh ~/.termux/boot/startup.sh\n" +
-        "  (effective on next phone reboot — the daemon must be spawned by\n" +
-        "   com.termux.boot to land in its own cgroup; see docs/persistence.md)",
+        "  (runs at the next phone reboot; it restarts the tree but does not\n" +
+        "   protect it from Termux app death — see docs/persistence.md)",
+    };
+  }
+  if (!existsSync(hookPath)) {
+    // Present but unresolvable: a dangling symlink (realpathSync would throw).
+    return {
+      name: "termux-boot-hook",
+      status: "fail",
+      message: `~/.termux/boot/startup.sh is a broken symlink (target does not exist: ${readlinkSync(hookPath)})`,
+      fix: "ln -sfn ~/git/operad/watchdog.sh ~/.termux/boot/startup.sh",
     };
   }
   try {
     const resolved = realpathSync(hookPath);
-    if (!existsSync(resolved)) {
-      return {
-        name: "termux-boot-hook",
-        status: "fail",
-        message: `~/.termux/boot/startup.sh is a broken symlink (target does not exist: ${resolved})`,
-        fix: "ln -sfn ~/git/operad/watchdog.sh ~/.termux/boot/startup.sh",
-      };
-    }
     try {
       accessSync(resolved, constants.X_OK);
     } catch {
@@ -957,7 +980,8 @@ function checkBootHook(): CheckResult {
     return {
       name: "termux-boot-hook",
       status: "ok",
-      message: `${hookPath} → ${resolved}`,
+      message:
+        `${hookPath} → ${resolved} (starts the tree at boot; it still dies with com.termux)`,
     };
   } catch (err) {
     return {

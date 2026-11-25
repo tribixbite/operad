@@ -8,10 +8,11 @@ import {
   classifyConfigContent,
   detectWsl,
   decideAdbProbeTarget,
+  checkBootHook,
   type CheckResult,
   type CheckStatus,
 } from "../doctor.js";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -1063,5 +1064,64 @@ describe("decideAdbProbeTarget — ADB probe targeting", () => {
       expect(r.message).toContain("could not confirm");
       expect(r.message).toContain("192.168.0.173:5555");
     }
+  });
+});
+
+describe("checkBootHook — what the Termux:Boot hook does and does not do", () => {
+  // Termux:Boot 0.8.1 hands boot scripts to com.termux's TermuxService, so a
+  // boot-started tree lives in com.termux's cgroup and dies with it (measured
+  // 2026-11-15). The check must not promise that tmux sessions or the Claude
+  // Code instances in them survive Termux app death.
+  let dir: string;
+  beforeEach(() => {
+    dir = makeTempDir();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Every user-visible string of a result, for claim checks. */
+  const text = (r: CheckResult): string => `${r.message}\n${r.fix ?? ""}`;
+
+  test("missing hook → warn that nothing restarts the tree after a reboot", () => {
+    const r = checkBootHook(join(dir, "startup.sh"));
+    expect(r.name).toBe("termux-boot-hook");
+    expect(r.status).toBe("warn");
+    expect(r.message).toContain("reboot");
+    expect(text(r)).not.toMatch(/surviv/i);
+    expect(text(r)).not.toContain("own cgroup");
+    expect(r.fix).toContain("ln -sf");
+  });
+
+  test("broken symlink → fail", () => {
+    const hook = join(dir, "startup.sh");
+    symlinkSync(join(dir, "gone.sh"), hook);
+    const r = checkBootHook(hook);
+    expect(r.status).toBe("fail");
+    expect(r.message).toContain("broken symlink");
+  });
+
+  test("non-executable target → warn with a chmod fix", () => {
+    const target = join(dir, "watchdog.sh");
+    writeFileSync(target, "#!/bin/sh\n");
+    chmodSync(target, 0o644);
+    const hook = join(dir, "startup.sh");
+    symlinkSync(target, hook);
+    const r = checkBootHook(hook);
+    expect(r.status).toBe("warn");
+    expect(r.fix).toContain("chmod +x");
+  });
+
+  test("working hook → ok, and says it does not protect against app death", () => {
+    const target = join(dir, "watchdog.sh");
+    writeFileSync(target, "#!/bin/sh\n");
+    chmodSync(target, 0o755);
+    const hook = join(dir, "startup.sh");
+    symlinkSync(target, hook);
+    const r = checkBootHook(hook);
+    expect(r.status).toBe("ok");
+    expect(r.message).toContain(target);
+    expect(r.message).toContain("com.termux");
+    expect(text(r)).not.toMatch(/surviv/i);
   });
 });
