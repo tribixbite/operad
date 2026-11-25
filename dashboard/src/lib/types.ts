@@ -177,7 +177,7 @@ export interface PluginInfo {
   installs?: number;
 }
 
-/** Skill file (.md) from ~/.claude/skills/ or project .claude/skills/ */
+/** A skill from any agent's skill root (Claude Code, Codex, agy) */
 /**
  * File metadata shared by every customization entry the dashboard renders.
  * Backend captures these via fs.statSync when scanning each ~/.claude/<kind>/
@@ -194,8 +194,12 @@ export interface FileMeta {
 export interface SkillInfo extends FileMeta {
   name: string;
   path: string;
-  scope: "user" | "project";
+  /** "builtin" = shipped with the agent (Codex .system, agy builtin); read-only. */
+  scope: "user" | "project" | "builtin";
+  /** Root directory the skill was found in. */
   source?: string;
+  /** Agents that load it — a skill symlinked into several roots lists each. */
+  agents?: Array<"Claude Code" | "Codex" | "agy">;
 }
 
 /** Plan file (.md) from ~/.claude/plans/ or project .claude/plans/ */

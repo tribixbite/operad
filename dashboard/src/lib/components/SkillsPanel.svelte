@@ -1,13 +1,16 @@
 <script lang="ts">
   /**
-   * SkillsPanel.svelte — Three-tab view for skill entries.
+   * SkillsPanel.svelte — Three-tab view for skill entries of every agent.
    *
    * Tabs:
-   *  1. "User"            — skills from ~/.claude/skills/
-   *  2. "Current Project" — skills from <selectedProject>/.claude/skills/
+   *  1. "User"            — user-level and builtin skills: ~/.claude/skills,
+   *                         ~/.codex/skills (+ .system), ~/.agents/skills,
+   *                         ~/.gemini/config/skills, agy's builtin skills
+   *  2. "Current Project" — <project>/.claude/skills and <project>/.agents/skills
    *  3. "All Projects"    — aggregated skills from every known project
    *
-   * Each tab has a "Download JSON" button that triggers a browser file download.
+   * An agent filter (Claude Code / Codex / agy) applies to every tab. Each tab
+   * has a "Download JSON" button that downloads what the tab shows.
    */
 
   import { AllCustomizationLoader } from "$lib/all-customization.svelte";
@@ -35,23 +38,44 @@
   type Tab = "user" | "project" | "all";
   let activeTab = $state<Tab>("user");
 
+  type Agent = NonNullable<SkillInfo["agents"]>[number];
+  const AGENTS: Agent[] = ["Claude Code", "Codex", "agy"];
+  /** null = every agent. */
+  let agentFilter = $state<Agent | null>(null);
+
   /** Lazily fetched on first visit to the "All Projects" tab. */
   const allProjects = new AllCustomizationLoader();
 
+  type Row = SkillInfo & { projectPath?: string; projectName?: string };
+
   // -- Derived ----------------------------------------------------------------
 
-  const userSkills = $derived(skills.filter(s => s.scope === "user"));
-  const projectSkills = $derived(skills.filter(s => s.scope === "project"));
+  /** Older daemons send no `agents`; everything they list is Claude Code's. */
+  function agentsOf(s: SkillInfo): Agent[] {
+    return s.agents && s.agents.length > 0 ? s.agents : ["Claude Code"];
+  }
 
-  const allSkills = $derived<Array<SkillInfo & { projectPath?: string; projectName?: string }>>(
+  function byAgent<T extends SkillInfo>(list: T[]): T[] {
+    return agentFilter ? list.filter(s => agentsOf(s).includes(agentFilter!)) : list;
+  }
+
+  const userSkills = $derived(byAgent(skills.filter(s => s.scope === "user" || s.scope === "builtin")));
+  const projectSkills = $derived(byAgent(skills.filter(s => s.scope === "project")));
+
+  const allSkills = $derived<Row[]>(
     allProjects.data
-      ? [
-          ...allProjects.data.user.skills.map(s => ({ ...s, projectPath: undefined, projectName: "~/.claude" })),
+      ? byAgent([
+          ...allProjects.data.user.skills.map(s => ({ ...s, projectPath: undefined, projectName: "user" })),
           ...allProjects.data.projects.flatMap(p =>
             p.skills.map(s => ({ ...s, projectPath: p.path, projectName: p.name })),
           ),
-        ]
+        ])
       : [],
+  );
+
+  /** Per-agent totals across the user + project lists, for the filter chips. */
+  const agentCounts = $derived(
+    Object.fromEntries(AGENTS.map(a => [a, skills.filter(s => agentsOf(s).includes(a)).length])) as Record<Agent, number>,
   );
 
   // -- Functions --------------------------------------------------------------
@@ -87,7 +111,70 @@
   function downloadAllSkills() {
     downloadJson(`operad-skills-all-${today()}.json`, allSkills);
   }
+
+  /** Short CSS-safe key for an agent badge. */
+  function agentKey(a: Agent): string {
+    return a === "Claude Code" ? "claude" : a.toLowerCase();
+  }
 </script>
+
+{#snippet skillTable(rows: Row[], showProject: boolean)}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          {#if showProject}<th>Project</th>{/if}
+          <th>Name</th>
+          <th>Agents</th>
+          <th class="meta-col">Modified</th>
+          <th class="meta-col">Size</th>
+          <th class="path-col">Path</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each rows as skill (skill.path)}
+          <tr>
+            {#if showProject}
+              <td class="proj-cell muted small" title={skill.projectPath}>{skill.projectName ?? "user"}</td>
+            {/if}
+            <td>
+              {#if onExpand}
+                <button class="skill-name-btn" onclick={() => onExpand(skill.path)}>{skill.name}</button>
+              {:else}
+                <span class="skill-name">{skill.name}</span>
+              {/if}
+              {#if skill.scope === "builtin"}
+                <span class="builtin-tag" title="Shipped with the agent and replaced on update; read-only">builtin</span>
+              {/if}
+            </td>
+            <td class="agents-cell" title={skill.source}>
+              {#each agentsOf(skill) as a}
+                <span class="agent-badge agent-{agentKey(a)}">{a}</span>
+              {/each}
+            </td>
+            <td class="muted small meta-col">{formatRelativeTime(skill.modified)}</td>
+            <td class="muted small meta-col mono">{formatBytes(skill.size)}</td>
+            <td class="path-col">
+              <button class="path-icon-btn" title={skill.path} onclick={() => copyToClipboard(skill.path)} aria-label="Copy path to clipboard">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
+              </button>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
+{/snippet}
+
+<!-- Agent filter -->
+<div class="agent-filter" role="group" aria-label="Filter skills by agent">
+  <button class="chip" class:active={agentFilter === null} onclick={() => (agentFilter = null)}>All</button>
+  {#each AGENTS as a}
+    <button class="chip agent-{agentKey(a)}" class:active={agentFilter === a} onclick={() => (agentFilter = agentFilter === a ? null : a)}>
+      {a} <span class="tab-count">{agentCounts[a]}</span>
+    </button>
+  {/each}
+</div>
 
 <!-- Tab bar -->
 <div class="skills-tabs">
@@ -132,40 +219,9 @@
       </button>
     </div>
     {#if userSkills.length === 0}
-      <p class="muted">No user-level skills in ~/.claude/skills/</p>
+      <p class="muted">No user-level skills{agentFilter ? ` for ${agentFilter}` : ""}.</p>
     {:else}
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th class="meta-col">Modified</th>
-              <th class="meta-col">Size</th>
-              <th class="path-col">Path</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each userSkills as skill}
-              <tr>
-                <td>
-                  {#if onExpand}
-                    <button class="skill-name-btn" onclick={() => onExpand(skill.path)}>{skill.name}</button>
-                  {:else}
-                    <span class="skill-name">{skill.name}</span>
-                  {/if}
-                </td>
-                <td class="muted small meta-col">{formatRelativeTime(skill.modified)}</td>
-                <td class="muted small meta-col mono">{formatBytes(skill.size)}</td>
-                <td class="path-col">
-                  <button class="path-icon-btn" title={skill.path} onclick={() => copyToClipboard(skill.path)} aria-label="Copy path to clipboard">
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
-                  </button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      {@render skillTable(userSkills, false)}
     {/if}
 
   <!-- Project tab -->
@@ -179,40 +235,9 @@
     {#if !selectedProject}
       <p class="muted">Select a project above to see its skills.</p>
     {:else if projectSkills.length === 0}
-      <p class="muted">No skills in {shortenPath(selectedProject)}/.claude/skills/</p>
+      <p class="muted">No skills in {shortenPath(selectedProject)}/.claude/skills or .agents/skills</p>
     {:else}
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th class="meta-col">Modified</th>
-              <th class="meta-col">Size</th>
-              <th class="path-col">Path</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each projectSkills as skill}
-              <tr>
-                <td>
-                  {#if onExpand}
-                    <button class="skill-name-btn" onclick={() => onExpand(skill.path)}>{skill.name}</button>
-                  {:else}
-                    <span class="skill-name">{skill.name}</span>
-                  {/if}
-                </td>
-                <td class="muted small meta-col">{formatRelativeTime(skill.modified)}</td>
-                <td class="muted small meta-col mono">{formatBytes(skill.size)}</td>
-                <td class="path-col">
-                  <button class="path-icon-btn" title={skill.path} onclick={() => copyToClipboard(skill.path)} aria-label="Copy path to clipboard">
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
-                  </button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      {@render skillTable(projectSkills, false)}
     {/if}
 
   <!-- All Projects tab -->
@@ -229,40 +254,7 @@
     {:else if allSkills.length === 0}
       <p class="muted">No skills found across any known projects.</p>
     {:else}
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Project</th>
-              <th>Name</th>
-              <th class="meta-col">Modified</th>
-              <th class="meta-col">Size</th>
-              <th class="path-col">Path</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each allSkills as skill}
-              <tr>
-                <td class="proj-cell muted small" title={skill.projectPath}>{skill.projectName ?? "user"}</td>
-                <td>
-                  {#if onExpand}
-                    <button class="skill-name-btn" onclick={() => onExpand(skill.path)}>{skill.name}</button>
-                  {:else}
-                    <span class="skill-name">{skill.name}</span>
-                  {/if}
-                </td>
-                <td class="muted small meta-col">{formatRelativeTime(skill.modified)}</td>
-                <td class="muted small meta-col mono">{formatBytes(skill.size)}</td>
-                <td class="path-col">
-                  <button class="path-icon-btn" title={skill.path} onclick={() => copyToClipboard(skill.path)} aria-label="Copy path to clipboard">
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="9" height="10" rx="1.2"/><path d="M3 11V3a1 1 0 0 1 1-1h7"/></svg>
-                  </button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      {@render skillTable(allSkills, true)}
     {/if}
   {/if}
 </div>
@@ -416,6 +408,8 @@
     text-decoration: underline;
     text-underline-offset: 2px;
     font-family: inherit;
+    /* Buttons centre wrapped text by default; long names read better left-aligned. */
+    text-align: left;
   }
 
   .skill-name-btn:hover {
@@ -457,6 +451,55 @@
   }
   .path-icon-btn:active {
     color: var(--accent-green);
+  }
+
+  .agent-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-bottom: 0.625rem;
+  }
+  .chip {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.75rem;
+    /* 32px tall: comfortable touch target */
+    min-height: 2rem;
+    padding: 0.25rem 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+  }
+  .chip.active {
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+  }
+  .agents-cell {
+    white-space: nowrap;
+  }
+  .agent-badge {
+    border-radius: 4px;
+    font-size: 0.6875rem;
+    padding: 0.0625rem 0.375rem;
+    margin-right: 0.25rem;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+  .agent-badge.agent-claude { color: var(--accent-yellow); border-color: currentColor; }
+  .agent-badge.agent-codex  { color: var(--accent-green); border-color: currentColor; }
+  .agent-badge.agent-agy    { color: var(--accent-blue); border-color: currentColor; }
+  .builtin-tag {
+    margin-left: 0.375rem;
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    padding: 0 0.25rem;
   }
 
   .error-msg {

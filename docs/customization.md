@@ -1,6 +1,6 @@
 # Customization Sources
 
-operad surfaces every per-user and per-project customization file from your Claude Code / Codex / OpenCode installs. The dashboard at `/settings` shows each type with User / Current Project / All Projects tabs and a JSON download per tab. This page documents what operad scans, where each type lives, and which tools consume it.
+operad surfaces every per-user and per-project customization file from your Claude Code / Codex / agy (Antigravity CLI) / OpenCode installs. The dashboard at `/settings` shows each type with User / Current Project / All Projects tabs and a JSON download per tab. This page documents what operad scans, where each type lives, and which tools consume it.
 
 ## Cross-tool standard: `AGENTS.md`
 
@@ -19,9 +19,26 @@ If you also maintain a Claude-specific `CLAUDE.md`, keep both — operad shows t
 All locations are scanned for both the current project (when a project is selected in the dashboard) and every known project from `~/.claude/history.jsonl`.
 
 ### Skills
-- `~/.claude/skills/*.md` (user)
-- `<project>/.claude/skills/*.md` (project)
-- Consumed by: Claude Code via the `Skill` tool
+
+Each skill is listed with the agents that load it. A skill reachable from several
+roots (for example `~/.claude/skills/polish` symlinked to `~/.agents/skills/polish`)
+appears once with every agent. The dashboard filters by agent.
+
+| Root | Scope | Loaded by | Form |
+|------|-------|-----------|------|
+| `~/.claude/skills/` | user | Claude Code | `<name>.md` or `<name>/SKILL.md` |
+| `~/.codex/skills/` | user | Codex | `<name>/SKILL.md` |
+| `~/.agents/skills/` | user | Codex | `<name>/SKILL.md` |
+| `~/.gemini/config/skills/` | user | agy | `<name>/SKILL.md` |
+| `~/.codex/skills/.system/` | builtin | Codex | `<name>/SKILL.md` |
+| `~/.gemini/antigravity-cli/builtin/skills/` | builtin | agy | `<name>/SKILL.md` |
+| `<project>/.claude/skills/` | project | Claude Code | `<name>.md` or `<name>/SKILL.md` |
+| `<project>/.agents/skills/` | project | Codex, agy | `<name>/SKILL.md` |
+| `<project>/{.agent,_agents,_agent}/skills/` | project | agy | `<name>/SKILL.md` |
+
+Builtin skills ship with the agent and are replaced when it updates, so the
+dashboard does not edit them and `POST /api/customization-file` refuses writes
+to them. agy's locations come from its own builtin `agy-customizations` skill.
 
 ### Slash commands
 - `~/.claude/commands/*.md` (user)

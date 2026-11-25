@@ -361,6 +361,57 @@ export async function patchConfigOverrides(
   return res.json();
 }
 
+// -- Agent settings (Claude Code settings.json, Codex config.toml) -----------
+
+/** One reported agent setting. `value` is null when unset. */
+export interface AgentSettingRow {
+  key: string;
+  label: string;
+  description: string;
+  type: "int" | "bool" | "enum" | "string";
+  options?: string[];
+  min?: number;
+  default: unknown;
+  value: unknown;
+  isSet: boolean;
+  appliesOn: string;
+  editable: boolean;
+}
+
+/** How cleanupPeriodDays applies to the transcripts on disk. */
+export interface RetentionReport {
+  sessions: number;
+  projects: number;
+  oldest: { path: string; modified: number; deletesAt: number } | null;
+  /** Already past the period: deleted at the next Claude Code start. */
+  overdue: number;
+  periodDays: number;
+}
+
+export interface AgentSettings {
+  claude: { path: string; parseError?: string; settings: AgentSettingRow[]; retention: RetentionReport };
+  codex: { path: string; settings: AgentSettingRow[] };
+}
+
+export async function fetchAgentSettings(): Promise<AgentSettings> {
+  const res = await fetch("/api/agent-settings");
+  return checkedJson(res);
+}
+
+/** Set one allow-listed Claude Code setting; `value: null` removes it (default). */
+export async function saveAgentSetting(key: string, value: unknown): Promise<{ ok: boolean; key: string; value: unknown }> {
+  const res = await fetch("/api/agent-settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key, value }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null) as { error?: string } | null;
+    throw new Error(data?.error ?? `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 // -- Schedules / consolidation / leases / trust -------------------------------
 
 /** List all persisted agent schedules (cron + interval). */

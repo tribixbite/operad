@@ -438,7 +438,8 @@ Response body (shape):
   "data": {
     "mcpServers": [...],
     "plugins": [...],
-    "skills":       [ { "name", "path", "scope": "user"|"project" } ],
+    "skills":       [ { "name", "path", "scope": "user"|"project"|"builtin",
+                        "source", "agents": ["Claude Code"|"Codex"|"agy", ...] } ],
     "plans":        [ { "name", "path", "scope" } ],
     "commands":     [ { "name", "path", "scope" } ],   // .claude/commands/*.md
     "agentsMd":     [ { "name", "path", "scope" } ],   // .claude/agents/*.md
@@ -596,6 +597,35 @@ dot/space components are refused. Bundles are untrusted input.
 #### AGENTS.md cross-tool compat
 
 `AGENTS.md` is the emerging cross-tool standard ([agents.md](https://agents.md)) read by Claude Code, Codex, OpenCode, and others. operad surfaces it as a distinct `agentsMdFiles[]` array rather than lumping it with `CLAUDE.md`, and each entry carries a `consumers` list so the UI can indicate which tools will pick it up.
+
+#### `GET /api/agent-settings` · `POST /api/agent-settings`
+
+Agent settings worth seeing at a glance. `GET` returns:
+
+```json
+{
+  "claude": {
+    "path": "~/.claude/settings.json",
+    "parseError": "only when the file does not parse",
+    "settings": [ { "key": "cleanupPeriodDays", "label", "description", "type": "int",
+                    "default": 30, "value": 365, "isSet": true, "appliesOn", "editable": true }, ... ],
+    "retention": { "sessions", "projects", "periodDays", "overdue",
+                   "oldest": { "path", "modified", "deletesAt" } }
+  },
+  "codex": { "path": "~/.codex/config.toml", "settings": [ ... "editable": false ] }
+}
+```
+
+`retention` applies `cleanupPeriodDays` (default 30) to the top-level session
+transcripts under `~/.claude/projects/`: `overdue` counts the ones Claude Code
+deletes at its next start.
+
+`POST` takes `{ "key", "value" }` and writes one Claude Code key; `value: null`
+removes it so the default applies. Only these keys are accepted:
+`cleanupPeriodDays` (whole number ≥ 1), `permissions.defaultMode`,
+`effortLevel`, `alwaysThinkingEnabled`, `model`. Every other key in the file is
+kept, and a file that does not parse is left alone (400). Codex values are
+read-only.
 
 ---
 

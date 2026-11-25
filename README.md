@@ -177,7 +177,7 @@ The web dashboard at `http://localhost:18970` provides:
 - **Memory** — per-session RSS tracking, AI memory management (SQLite + FTS5), process manager
 - **Logs** — real-time daemon logs with level filtering
 - **Telemetry** — captured telemetry sink with SDK breakdown
-- **Settings** — MCP servers, plugins, skills, plans, CLAUDE.md management
+- **Settings** — agent settings (Claude Code transcript retention and other `settings.json` values, editable; Codex values read-only), MCP servers, plugins, skills of Claude Code, Codex and agy, plans, CLAUDE.md management
 
 ## Platforms
 
@@ -197,7 +197,7 @@ Windows requires tmux via MSYS2 (`pacman -S tmux`) or WSL. See [docs/windows.md]
 On Android there are two separate ways to die, and only one is survivable:
 
 - **The daemon is killed on its own** (lmkd, OOM). The tmux server is its own process and outlives it, so the Claude Code sessions keep running and a restarted daemon re-adopts them. This depends on `watchdog.sh` still polling. That is a live control loop, and it can stop working without stopping *running*, most importantly when the device suspends, since `sleep` does not advance across suspend.
-- **Android kills the Termux app.** `ActivityManager` kills every process in the app's cgroup, and every Termux process is in it, including trees started by Termux:Boot (it delegates to Termux's own service). Detaching to PPid 1 does not move a process out, and without root nothing can. So the tmux server and every Claude Code instance in it die with the app. The one exception: after an Android framework soft restart the old cgroup is orphaned and the tree outlives later app kills until the next reboot. That is how sessions survived through October 2026, but it can't be triggered on purpose without root. The ADB protections lower how often that happens; the boot hook and a periodic `termux-job-scheduler` job (registered by hand, see the doc) bring the tree back afterwards. Recreated sessions resume their conversations with `claude --resume`, but work in progress at the moment of the kill is lost.
+- **Android kills the Termux app.** `ActivityManager` kills every process in the app's cgroup, and every Termux process is in it, including trees started by Termux:Boot (it delegates to Termux's own service). Detaching to PPid 1 does not move a process out, and without root nothing can. So the tmux server and every Claude Code instance in it die with the app. The one exception: after an Android framework soft restart the old cgroup is orphaned and the tree outlives later app kills until the next reboot. That is how sessions survived through October 2026. It can be caused on purpose over adb (`am hang --allow-restart`, which restarts every app), and `operad stream` does that before starting agents when `soft_restart = true` under `[adb]`. The ADB protections lower how often that happens; the boot hook and a periodic `termux-job-scheduler` job (registered by hand, see the doc) bring the tree back afterwards. Recreated sessions resume their conversations with `claude --resume`, but work in progress at the moment of the kill is lost.
 
 Defense layers: verified wake lock with re-acquire, phantom process killer fix, Doze whitelist, IPC socket self-healing, watchdog loop with suspend self-reporting, crash-safe trace log.
 

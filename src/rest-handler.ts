@@ -180,6 +180,13 @@ export class RestHandler {
   private readonly scriptsRoutes: ScriptsRoutes;
   private readonly adbRoutes: AdbRoutes;
 
+  /**
+   * Home directory /api/agent-settings reads ~/.claude and ~/.codex under.
+   * A field (not a call to homedir() in the route) so tests can point it at a
+   * scratch dir — bun caches homedir() process-wide.
+   */
+  agentSettingsHome: string = homedir();
+
   constructor(
     private readonly ctx: OrchestratorContext,
     private readonly agentEngine: AgentEngine,
@@ -2281,6 +2288,61 @@ export class RestHandler {
                 data: { error: e.message, code: e.code },
               };
             }
+          }
+          return { status: 405, data: { error: "Method not allowed" } };
+        }
+
+        case "agent-settings": {
+          // Agent settings worth seeing at a glance — above all Claude Code's
+          // transcript retention — with an allow-listed editor.
+          // GET  → { claude: { path, settings, retention }, codex: { path, settings } }
+          // POST → { key, value } (value null = unset, i.e. back to the default)
+          const {
+            describeClaudeSettings, applyClaudeSetting, transcriptRetention, describeCodexSettings,
+          } = await import("./agent-settings.js");
+          const claudeDir = join(this.agentSettingsHome, ".claude");
+          const settingsPath = join(claudeDir, "settings.json");
+          const codexPath = join(this.agentSettingsHome, ".codex", "config.toml");
+          if (method === "GET") {
+            let settings: Record<string, unknown> | null = null;
+            let parseError: string | undefined;
+            if (existsSync(settingsPath)) {
+              try {
+                settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
+              } catch (err) {
+                parseError = (err as Error).message;
+              }
+            }
+            const rows = describeClaudeSettings(settings);
+            const days = rows.find((r) => r.key === "cleanupPeriodDays");
+            const periodDays = typeof days?.value === "number" ? days.value : 30;
+            return {
+              status: 200,
+              data: {
+                claude: {
+                  path: settingsPath,
+                  parseError,
+                  settings: rows,
+                  retention: transcriptRetention(join(claudeDir, "projects"), periodDays, Date.now()),
+                },
+                codex: { path: codexPath, settings: describeCodexSettings(codexPath) },
+              },
+            };
+          }
+          if (method === "POST") {
+            let parsed: { key?: unknown; value?: unknown };
+            try {
+              parsed = (typeof body === "string" ? JSON.parse(body) : body) as { key?: unknown; value?: unknown };
+            } catch (err) {
+              return { status: 400, data: { error: `Invalid JSON body: ${(err as Error).message}` } };
+            }
+            if (!parsed || typeof parsed.key !== "string") {
+              return { status: 400, data: { error: "Body must be { key, value }" } };
+            }
+            const r = applyClaudeSetting(settingsPath, parsed.key, parsed.value ?? null);
+            return r.ok
+              ? { status: 200, data: { ok: true, key: parsed.key, value: r.value } }
+              : { status: 400, data: { error: r.error } };
           }
           return { status: 405, data: { error: "Method not allowed" } };
         }

@@ -551,7 +551,9 @@ import Layout from "../layouts/Layout.astro";
         <p class="mb-6 text-sm text-terminal-dim">
           When the daemon is killed, <strong class="text-terminal-bright">running sessions keep going</strong> in tmux and are re-adopted.
           When Android kills the Termux app itself, every process in its cgroup goes with it, tmux included; operad
-          lowers how often that happens and rebuilds the sessions afterwards.
+          lowers how often that happens and rebuilds the sessions afterwards. With <code>soft_restart</code> on, it
+          soft-restarts the Android framework over adb before agents start, which leaves the sessions in a cgroup
+          that app kills no longer reach, until the next reboot.
         </p>
 
         <div class="grid gap-3 sm:grid-cols-2">

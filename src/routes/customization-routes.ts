@@ -8,7 +8,7 @@
  * Extracted from RestHandler (rest-handler.ts) as part of domain split.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { join, resolve, basename, sep } from "node:path";
 import { homedir } from "node:os";
 import type { OrchestratorContext } from "../orchestrator-context.js";
@@ -146,6 +146,123 @@ export function scanSkillsInto(
   }
 }
 
+/** Coding agents whose skills the dashboard lists. */
+export type SkillAgent = "Claude Code" | "Codex" | "agy";
+
+/** Where a skill lives: user-installed, a project's, or shipped with the agent. */
+export type SkillScope = "user" | "project" | "builtin";
+
+/** A directory one or more agents load skills from. */
+export interface SkillRoot {
+  dir: string;
+  scope: SkillScope;
+  agents: SkillAgent[];
+  /**
+   * Whether a flat `<name>.md` counts as a skill. Only Claude Code accepts
+   * that form; Codex and agy load `<name>/SKILL.md` directories only.
+   */
+  flatFiles: boolean;
+}
+
+/** One listed skill. `source` is the root it was found in. */
+export interface SkillEntry {
+  name: string;
+  path: string;
+  scope: SkillScope;
+  source: string;
+  agents: SkillAgent[];
+  modified: number | null;
+  size: number | null;
+}
+
+/**
+ * User-level skill roots for every supported agent.
+ *
+ *   Claude Code  ~/.claude/skills
+ *   Codex        ~/.codex/skills, ~/.agents/skills, and its bundled
+ *                ~/.codex/skills/.system (written by Codex on update)
+ *   agy          ~/.gemini/config/skills (its global customization root) and
+ *                ~/.gemini/antigravity-cli/builtin/skills (shipped skills)
+ *
+ * agy's layout comes from its own builtin `agy-customizations` skill
+ * (docs/skills.md, SKILL.md "Global Configuration").
+ */
+export function userSkillRoots(home: string): SkillRoot[] {
+  return [
+    { dir: join(home, ".claude", "skills"), scope: "user", agents: ["Claude Code"], flatFiles: true },
+    { dir: join(home, ".codex", "skills"), scope: "user", agents: ["Codex"], flatFiles: false },
+    { dir: join(home, ".agents", "skills"), scope: "user", agents: ["Codex"], flatFiles: false },
+    { dir: join(home, ".gemini", "config", "skills"), scope: "user", agents: ["agy"], flatFiles: false },
+    { dir: join(home, ".codex", "skills", ".system"), scope: "builtin", agents: ["Codex"], flatFiles: false },
+    { dir: join(home, ".gemini", "antigravity-cli", "builtin", "skills"), scope: "builtin", agents: ["agy"], flatFiles: false },
+  ];
+}
+
+/**
+ * Project-level skill roots. `.agents/skills` is read by both Codex and agy;
+ * agy also accepts `.agent/`, `_agents/` and `_agent/` as the root name.
+ */
+export function projectSkillRoots(projectPath: string): SkillRoot[] {
+  return [
+    { dir: join(projectPath, ".claude", "skills"), scope: "project", agents: ["Claude Code"], flatFiles: true },
+    { dir: join(projectPath, ".agents", "skills"), scope: "project", agents: ["Codex", "agy"], flatFiles: false },
+    { dir: join(projectPath, ".agent", "skills"), scope: "project", agents: ["agy"], flatFiles: false },
+    { dir: join(projectPath, "_agents", "skills"), scope: "project", agents: ["agy"], flatFiles: false },
+    { dir: join(projectPath, "_agent", "skills"), scope: "project", agents: ["agy"], flatFiles: false },
+  ];
+}
+
+/** Resolve symlinks, falling back to the plain path if that fails. */
+function realOrSelf(p: string): string {
+  try { return realpathSync(p); } catch { return p; }
+}
+
+/**
+ * List the skills in `roots`, in root order.
+ *
+ * A skill reachable from several roots (e.g. ~/.claude/skills/polish
+ * symlinked to ~/.agents/skills/polish) is listed once, at the first root
+ * that has it, with the agents of every root merged.
+ */
+export function collectSkills(roots: SkillRoot[]): SkillEntry[] {
+  const out: SkillEntry[] = [];
+  const byReal = new Map<string, SkillEntry>();
+  for (const root of roots) {
+    const found: Array<{ name: string; path: string; scope: string; modified: number | null; size: number | null }> = [];
+    scanSkillsInto(root.dir, root.scope === "project" ? "project" : "user", found);
+    for (const f of found) {
+      if (!root.flatFiles && !f.path.endsWith(`${sep}SKILL.md`)) continue;
+      const real = realOrSelf(f.path);
+      const seen = byReal.get(real);
+      if (seen) {
+        for (const a of root.agents) if (!seen.agents.includes(a)) seen.agents.push(a);
+        continue;
+      }
+      const entry: SkillEntry = {
+        name: f.name, path: f.path, scope: root.scope, source: root.dir,
+        agents: [...root.agents], modified: f.modified, size: f.size,
+      };
+      byReal.set(real, entry);
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+/**
+ * The root a file lives under, or null. The path is normalised first, so
+ * `skills/../auth.json` does not pass. When roots nest (~/.codex/skills and
+ * its .system), the deepest one wins, so builtin files stay builtin.
+ */
+export function skillRootFor(roots: SkillRoot[], filePath: string): SkillRoot | null {
+  const resolved = resolve(filePath);
+  let best: SkillRoot | null = null;
+  for (const r of roots) {
+    if (resolved.startsWith(r.dir + sep) && (!best || r.dir.length > best.dir.length)) best = r;
+  }
+  return best;
+}
+
 /**
  * CustomizationRoutes — handles GET /api/customization, GET/POST /api/customization-file.
  *
@@ -176,14 +293,10 @@ export class CustomizationRoutes {
     const resolved = resolve(filePath);
 
     if (resolved.startsWith(claudeDir + sep)) return true;
+    // Codex / agy skill roots (user, builtin, and every known project's).
+    if (skillRootFor(this.allSkillRoots(), resolved)) return true;
 
-    const knownPaths = this.ctx.config.sessions
-      .map((s: SessionConfig) => s.path)
-      .filter(Boolean) as string[];
-    for (const entry of this.ctx.registry.entries()) {
-      if (entry.path) knownPaths.push(entry.path);
-    }
-    for (const p of knownPaths) {
+    for (const p of this.knownProjectPaths()) {
       const projectDir = resolve(p);
       if (resolved === join(projectDir, "CLAUDE.md")) return true;
       if (resolved === join(projectDir, "AGENTS.md")) return true; // OpenCode/Codex/Claude cross-compat
@@ -192,6 +305,25 @@ export class CustomizationRoutes {
     // User-level AGENTS.md at $HOME/AGENTS.md (rare but supported by some tools)
     if (resolved === join(home, "AGENTS.md")) return true;
     return false;
+  }
+
+  /** Project directories operad knows: configured sessions + the dynamic registry. */
+  knownProjectPaths(): string[] {
+    const paths = this.ctx.config.sessions
+      .map((s: SessionConfig) => s.path)
+      .filter(Boolean) as string[];
+    for (const entry of this.ctx.registry.entries()) {
+      if (entry.path) paths.push(entry.path);
+    }
+    return paths;
+  }
+
+  /** Skill roots of every agent, at user level and for every known project. */
+  allSkillRoots(): SkillRoot[] {
+    return [
+      ...userSkillRoots(homedir()),
+      ...this.knownProjectPaths().flatMap((p) => projectSkillRoots(resolve(p))),
+    ];
   }
 
   /** Redact sensitive env values */
@@ -323,11 +455,10 @@ export class CustomizationRoutes {
         });
       }
 
-      const skills: Array<{ name: string; path: string; scope: string; source?: string; modified: number | null; size: number | null }> = [];
-      scanSkillsInto(join(claudeDir, "skills"), "user", skills);
-      if (projectPath) {
-        scanSkillsInto(join(projectPath, ".claude", "skills"), "project", skills);
-      }
+      const skills = collectSkills([
+        ...userSkillRoots(home),
+        ...(projectPath ? projectSkillRoots(projectPath) : []),
+      ]);
 
       // Helper: scan a directory for .md files and push each as a metadata-tagged
       // entry. Used by plans/commands/agentsMd/memories — the dashboard now displays
@@ -616,7 +747,9 @@ export class CustomizationRoutes {
       // --- User-level data ---
       const userSettingsJson = this.readJsonFile(join(claudeDir, "settings.json")) as Record<string, unknown> | null;
       const userHooks = readHooksFrom(userSettingsJson, "user");
-      const userSkills = listMd(join(claudeDir, "skills"), "user");
+      // Skills use collectSkills, not listMd: listMd only sees flat .md files,
+      // so directory skills (and every Codex/agy skill) were missing here.
+      const userSkills = collectSkills(userSkillRoots(home));
       const userPlans = listMd(join(claudeDir, "plans"), "user");
       const userCommands = listMd(join(claudeDir, "commands"), "user");
       const userAgentsMd = listMd(join(claudeDir, "agents"), "user");
@@ -665,7 +798,7 @@ export class CustomizationRoutes {
         const projSettings = this.readJsonFile(join(projClaudeDir, "settings.json")) as Record<string, unknown> | null;
 
         const projHooks = readHooksFrom(projSettings, "project");
-        const projSkills = listMd(join(projClaudeDir, "skills"), "project");
+        const projSkills = collectSkills(projectSkillRoots(proj.path));
         const projPlans = listMd(join(projClaudeDir, "plans"), "project");
         const projCommands = listMd(join(projClaudeDir, "commands"), "project");
         const projAgentsMd = listMd(join(projClaudeDir, "agents"), "project");
@@ -861,6 +994,9 @@ export class CustomizationRoutes {
     }
     if (!filePath.endsWith(".md")) {
       return { ok: false, error: "Only .md files can be edited" };
+    }
+    if (skillRootFor(this.allSkillRoots(), filePath)?.scope === "builtin") {
+      return { ok: false, error: "Builtin skills are read-only: the agent replaces them on every update" };
     }
     try {
       writeFileSync(filePath, content, "utf-8");

@@ -33,7 +33,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -41,6 +41,10 @@ import { McpRoutes } from "../routes/mcp-routes.js";
 import { CustomizationRoutes,
   mangleProjectKey,
   projectLabel,
+  userSkillRoots,
+  projectSkillRoots,
+  collectSkills,
+  skillRootFor,
 } from "../routes/customization-routes.js";
 import { RestHandler } from "../rest-handler.js";
 import { ToolEngine } from "../tool-engine.js";
@@ -399,6 +403,33 @@ describe("CustomizationRoutes.isAllowedCustomizationPath()", () => {
     const routes = new CustomizationRoutes(fc.ctx);
     const sub = join(fc.dir, ".claude", "skills", "proj-skill.md");
     expect(routes.isAllowedCustomizationPath(sub)).toBe(true);
+  });
+
+  test("allows Codex and agy skill files at user and project level", () => {
+    const routes = new CustomizationRoutes(fc.ctx);
+    expect(routes.isAllowedCustomizationPath(join(homedir(), ".codex", "skills", "x", "SKILL.md"))).toBe(true);
+    expect(routes.isAllowedCustomizationPath(join(homedir(), ".gemini", "config", "skills", "x", "SKILL.md"))).toBe(true);
+    expect(routes.isAllowedCustomizationPath(join(fc.dir, ".agents", "skills", "x", "SKILL.md"))).toBe(true);
+    // The rest of ~/.codex (auth.json, config.toml) stays out.
+    expect(routes.isAllowedCustomizationPath(join(homedir(), ".codex", "auth.json"))).toBe(false);
+  });
+
+  test("refuses to write a builtin skill (the agent overwrites them on update)", () => {
+    const routes = new CustomizationRoutes(fc.ctx);
+    const builtin = join(homedir(), ".gemini", "antigravity-cli", "builtin", "skills", "automation", "SKILL.md");
+    const r = routes.cmdWriteCustomizationFile(builtin, "x");
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/read-only/);
+  });
+
+  test("lists project .agents/skills in cmdCustomization with Codex and agy as agents", () => {
+    mkdirSync(join(fc.dir, ".agents", "skills", "proj-cdx"), { recursive: true });
+    writeFileSync(join(fc.dir, ".agents", "skills", "proj-cdx", "SKILL.md"), "x", "utf-8");
+    const routes = new CustomizationRoutes(fc.ctx);
+    const skills = (routes.cmdCustomization(fc.dir).data as { skills: Array<{ name: string; scope: string; agents: string[] }> }).skills;
+    const s = skills.find((k) => k.name === "proj-cdx");
+    expect(s?.scope).toBe("project");
+    expect(s?.agents).toEqual(["Codex", "agy"]);
   });
 
   test("rejects an arbitrary temp path not under any known project or ~/.claude/", () => {
@@ -968,5 +999,99 @@ describe("projectLabel", () => {
 
   test("a bare name is returned unchanged", () => {
     expect(projectLabel("operad")).toBe("operad");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Skill roots for every agent: Claude Code, Codex, agy
+// ---------------------------------------------------------------------------
+
+describe("userSkillRoots / projectSkillRoots / collectSkills", () => {
+  /** Write a directory-form skill and return its manifest path. */
+  function dirSkill(root: string, name: string): string {
+    mkdirSync(join(root, name), { recursive: true });
+    const p = join(root, name, "SKILL.md");
+    writeFileSync(p, `---\nname: ${name}\n---\n`, "utf-8");
+    return p;
+  }
+
+  test("user roots cover Claude Code, Codex (user + system), ~/.agents and agy (config + builtin)", () => {
+    const home = fc.dir;
+    const roots = userSkillRoots(home);
+    const byDir = new Map(roots.map((r) => [r.dir, r]));
+    expect(byDir.get(join(home, ".claude", "skills"))?.agents).toEqual(["Claude Code"]);
+    expect(byDir.get(join(home, ".codex", "skills"))?.agents).toEqual(["Codex"]);
+    expect(byDir.get(join(home, ".codex", "skills", ".system"))?.scope).toBe("builtin");
+    expect(byDir.get(join(home, ".agents", "skills"))?.agents).toEqual(["Codex"]);
+    expect(byDir.get(join(home, ".gemini", "config", "skills"))?.agents).toEqual(["agy"]);
+    const agyBuiltin = byDir.get(join(home, ".gemini", "antigravity-cli", "builtin", "skills"));
+    expect(agyBuiltin?.scope).toBe("builtin");
+    expect(agyBuiltin?.agents).toEqual(["agy"]);
+  });
+
+  test("project roots cover .claude/skills and the .agents/skills family shared by Codex and agy", () => {
+    const roots = projectSkillRoots(fc.dir);
+    const byDir = new Map(roots.map((r) => [r.dir, r]));
+    expect(byDir.get(join(fc.dir, ".claude", "skills"))?.agents).toEqual(["Claude Code"]);
+    expect(byDir.get(join(fc.dir, ".agents", "skills"))?.agents).toEqual(["Codex", "agy"]);
+    // agy also accepts .agent/, _agents/, _agent/ as the customization root.
+    expect(byDir.get(join(fc.dir, ".agent", "skills"))?.agents).toEqual(["agy"]);
+    expect(byDir.get(join(fc.dir, "_agents", "skills"))?.agents).toEqual(["agy"]);
+    expect(roots.every((r) => r.scope === "project")).toBe(true);
+  });
+
+  test("collects skills from every agent root and tags each with its agents and root", () => {
+    const home = fc.dir;
+    dirSkill(join(home, ".codex", "skills"), "cloudflare-management");
+    dirSkill(join(home, ".codex", "skills", ".system"), "imagegen");
+    dirSkill(join(home, ".gemini", "antigravity-cli", "builtin", "skills"), "automation");
+    dirSkill(join(home, ".gemini", "config", "skills"), "my-agy");
+    const skills = collectSkills(userSkillRoots(home));
+    const by = new Map(skills.map((s) => [s.name, s]));
+    expect(by.get("cloudflare-management")?.agents).toEqual(["Codex"]);
+    expect(by.get("cloudflare-management")?.scope).toBe("user");
+    expect(by.get("cloudflare-management")?.source).toBe(join(home, ".codex", "skills"));
+    expect(by.get("imagegen")?.scope).toBe("builtin");
+    expect(by.get("automation")?.agents).toEqual(["agy"]);
+    expect(by.get("automation")?.scope).toBe("builtin");
+    expect(by.get("my-agy")?.agents).toEqual(["agy"]);
+    // .system is a root of its own, never listed as a skill of ~/.codex/skills.
+    expect(skills.filter((s) => s.name === ".system")).toHaveLength(0);
+  });
+
+  test("a skill symlinked into two roots is listed once with both agents", () => {
+    const home = fc.dir;
+    dirSkill(join(home, ".agents", "skills"), "polish");
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    symlinkSync(join(home, ".agents", "skills", "polish"), join(home, ".claude", "skills", "polish"));
+    const skills = collectSkills(userSkillRoots(home)).filter((s) => s.name === "polish");
+    expect(skills).toHaveLength(1);
+    expect(skills[0].agents).toEqual(["Claude Code", "Codex"]);
+  });
+
+  test("Codex and agy roots list only directory skills; Claude Code also takes flat .md", () => {
+    // Codex and agy only load directory skills with SKILL.md; a stray .md in
+    // their roots is not a skill. Claude Code still accepts flat files.
+    const home = fc.dir;
+    mkdirSync(join(home, ".codex", "skills"), { recursive: true });
+    writeFileSync(join(home, ".codex", "skills", "notes.md"), "x", "utf-8");
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    writeFileSync(join(home, ".claude", "skills", "flat.md"), "x", "utf-8");
+    const names = collectSkills(userSkillRoots(home)).map((s) => s.name);
+    expect(names).toContain("flat");
+    expect(names).not.toContain("notes");
+  });
+
+  test("isSkillRootPath admits files under a root and marks builtin roots read-only", () => {
+    const home = fc.dir;
+    const roots = [...userSkillRoots(home), ...projectSkillRoots(join(home, "proj"))];
+    const codex = join(home, ".codex", "skills", "x", "SKILL.md");
+    const builtin = join(home, ".gemini", "antigravity-cli", "builtin", "skills", "automation", "SKILL.md");
+    const proj = join(home, "proj", ".agents", "skills", "y", "SKILL.md");
+    expect(skillRootFor(roots, codex)?.scope).toBe("user");
+    expect(skillRootFor(roots, builtin)?.scope).toBe("builtin");
+    expect(skillRootFor(roots, proj)?.agents).toEqual(["Codex", "agy"]);
+    expect(skillRootFor(roots, join(home, ".codex", "auth.json"))).toBeNull();
+    expect(skillRootFor(roots, join(home, ".codex", "skills", "..", "auth.json"))).toBeNull();
   });
 });

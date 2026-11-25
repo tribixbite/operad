@@ -14,6 +14,7 @@
   import CognitivePanel from "./CognitivePanel.svelte";
   import HooksPanel from "./HooksPanel.svelte";
   import SkillsPanel from "./SkillsPanel.svelte";
+  import AgentSettingsPanel from "./AgentSettingsPanel.svelte";
   import CommandsPanel from "./CommandsPanel.svelte";
   import SubagentsPanel from "./SubagentsPanel.svelte";
   import MemoriesPanel from "./MemoriesPanel.svelte";
@@ -45,6 +46,7 @@
 
   /** Track which sections are expanded */
   let sections = $state({
+    agentSettings: true,
     mcp: true,
     plugins: false,
     skills: false,
@@ -658,6 +660,21 @@ Example usage or output
     <div class="card"><p class="error-text">Error: {error}</p></div>
   {:else if data}
 
+    <!-- Section 0: Agent settings (transcript retention etc.) -->
+    <div class="card section-card">
+      <div class="section-header split">
+        <button type="button" class="section-toggle" aria-expanded={sections.agentSettings} onclick={() => toggleSection("agentSettings")}>
+          <span class="chevron">{sections.agentSettings ? "▾" : "▸"}</span>
+          <span class="section-title">Agent Settings</span>
+        </button>
+      </div>
+      {#if sections.agentSettings}
+        <div class="section-body">
+          <AgentSettingsPanel />
+        </div>
+      {/if}
+    </div>
+
     <!-- Section 1: MCP Servers -->
     <div class="card section-card">
       <div class="section-header split">
@@ -844,7 +861,10 @@ Example usage or output
               {:else}
                 <div class="file-actions">
                   <span class="muted small">{skill.name}</span>
-                  <button class="btn btn-sm" onclick={() => startEdit(skill.path)}>Edit</button>
+                  <!-- Builtin skills are replaced on every agent update; the daemon refuses writes. -->
+                  {#if skill.scope !== "builtin"}
+                    <button class="btn btn-sm" onclick={() => startEdit(skill.path)}>Edit</button>
+                  {/if}
                   <button class="btn btn-sm" onclick={() => handleDownload(skill.path)}>Download</button>
                   <button class="btn btn-sm" onclick={() => handleShare(skill.path)}>Share</button>
                 </div>

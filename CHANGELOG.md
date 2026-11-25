@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Codex and agy skills; agent settings on the dashboard
+
+- Settings → Skills lists Codex and agy skills next to Claude Code's: `~/.codex/skills`
+  (and its builtin `.system`), `~/.agents/skills`, `~/.gemini/config/skills`, agy's
+  builtin skills, and each project's `.agents/skills`. Each row shows which agents load
+  it, with a filter per agent. A skill symlinked into two roots appears once.
+  Builtin skills are read-only.
+- The All Projects skills tab missed directory skills (`<name>/SKILL.md`); it lists them now.
+- Settings → Agent Settings shows how long Claude Code keeps transcripts
+  (`cleanupPeriodDays`), how many transcripts exist, when the oldest becomes deletable,
+  and how many the next Claude Code start will delete. It edits that and four other
+  `settings.json` values (default permission mode, effort, extended thinking, model)
+  through `/api/agent-settings`, and shows Codex's model, effort and history setting
+  read-only.
+
 ### Added — keep sessions alive through Termux app kills (Android, opt-in)
 
 A low-memory kill of `com.termux` takes every process in the app's cgroup,
