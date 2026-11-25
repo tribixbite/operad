@@ -8,11 +8,12 @@ There are **two independent failure domains**:
 
 | Domain | What dies | What can be done |
 | ------ | --------- | ---------------- |
-| **App death**: Android kills `com.termux` | Everything Termux started: the tmux server, **every Claude Code instance in it**, the daemon, the watchdog | Without root, nothing prevents it. Lower the kill rate, and recover afterwards ([App death](#app-death-the-cgroup-sweep)) |
+| **App death**: Android kills `com.termux` | Everything in the app's cgroup: the tmux server, **every Claude Code instance in it**, the daemon, the watchdog | Only an orphaned cgroup protects the tree ([How the sessions used to survive](#how-the-sessions-used-to-survive)), and there is no unrooted way to get one on demand. Otherwise: lower the kill rate and recover afterwards |
 | **Process death**: lmkd or the OOM killer kills one process, usually the daemon | That process only. The tmux server and its sessions keep running | The watchdog restarts the daemon, which re-adopts the running sessions ([The supervision loop](#the-supervision-loop)) |
 
-Only the second is survivable. In the first the sessions are lost, not just
-the supervision. A recreated session resumes its conversation from the
+The second is always survivable. The first is survivable only in the case
+described under [How the sessions used to survive](#how-the-sessions-used-to-survive);
+otherwise the sessions are lost, not just the supervision. A recreated session resumes its conversation from the
 transcript on disk (`claude --resume <id>`), but whatever that Claude was doing
 at the moment of the kill, such as a running tool call, a build it had started
 or an unsent turn, is gone.
@@ -31,7 +32,9 @@ Android places every process an app spawns into that app's cgroup:
 
 Reparenting to init (PPid=1), `setsid` and `detached: true` do not move a
 process out of it, and an unrooted app cannot move one either: the cgroup
-files belong to `system`.
+files belong to `system`. The one way a tree has ended up outside the live
+app's cgroup is that Android forgot the cgroup, not that the tree left it
+([How the sessions used to survive](#how-the-sessions-used-to-survive)).
 
 When lmkd kills `com.termux`, `ActivityManager` kills every PID in that
 cgroup. Measured 2026-11-15 in logcat:
@@ -63,20 +66,62 @@ session went in the same 80 ms. The trees that died on 2026-10-02, 10-10,
 > `com.termux` death untouched". That is not how Termux:Boot 0.8.1 works, and
 > it was never measured: until mid-August the boot script could not even start
 > operad (exit 126/127, see [failure mode 1](#four-ways-the-watchdog-silently-stops-working)),
-> so no tree on this device had been boot-started when it was written.
-> operad's own log shows the whole tree, tmux included, recreated after an
-> abrupt death about 30 times between May and 2026-08-17. The
-> quiet periods that looked like immunity (2026-08-17 to 09-18, 10-11 to 10-26)
-> were not produced by any code change; nothing changed in operad's runtime
-> between 2026-09-05 and 2026-11-09.
+> so no tree on this device had been boot-started when it was written. The
+> survival it was trying to explain was real, but the cause was the one below.
+> Nothing changed in operad's runtime between 2026-09-05 and 2026-11-09.
 
-### The one observed exception
+### How the sessions used to survive
 
-A tree started under app pid 4631 survived five `com.termux` deaths between
-2026-10-11 and 10-26. That pid has no exit record, so its cgroup was never
-swept: it ended in some event Android did not process as an app death (a
-binder-count kill and a wake-lock drop are the candidates). The mechanism is
-unknown and it cannot be triggered on purpose, so it is not a defence.
+Through October 2026 the sessions did survive `com.termux` being killed, for
+days at a time, including through long Gradle builds that had lmkd killing the
+launcher. The cause was an Android **framework soft restart**: system_server
+and zygote restart without a kernel reboot.
+
+A soft restart kills the `com.termux` app process without the usual cleanup:
+no exit record is written and its cgroup is not swept. The tmux server, the
+Claude Code sessions, the daemon and the watchdog keep running in the old
+`pid_<X>` cgroup, which the restarted ActivityManager no longer tracks. Every
+later `com.termux` gets a new cgroup, and an lmkd kill of it sweeps only that
+new one. The orphaned tree is immune to app death until the next full reboot.
+
+Framework starts, soft and cold, are recorded as the exits of boot-only system
+apps. They survive reboots:
+
+```sh
+/system/bin/dumpsys activity exit-info com.sec.android.app.SecSetupWizard | rg 'timestamp='
+```
+
+On this device:
+
+- **Soft restarts, with the daemon running straight through:** 2026-08-17,
+  08-23, 08-30, 09-10 (twice), 09-11, 10-16, 10-20 and 10-26 05:59. Several
+  were between 04:00 and 06:00.
+- **Cold boots:** 09-12, 10-02, 10-08, 10-26 19:47 (the Android 17 update),
+  11-08, 11-17 and 11-20. Each shows a clean "Shutdown complete" in the daemon
+  log, battery deaths included.
+- **Example:** the tree started on 2026-10-11 (app pid 4631, which has no exit
+  record) ran through the 10-16 and 10-20 soft restarts, then survived five
+  `com.termux` LOW_MEMORY kills until the 10-26 cold boot.
+- **Trees with no soft restart in their lifetime** died at the first kill of
+  their app: 10-02, 10-10, 11-03, 11-11, 11-15 (twice) and 11-18.
+
+**The likely trigger** was a device bug the user identified. With about 20
+keyboard apps installed, opening the keyboard picker (`showInputMethodPicker()`)
+could crash InputMethodManagerService in system_server, which soft-restarts
+the framework. CleverKeys' first-run "Select Keyboard" button did this, and
+was logged as its UT-6. Its July 2026 fix removed the app-side crash states,
+but the audit records that the device still soft-reset from the picker.
+There has been no soft restart since the Android 17 update; the device now
+has 10 keyboards installed.
+
+**It cannot be produced on purpose without root.** `am restart` from adb fails
+with `SecurityException: Requires permission android.permission.SHUTDOWN`
+(tried 2026-11-25), and `stop; start` and `setprop ctl.restart zygote` need
+root. Reproducing the keyboard-picker crash is the only candidate, and it
+kills every app on the device. Treat an orphaned tree as luck, not a defence.
+
+Before August the logs cannot separate app kills from battery deaths, so how
+often trees died then is not known.
 
 ### What the boot hook is for
 
@@ -128,8 +173,9 @@ cat /proc/$(pidof -s com.termux)/cgroup | rg apps                  # pid_<X>
 cat /proc/$(tmux display-message -p '#{pid}')/cgroup | rg apps     # same pid_<X>: dies with Termux
 ```
 
-A tmux server in a different `pid_<Y>` is in an orphaned cgroup, like the
-exception above.
+A tmux server in a different `pid_<Y>` is in an orphaned cgroup
+([How the sessions used to survive](#how-the-sessions-used-to-survive)) and
+will outlive the app until the next reboot.
 
 ## Defensive layers (still useful, but secondary)
 

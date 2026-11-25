@@ -922,7 +922,9 @@ function checkEdgeCanary(): CheckResult {
  * `com.termux`'s cgroup exactly like one started from a terminal, and an lmkd
  * kill of `com.termux` takes the tmux server and every Claude Code instance in
  * it (measured 2026-11-15). Nothing an unrooted app can do moves a process out
- * of that cgroup. See docs/persistence.md.
+ * of that cgroup; a tree only outlives the app when a framework soft restart
+ * orphans the cgroup, which cannot be triggered without root. See
+ * docs/persistence.md.
  *
  * Reports warn rather than fail for a missing hook, since users may
  * intentionally avoid the boot hook.
