@@ -9,6 +9,8 @@ import {
   detectWsl,
   decideAdbProbeTarget,
   checkBootHook,
+  treeCgroupCheck,
+  watchdogSettingCheck,
   type CheckResult,
   type CheckStatus,
 } from "../doctor.js";
@@ -1123,5 +1125,44 @@ describe("checkBootHook — what the Termux:Boot hook does and does not do", () 
     expect(r.message).toContain(target);
     expect(r.message).toContain("com.termux");
     expect(text(r)).not.toMatch(/surviv/i);
+  });
+});
+
+describe("treeCgroupCheck — is the session tree out of reach of com.termux kills", () => {
+  const cgroup = { uid: 10364, pid: 4663, path: "/apps/uid_10364/pid_4663" };
+
+  test("attached → warn, fix is the am hang soft restart, mentions its cost and the config switch", () => {
+    const r = treeCgroupCheck({ state: "attached", pid: 5452, role: "tmux-server", cgroup, detail: "d" });
+    expect(r.name).toBe("session-cgroup");
+    expect(r.status).toBe("warn");
+    expect(r.fix).toContain("am hang --allow-restart");
+    expect(r.fix).toMatch(/every app/);
+    expect(r.fix).toContain("soft_restart = true");
+  });
+
+  test("orphaned → ok and says what still kills it", () => {
+    const r = treeCgroupCheck({ state: "orphaned", pid: 5452, role: "tmux-server", cgroup, detail: "d" });
+    expect(r.status).toBe("ok");
+    expect(r.message).toContain("/apps/uid_10364/pid_4663");
+    expect(r.message).toMatch(/reboot/);
+  });
+
+  test("unknown → warn without a soft-restart fix", () => {
+    const r = treeCgroupCheck({ state: "unknown", pid: 5452, role: "tmux-server", cgroup: null, detail: "unreadable" });
+    expect(r.status).toBe("warn");
+    expect(r.fix ?? "").not.toContain("am hang");
+  });
+});
+
+describe("watchdogSettingCheck — a lowered watchdog left behind by an interrupted soft restart", () => {
+  test("unset → ok", () => {
+    expect(watchdogSettingCheck("null").status).toBe("ok");
+    expect(watchdogSettingCheck("").status).toBe("ok");
+  });
+
+  test("set → warn with the delete command", () => {
+    const r = watchdogSettingCheck("20001");
+    expect(r.status).toBe("warn");
+    expect(r.fix).toContain("settings delete global system_server_watchdog_timeout_ms");
   });
 });

@@ -142,6 +142,13 @@ export interface AdbConfig {
   phantom_fix: boolean;
   /** Seconds to wait for wireless debugging to initialize after fresh boot (default 15) */
   boot_delay_s: number;
+  /**
+   * Soft-restart the Android framework during `operad stream`, before agents
+   * start, when the tmux tree is in the running com.termux's cgroup. This
+   * orphans the cgroup so low-memory kills of the app no longer take the
+   * sessions. Restarts every app on the device (default false).
+   */
+  soft_restart: boolean;
 }
 
 /** Boot recency configuration — controls which Claude sessions auto-start */

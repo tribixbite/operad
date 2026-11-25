@@ -141,6 +141,8 @@ function parseRawConfig(raw: Record<string, unknown>): TmxConfig {
     retry_interval_s: asNumber(adbRaw.retry_interval_s, "adb.retry_interval_s", 300),
     phantom_fix: asBool(adbRaw.phantom_fix, "adb.phantom_fix", true),
     boot_delay_s: asNumber(adbRaw.boot_delay_s, "adb.boot_delay_s", 15),
+    // Off by default: it restarts every app on the phone. See soft-restart.ts.
+    soft_restart: asBool(adbRaw.soft_restart, "adb.soft_restart", false),
   };
 
   // Battery section

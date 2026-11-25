@@ -130,6 +130,20 @@ The cgroup is still `/apps/uid_10364/pid_4663`, now an orphan. While it runs,
 the phone freezes for about a minute, and then every app on the device
 restarts.
 
+`operad stream` does this itself when `[adb] soft_restart = true`: after the
+adb fix and before any agent starts, the daemon checks whether the tmux server
+(or, if none is running yet, the daemon itself, whose cgroup a new server
+inherits) is in the running com.termux's cgroup. If it is, the daemon runs the
+command above, waits for system_server to return under a new pid and for the
+network, then relaunches Termux. `operad doctor` reports the state as
+`session-cgroup`.
+
+To shorten the freeze, the watchdog timeout is first lowered from 60 s to
+20.001 s (`settings put global system_server_watchdog_timeout_ms 20001`, the
+lowest value a user build accepts), and restored once the framework answers.
+`operad doctor` warns (`watchdog-timeout`) if a restart was interrupted and
+left it set.
+
 These do not work:
 
 - `am restart` fails with `SecurityException: Requires permission

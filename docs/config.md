@@ -212,6 +212,7 @@ ADB wireless debugging configuration (Android only).
 | `retry_interval_s` | number | `300` | Seconds between reconnect attempts. |
 | `phantom_fix` | bool | `true` | Apply the Android phantom process killer workaround. |
 | `boot_delay_s` | number | `15` | Seconds to wait after fresh boot before initializing ADB. |
+| `soft_restart` | bool | `false` | During `operad stream`, before agents start: if the tmux server is in the running com.termux's cgroup, run `am hang --allow-restart` to soft-restart the Android framework, which leaves the sessions in an orphaned cgroup that low-memory kills of the app cannot reach. Every app restarts, the phone freezes for up to about a minute, and Wi-Fi drops briefly. Skipped when the tree is already orphaned, and at most once per 30 min per boot. See [persistence.md](persistence.md#how-the-sessions-used-to-survive). |
 
 **Example:**
 ```toml

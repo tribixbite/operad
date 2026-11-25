@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — keep sessions alive through Termux app kills (Android, opt-in)
+
+A low-memory kill of `com.termux` takes every process in the app's cgroup,
+tmux and all its agents included. A framework soft restart kills the app
+without that sweep and leaves the tree in an orphaned cgroup that later app
+kills never reach (measured 2026-11-25; see docs/persistence.md).
+
+- **`[adb] soft_restart = true`**: `operad stream` runs
+  `am hang --allow-restart` over adb after the adb fix and before agents
+  start, if the tmux server (or the daemon, when no server is running yet)
+  is still in the live app's cgroup. It waits for system_server and the
+  network to come back, then relaunches Termux. Every app restarts and the
+  phone freezes while it runs. It is skipped when already orphaned and is
+  attempted at most once per 30 min per boot.
+- **Faster:** the watchdog timeout is lowered to 20.001 s for the restart
+  (from 60 s; the lowest a user build accepts) and restored afterwards.
+- **`operad doctor`**: `session-cgroup` reports attached or orphaned and gives
+  the `am hang` command as the fix. `watchdog-timeout` warns if an
+  interrupted restart left the setting lowered.
+
 ### Fixed — bare services: silent failures, stale state, and restarts of healthy ones
 
 Found while bringing the author's `x2d` service (BambuStudio) back up:

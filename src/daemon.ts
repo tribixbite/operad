@@ -601,16 +601,23 @@ export class Daemon {
     this.log.info("Boot sequence starting");
     this.wake.evaluate("boot_start");
 
-    const bootDeadline = Date.now() + this.config.orchestrator.boot_timeout_s * 1000;
-
     // Step 1: ADB fix (with boot delay on first boot for wireless debugging to initialize)
     if (this.config.adb.enabled) {
       if (!this.state.getState().boot_complete && this.config.adb.boot_delay_s > 0) {
         this.log.info(`Waiting ${this.config.adb.boot_delay_s}s for wireless debugging to initialize`);
         await sleep(this.config.adb.boot_delay_s * 1000);
       }
-      await this.androidEngine.fixAdb();
+      const adbReady = await this.androidEngine.fixAdb();
+
+      // Step 1b: orphan the session cgroup (opt-in, adb.soft_restart). Must
+      // run before any agent starts: it freezes the phone for up to a minute
+      // or so and drops Wi-Fi. Existing tmux sessions are fine — they move
+      // with their server. No-op when the tree is already orphaned.
+      if (adbReady) await this.androidEngine.ensureOrphanedTree();
     }
+
+    // Measured from here so the soft restart does not eat the session budget.
+    const bootDeadline = Date.now() + this.config.orchestrator.boot_timeout_s * 1000;
 
     // Step 2: Resolve which Claude sessions to start based on recency
     this.resolveBootSessions();

@@ -248,6 +248,17 @@ export function findBareServicePid(pattern: RegExp, exclude?: (pid: number) => b
   return null;
 }
 
+/**
+ * Pid of the tmux server operad talks to, or null when none is running.
+ * Every session's processes are forked from this server, so its cgroup is
+ * theirs (see soft-restart.ts).
+ */
+export function tmuxServerPid(): number | null {
+  const out = tmux("list-sessions", "-F", "#{pid}");
+  const n = Number((out ?? "").split("\n")[0]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 /** Check if the tmux server is alive */
 export function isTmuxServerAlive(): boolean {
   const result = spawnTmux(["start-server"], { timeout: 5000, capture: false });

@@ -29,6 +29,7 @@ connect_timeout_s = 45
 retry_interval_s = 300
 phantom_fix = true
 boot_delay_s = 15
+# soft_restart = true                 # stream: soft-restart Android so sessions survive Termux kills (restarts every app)
 
 [battery]
 enabled = true

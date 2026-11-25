@@ -15,12 +15,16 @@
 
 import { spawnSync, spawn } from "node:child_process";
 import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { connect as netConnect } from "node:net";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { detectPlatform } from "./platform/platform.js";
 import type { Platform } from "./platform/platform.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
+import { inspectTreeCgroup, softRestartFramework, SOFT_RESTART_ARGS } from "./soft-restart.js";
+import type { TreeCgroupInfo, SoftRestartResult } from "./soft-restart.js";
+import { tmuxServerPid } from "./session.js";
 
 /** Resolve ADB binary path at module load time — same pattern as daemon.ts */
 const ADB_BIN = detectPlatform().resolveAdbPath() ?? "adb";
@@ -54,6 +58,45 @@ export interface AndroidEngineDeps {
    * loop (default: AndroidEngine's async `timeout <s> <script>` spawn).
    */
   connect: (script: string, timeoutS: number) => Promise<{ status: number | null; stderr: string }>;
+  /** Which cgroup the session tree is in (default: inspectTreeCgroup on /proc). */
+  inspectTree?: () => TreeCgroupInfo;
+  /** Soft-restart the framework via the given serial (default: softRestartFramework over adb). */
+  softRestart?: (serial: string) => Promise<SoftRestartResult>;
+  /** Where the last soft-restart attempt is recorded (default ~/.local/share/tmx/soft-restart.json). */
+  softRestartStatePath?: string;
+  /** Wall clock in ms (default Date.now). */
+  now?: () => number;
+}
+
+/** Last soft-restart attempt, persisted so watchdog re-runs of `stream` cannot loop it. */
+interface SoftRestartRecord {
+  at: number;
+  boot_id: string | null;
+  ok: boolean | null;
+  reason: string;
+}
+
+/** Read a /proc file, null when absent or unreadable. */
+function readProcFile(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * TCP connect to a literal IP — no DNS, because bun's c-ares resolver cannot
+ * read /etc/resolv.conf on Termux. Resolves true when the connection opens.
+ */
+function probeNetwork(host = "1.1.1.1", port = 443, timeoutMs = 3000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host, port });
+    const done = (ok: boolean) => { sock.destroy(); resolve(ok); };
+    sock.setTimeout(timeoutMs, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
 }
 
 /**
@@ -236,6 +279,10 @@ export class AndroidEngine {
       readLocalBootId: deps.readLocalBootId ?? readKernelBootId,
       adbBin: deps.adbBin ?? ADB_BIN,
       connect: deps.connect ?? ((script, timeoutS) => this.runConnectScript(script, timeoutS)),
+      inspectTree: deps.inspectTree,
+      softRestart: deps.softRestart,
+      softRestartStatePath: deps.softRestartStatePath,
+      now: deps.now,
     };
   }
 
@@ -340,6 +387,122 @@ export class AndroidEngine {
   invalidateAdbSerial(): void {
     this.adbSerial = null;
     this.adbSerialExpiry = 0;
+  }
+
+  // -- Soft restart: orphan the session cgroup --------------------------------
+
+  /** Don't re-attempt within this window of the same boot (watchdog re-runs stream). */
+  static readonly SOFT_RESTART_COOLDOWN_MS = 30 * 60_000;
+
+  /** Default record location for the last soft-restart attempt. */
+  static readonly SOFT_RESTART_STATE_PATH = join(homedir(), ".local", "share", "tmx", "soft-restart.json");
+
+  /**
+   * If the tmux tree (or, with no tmux server yet, the daemon that will fork
+   * it) is in the running com.termux's cgroup, soft-restart the framework so
+   * the cgroup is orphaned and later low-memory kills of the app cannot reach
+   * the sessions. Called by boot BEFORE agents start: the restart drops Wi-Fi
+   * and freezes the phone for up to a minute or so.
+   *
+   * Opt-in (`[adb] soft_restart = true`) because it restarts every app on the
+   * device. Returns null when nothing was attempted.
+   */
+  async ensureOrphanedTree(): Promise<SoftRestartResult | null> {
+    if (!this.ctx.config.adb.soft_restart) return null;
+    if (this.deps.platform.id !== "android") return null;
+
+    const inspect = this.deps.inspectTree ?? (() => inspectTreeCgroup({
+      readFile: readProcFile,
+      tmuxServerPid,
+      selfPid: process.pid,
+    }));
+    const before = inspect();
+    if (before.state !== "attached") {
+      this.ctx.log.info(`Soft restart not needed: ${before.detail}`);
+      return null;
+    }
+
+    const now = (this.deps.now ?? Date.now)();
+    const bootId = this.deps.readLocalBootId();
+    const statePath = this.deps.softRestartStatePath ?? AndroidEngine.SOFT_RESTART_STATE_PATH;
+    const last = this.readSoftRestartRecord(statePath);
+    if (last && last.boot_id === bootId && now - last.at < AndroidEngine.SOFT_RESTART_COOLDOWN_MS) {
+      this.ctx.log.warn(
+        `Skipping soft restart: one was attempted ${Math.round((now - last.at) / 60_000)} min ago this boot ` +
+        `(cooldown ${AndroidEngine.SOFT_RESTART_COOLDOWN_MS / 60_000} min; last result: ${last.reason})`,
+      );
+      return null;
+    }
+
+    const serial = this.resolveLocalAdbSerial();
+    if (!serial) {
+      this.ctx.log.warn("Skipping soft restart: no adb device verified as this phone");
+      return null;
+    }
+
+    this.ctx.log.info(`${before.detail}; soft-restarting the framework before agents start`);
+    this.writeSoftRestartRecord(statePath, { at: now, boot_id: bootId, ok: null, reason: "in progress" });
+    const restart = this.deps.softRestart ?? ((s: string) => this.runSoftRestart(s));
+    const result = await restart(serial);
+    this.writeSoftRestartRecord(statePath, { at: now, boot_id: bootId, ok: result.ok, reason: result.reason });
+
+    if (!result.ok) {
+      this.ctx.log.warn(`Soft restart failed: ${result.reason}`);
+      return result;
+    }
+
+    // The restart killed the Termux app; bring the terminal back.
+    this.runAdb(AndroidEngine.adbShellArgsFor(serial, "am", "start", "-n", "com.termux/.app.TermuxActivity"), 10_000);
+
+    const after = inspect();
+    if (after.state === "orphaned") {
+      this.ctx.log.info(`Soft restart done in ${Math.round(result.elapsedMs / 1000)}s: ${after.detail}`);
+      this.deps.platform.notify("operad", `Framework restarted in ${Math.round(result.elapsedMs / 1000)}s; sessions are out of the app's cgroup`, "operad-boot");
+    } else {
+      this.ctx.log.warn(`Soft restart finished but the tree is still ${after.state}: ${after.detail}`);
+    }
+    return result;
+  }
+
+  /** Default soft restart: softRestartFramework over `adb -s <serial> shell`. */
+  private runSoftRestart(serial: string): Promise<SoftRestartResult> {
+    return softRestartFramework({
+      shell: (args, timeoutMs) => {
+        const r = this.runAdb(AndroidEngine.adbShellArgsFor(serial, ...args), timeoutMs);
+        return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+      },
+      // Async: `am hang` only returns once system_server is dead, and a
+      // spawnSync would freeze the daemon's event loop for the whole restart.
+      startHang: () => {
+        const child = spawn(this.deps.adbBin, AndroidEngine.adbShellArgsFor(serial, ...SOFT_RESTART_ARGS), {
+          stdio: "ignore",
+        });
+        child.on("error", (err) => this.ctx.log.warn(`am hang spawn failed: ${err}`));
+        return { kill: () => { try { child.kill("SIGKILL"); } catch { /* already exited */ } } };
+      },
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      now: this.deps.now ?? Date.now,
+      networkUp: () => probeNetwork(),
+      log: { info: (m) => this.ctx.log.info(m), warn: (m) => this.ctx.log.warn(m) },
+    });
+  }
+
+  private readSoftRestartRecord(path: string): SoftRestartRecord | null {
+    try {
+      const rec = JSON.parse(readFileSync(path, "utf8")) as SoftRestartRecord;
+      return typeof rec.at === "number" ? rec : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeSoftRestartRecord(path: string, rec: SoftRestartRecord): void {
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify(rec) + "\n");
+    } catch (err) {
+      this.ctx.log.warn(`Could not record soft-restart attempt at ${path}: ${err}`);
+    }
   }
 
   // -- ADB fix ----------------------------------------------------------------

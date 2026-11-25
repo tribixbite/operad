@@ -6,6 +6,12 @@ import * as net from "net";
 import { detectPlatform, type PlatformId } from "./platform/platform.js";
 import { parseAdbDevicesOutput, resolveSerialFromList } from "./android-engine.js";
 import { validateConfigFile } from "./config.js";
+import {
+  inspectTreeCgroup,
+  WATCHDOG_TIMEOUT_SETTING,
+  type TreeCgroupInfo,
+} from "./soft-restart.js";
+import { tmuxServerPid } from "./session.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -719,6 +725,18 @@ function checkPlatformSpecific(platformId: PlatformId): CheckResult[] {
     // run in com.termux's cgroup. See docs/persistence.md.
     results.push(checkBootHook());
 
+    // Is the tmux server out of reach of com.termux kills? Reads /proc only.
+    const serverPid = tmuxServerPid();
+    if (serverPid === null) {
+      results.push({ name: "session-cgroup", status: "ok", message: "no tmux server running — nothing to check" });
+    } else {
+      results.push(treeCgroupCheck(inspectTreeCgroup({
+        readFile: (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } },
+        tmuxServerPid: () => serverPid,
+        selfPid: process.pid,
+      })));
+    }
+
     // Process protections — read live state vs what applyPhantomFix tries to set.
     results.push(...checkAndroidProtections());
   }
@@ -1005,6 +1023,56 @@ export type AdbProbeTarget =
   | { kind: "skip"; message: string; fix?: string };
 
 /** Serial forms that can only ever be this device's own ADB server. */
+/**
+ * Doctor verdict on the tmux tree's cgroup. `attached` means a low-memory
+ * kill of com.termux takes every session; the fix is a framework soft
+ * restart, which orphans the cgroup (measured 2026-11-25, see
+ * docs/persistence.md and soft-restart.ts).
+ */
+export function treeCgroupCheck(info: TreeCgroupInfo): CheckResult {
+  if (info.state === "orphaned") {
+    return {
+      name: "session-cgroup",
+      status: "ok",
+      message: `${info.role === "tmux-server" ? "tmux server" : "daemon"} (pid ${info.pid}) is in orphaned cgroup ` +
+        `${info.cgroup?.path ?? "?"}: com.termux kills do not reach the sessions. Lasts until a reboot or a force-stop of com.termux`,
+    };
+  }
+  if (info.state === "attached") {
+    return {
+      name: "session-cgroup",
+      status: "warn",
+      message: info.detail,
+      fix: "adb shell am hang --allow-restart — soft-restarts the framework (phone frozen ~1 min, every app restarts, " +
+        "Wi-Fi drops briefly) and leaves the sessions in an orphaned cgroup. " +
+        "Or set `soft_restart = true` under [adb] so `operad stream` does it before agents start",
+    };
+  }
+  return {
+    name: "session-cgroup",
+    status: "warn",
+    message: `cgroup state unknown: ${info.detail}`,
+  };
+}
+
+/**
+ * The soft restart lowers Settings.Global system_server_watchdog_timeout_ms
+ * and restores it afterwards. A value left set means a restart was
+ * interrupted; a 20 s watchdog makes the framework restart on any long stall.
+ */
+export function watchdogSettingCheck(value: string): CheckResult {
+  const v = value.trim();
+  if (v === "" || v === "null") {
+    return { name: "watchdog-timeout", status: "ok", message: `${WATCHDOG_TIMEOUT_SETTING} unset (default 60 s)` };
+  }
+  return {
+    name: "watchdog-timeout",
+    status: "warn",
+    message: `${WATCHDOG_TIMEOUT_SETTING}=${v} — left over from an interrupted soft restart?`,
+    fix: `adb shell settings delete global ${WATCHDOG_TIMEOUT_SETTING}`,
+  };
+}
+
 function isLoopbackSerial(serial: string): boolean {
   return serial.startsWith("127.0.0.1:") || serial.startsWith("localhost:");
 }
@@ -1154,6 +1222,9 @@ function checkAndroidProtections(): CheckResult[] {
     status: "ok",
     message: `probing ${target.serial} (confirmed this device)`,
   });
+
+  // 0. Watchdog timeout left lowered by an interrupted soft restart
+  results.push(watchdogSettingCheck(adbShell("settings", "get", "global", WATCHDOG_TIMEOUT_SETTING)));
 
   // 1. Phantom process limit
   {
