@@ -51,6 +51,10 @@ src/
   title-cache.ts          — Persisted per-transcript `/rename` cache (append-only scans)
   jsonl-lines.ts          — Lazy forward/backward line readers shared by all scanners
   timezone.ts             — Sets TZ from the device at startup (bun on Termux is UTC)
+  agent-settings.ts       — Allow-listed Claude Code settings.json editor + transcript
+                            retention report; Codex config.toml values (read-only)
+  soft-restart.ts         — Detects an attached/orphaned session cgroup; framework soft
+                            restart via `am hang --allow-restart` (Android)
   sqlite-readonly.ts      — Sync read-only SQLite for other tools' databases
   shell-quote.ts          — POSIX single-quoting
   bare-service.ts         — Bare-service process identity: adoption pattern, PID choice, boot reconcile
