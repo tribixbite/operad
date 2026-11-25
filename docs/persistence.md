@@ -117,8 +117,11 @@ has 10 keyboards installed.
 **It cannot be produced on purpose without root.** `am restart` from adb fails
 with `SecurityException: Requires permission android.permission.SHUTDOWN`
 (tried 2026-11-25), and `stop; start` and `setprop ctl.restart zygote` need
-root. Reproducing the keyboard-picker crash is the only candidate, and it
-kills every app on the device. Treat an orphaned tree as luck, not a defence.
+root. The keyboard-picker crash was the only candidate, and it no longer
+reproduces: on 2026-11-25, with the uninstalled keyboards reinstalled (14 in
+the picker), opening the picker did not restart the framework. Android 17 most
+likely fixed the system_server crash. Treat an orphaned tree as luck, not a
+defence.
 
 Before August the logs cannot separate app kills from battery deaths, so how
 often trees died then is not known.
