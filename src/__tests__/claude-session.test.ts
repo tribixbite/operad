@@ -14,7 +14,8 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, appendFileSync, statSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from "node:fs";
+import { pinMtime, rewriteKeepingStat } from "./helpers/same-stat-rewrite.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -1610,12 +1611,11 @@ describe("locateConversationEntry / getConversationPage", () => {
       const sid = "11111111-2222-3333-4444-5555555555aa";
       seed(projectPath, sid, [userLine("u1", "2026-11-01T10:00:00Z", "hello"),
         JSON.stringify({ type: "custom-title", customTitle: "aaaa" })]);
+      const file = join(tmpDir, ".claude", "projects", manglePath(projectPath), `${sid}.jsonl`);
+      pinMtime(file);
       const first = getConversationPage(projectPath, sid);
       expect(first.session_list.find((x) => x.id === sid)?.title).toBe("aaaa");
-      const file = join(tmpDir, ".claude", "projects", manglePath(projectPath), `${sid}.jsonl`);
-      const st = statSync(file);
-      writeFileSync(file, readFileSync(file, "utf-8").replace("aaaa", "bbbb"));
-      utimesSync(file, st.atime, st.mtime);
+      rewriteKeepingStat(file, "aaaa", "bbbb");
       expect(getConversationPage(projectPath, sid).session_list.find((x) => x.id === sid)?.title).toBe("aaaa");
     });
   });

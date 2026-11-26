@@ -12,10 +12,11 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, appendFileSync, rmSync, statSync, utimesSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TranscriptTitleCache } from "../title-cache.js";
+import { rewriteKeepingStat, writePinned } from "./helpers/same-stat-rewrite.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "operad-titles-")); });
@@ -24,13 +25,6 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 const title = (t: string) => JSON.stringify({ type: "custom-title", customTitle: t }) + "\n";
 const msg = (n: number) => JSON.stringify({ type: "user", message: { content: `message ${n}` } }) + "\n";
 
-/** Rewrite a file's bytes in place while keeping its size and mtime. */
-function tamperInPlace(path: string, from: string, to: string): void {
-  expect(to.length).toBe(from.length);
-  const st = statSync(path);
-  writeFileSync(path, readFileSync(path, "utf-8").replace(from, to));
-  utimesSync(path, st.atime, st.mtime);
-}
 
 describe("TranscriptTitleCache", () => {
   test("finds the last rename in a transcript", () => {
@@ -47,30 +41,30 @@ describe("TranscriptTitleCache", () => {
 
   test("an unchanged transcript is answered from the cache, not re-read", () => {
     const f = join(dir, "a.jsonl");
-    writeFileSync(f, msg(1) + title("aaaa") + msg(2));
+    writePinned(f, msg(1) + title("aaaa") + msg(2));
     const cache = new TranscriptTitleCache(null);
     expect(cache.lastCustomTitle(f)).toBe("aaaa");
-    tamperInPlace(f, "aaaa", "bbbb");
+    rewriteKeepingStat(f, "aaaa", "bbbb");
     expect(cache.lastCustomTitle(f)).toBe("aaaa");
   });
 
   test("an appended rename is found by reading only the new bytes", () => {
     const f = join(dir, "a.jsonl");
-    writeFileSync(f, msg(1) + title("aaaa") + msg(2));
+    writePinned(f, msg(1) + title("aaaa") + msg(2));
     const cache = new TranscriptTitleCache(null);
     expect(cache.lastCustomTitle(f)).toBe("aaaa");
     // Tamper with the already-scanned region; a full rescan would see it.
-    tamperInPlace(f, "aaaa", "bbbb");
+    rewriteKeepingStat(f, "aaaa", "bbbb");
     appendFileSync(f, msg(3) + title("cccc"));
     expect(cache.lastCustomTitle(f)).toBe("cccc");
   });
 
   test("appending without a rename keeps the cached title", () => {
     const f = join(dir, "a.jsonl");
-    writeFileSync(f, title("aaaa"));
+    writePinned(f, title("aaaa"));
     const cache = new TranscriptTitleCache(null);
     cache.lastCustomTitle(f);
-    tamperInPlace(f, "aaaa", "bbbb");
+    rewriteKeepingStat(f, "aaaa", "bbbb");
     appendFileSync(f, msg(9));
     expect(cache.lastCustomTitle(f)).toBe("aaaa");
   });
@@ -103,11 +97,11 @@ describe("TranscriptTitleCache", () => {
   test("persists across daemon runs", () => {
     const f = join(dir, "a.jsonl");
     const store = join(dir, "title-cache.json");
-    writeFileSync(f, msg(1) + title("aaaa"));
+    writePinned(f, msg(1) + title("aaaa"));
     const first = new TranscriptTitleCache(store);
     first.lastCustomTitle(f);
     first.save();
-    tamperInPlace(f, "aaaa", "bbbb");
+    rewriteKeepingStat(f, "aaaa", "bbbb");
     expect(new TranscriptTitleCache(store).lastCustomTitle(f)).toBe("aaaa");
   });
 

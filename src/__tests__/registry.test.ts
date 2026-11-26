@@ -19,7 +19,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, statSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { rewriteKeepingStat, writePinned } from "./helpers/same-stat-rewrite.js";
 import { TranscriptTitleCache } from "../title-cache.js";
 
 import {
@@ -508,14 +509,12 @@ describe("findNamedSessions", () => {
     writeFileSync(histPath, JSON.stringify({ display: "x", timestamp: Date.now(), project: projectPath, sessionId }) + "\n");
     mkdirSync(sessionDir, { recursive: true });
     const jsonl = join(sessionDir, `${sessionId}.jsonl`);
-    writeFileSync(jsonl, JSON.stringify({ type: "custom-title", customTitle: "aaaa" }) + "\n");
+    writePinned(jsonl, JSON.stringify({ type: "custom-title", customTitle: "aaaa" }) + "\n");
 
     const cache = new TranscriptTitleCache(null);
     expect(findNamedSessions(histPath, 7, cache)[0]?.title).toBe("aaaa");
     // Same size, same mtime, different bytes: only a re-read would see it.
-    const st = statSync(jsonl);
-    writeFileSync(jsonl, readFileSync(jsonl, "utf-8").replace("aaaa", "bbbb"));
-    utimesSync(jsonl, st.atime, st.mtime);
+    rewriteKeepingStat(jsonl, "aaaa", "bbbb");
     expect(findNamedSessions(histPath, 7, cache)[0]?.title).toBe("aaaa");
   });
 
