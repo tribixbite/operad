@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — Windows
+
+- Reading Antigravity's conversation index no longer leaves its database
+  file open (a cached bun:sqlite statement kept the connection alive past
+  `close()`, so the file stayed locked between polls).
+- A request body over 1 MB gets its `413 {"error":"Payload too large"}`
+  instead of a connection reset: the reply now waits until the upload has
+  been drained (at most 2 s), and the socket itself is closed afterwards.
+- Installing a skill from git no longer fails with "Filename too long":
+  git runs with `core.longpaths=true` on Windows.
+- CI is green on all three build runners again (tests that assumed POSIX
+  paths, escapes and mtime precision were corrected; two POSIX-only tests are
+  skipped on Windows).
+
 ### Added — Codex and agy skills; agent settings on the dashboard
 
 - Settings → Skills lists Codex and agy skills next to Claude Code's: `~/.codex/skills`
