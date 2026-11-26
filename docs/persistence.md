@@ -144,6 +144,18 @@ lowest value a user build accepts), and restored once the framework answers.
 `operad doctor` warns (`watchdog-timeout`) if a restart was interrupted and
 left it set.
 
+The code:
+
+- `inspectTreeCgroup()` in `src/soft-restart.ts` decides whether the tree is
+  still attached to the app; `softRestartFramework()` in the same file runs the
+  watchdog change, `am hang --allow-restart`, the waits and the restore.
+- `AndroidEngine.ensureOrphanedTree()` in `src/android-engine.ts` applies the
+  `[adb] soft_restart` opt-in and calls both. The daemon calls it as step 1b of
+  `operad stream`, after the adb fix (`src/daemon.ts`).
+- `treeCgroupCheck()` and `watchdogSettingCheck()` in `src/doctor.ts` produce
+  the `session-cgroup` and `watchdog-timeout` results.
+- Tests: `src/__tests__/soft-restart.test.ts` and `src/__tests__/doctor.test.ts`.
+
 These do not work:
 
 - `am restart` fails with `SecurityException: Requires permission
