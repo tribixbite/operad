@@ -367,7 +367,9 @@ describe("checkConfig — behaviour driven by temp files", () => {
   // validator, so the fixture has to be a config the daemon would accept.
   test("config with a valid [[session]] section → ok", async () => {
     const p = join(tmpDir, "operad.toml");
-    writeFileSync(p, `[[session]]\nname = "app"\ntype = "claude"\npath = "${tmpDir}"\n`, "utf8");
+    // A TOML literal string ('...'): in a basic string a Windows temp path's
+    // "\Users" would parse as a \U unicode escape.
+    writeFileSync(p, `[[session]]\nname = "app"\ntype = "claude"\npath = '${tmpDir}'\n`, "utf8");
     const results = await runChecks({ skipSlowChecks: true, configPath: p });
     const r = results.find(r => r.name === "config")!;
     expect(r.status).toBe("ok");
@@ -840,7 +842,7 @@ describe("checkConfig — validates, not just classifies", () => {
 
   test("a valid session config passes", async () => {
     const r = await configCheck(
-      `[operad]\n\n[[session]]\nname = "app"\ntype = "claude"\npath = "${dir}"\n`,
+      `[operad]\n\n[[session]]\nname = "app"\ntype = "claude"\npath = '${dir}'\n`,
     );
     expect(r.status).toBe("ok");
   });
@@ -852,7 +854,7 @@ describe("checkConfig — validates, not just classifies", () => {
 
   test("a service session without a command fails", async () => {
     const r = await configCheck(
-      `[operad]\n\n[[session]]\nname = "api"\ntype = "service"\npath = "${dir}"\n`,
+      `[operad]\n\n[[session]]\nname = "api"\ntype = "service"\npath = '${dir}'\n`,
     );
     expect(r.status).toBe("fail");
     expect(r.message).toContain("command");
@@ -860,7 +862,7 @@ describe("checkConfig — validates, not just classifies", () => {
 
   test("an invalid session name is rejected", async () => {
     const r = await configCheck(
-      `[operad]\n\n[[session]]\nname = "My_Session"\ntype = "claude"\npath = "${dir}"\n`,
+      `[operad]\n\n[[session]]\nname = "My_Session"\ntype = "claude"\npath = '${dir}'\n`,
     );
     expect(r.status).toBe("fail");
   });
@@ -1103,7 +1105,8 @@ describe("checkBootHook — what the Termux:Boot hook does and does not do", () 
     expect(r.message).toContain("broken symlink");
   });
 
-  test("non-executable target → warn with a chmod fix", () => {
+  // Windows has no execute permission bit: chmod 0o644 leaves the file "executable".
+  test.skipIf(process.platform === "win32")("non-executable target → warn with a chmod fix", () => {
     const target = join(dir, "watchdog.sh");
     writeFileSync(target, "#!/bin/sh\n");
     chmodSync(target, 0o644);

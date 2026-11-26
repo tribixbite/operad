@@ -204,7 +204,8 @@ describe("pickBareServicePid", () => {
   });
 });
 
-describe("findBareServicePid (real ps)", () => {
+// Needs POSIX `ps -eo pid,pgid` and process groups; Windows has neither.
+describe.skipIf(process.platform === "win32")("findBareServicePid (real ps)", () => {
   test("finds a detached service's group leader, not its subshell", async () => {
     const { spawn } = await import("node:child_process");
     const { findBareServicePid } = await import("../session.js");

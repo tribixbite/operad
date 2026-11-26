@@ -172,6 +172,7 @@ describe("pruneStaleExitRecords", () => {
 
 describe("exitRecordDirFor", () => {
   test("lives beside the daemon's state file", () => {
-    expect(exitRecordDirFor("/home/u/.local/share/tmx/state.json")).toBe("/home/u/.local/share/tmx/exits");
+    // join(), not a literal: the separator is the platform's (a backslash on Windows).
+    expect(exitRecordDirFor("/home/u/.local/share/tmx/state.json")).toBe(join("/home/u/.local/share/tmx", "exits"));
   });
 });

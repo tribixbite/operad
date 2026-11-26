@@ -17,7 +17,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import {
   parseAgyTimestamp,
@@ -48,6 +49,11 @@ describe("parseAgyTimestamp", () => {
 
 describe("latestAgyConversation", () => {
   const T0 = Date.UTC(2026, 10, 10, 12, 0, 0);
+  // Absolute paths for this platform (/p on POSIX, D:\p on Windows): a
+  // Windows file URL needs a drive letter, so a bare file:///p would not
+  // convert back to a path there and no row would match.
+  const P = resolve(sep, "p");
+  const Q = resolve(sep, "q");
   const iso = (ms: number) => new Date(ms).toISOString().replace("T", " ").replace("Z", "+00:00");
 
   function makeDb(rows: Array<{ id: string; ws: string[]; at: number; parent?: string; depth?: number }>): string {
@@ -59,46 +65,49 @@ describe("latestAgyConversation", () => {
       nesting_depth integer NOT NULL DEFAULT 0)`);
     const ins = db.prepare("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)");
     for (const r of rows) {
-      ins.run(r.id, JSON.stringify(r.ws.map((p) => `file://${p}`)), iso(r.at), r.parent ?? "", r.depth ?? 0);
+      ins.run(r.id, JSON.stringify(r.ws.map((p) => pathToFileURL(p).href)), iso(r.at), r.parent ?? "", r.depth ?? 0);
     }
+    // Finalize before close: a live statement keeps the file open, and
+    // Windows then refuses to delete the temp dir (EBUSY).
+    ins.finalize();
     db.close();
     return path;
   }
 
   test("newest top-level conversation for the project", () => {
     const db = makeDb([
-      { id: "old", ws: ["/p"], at: T0 },
-      { id: "new", ws: ["/p"], at: T0 + 60_000 },
-      { id: "other", ws: ["/q"], at: T0 + 120_000 },
-      { id: "sub", ws: ["/p"], at: T0 + 180_000, parent: "new", depth: 1 },
+      { id: "old", ws: [P], at: T0 },
+      { id: "new", ws: [P], at: T0 + 60_000 },
+      { id: "other", ws: [Q], at: T0 + 120_000 },
+      { id: "sub", ws: [P], at: T0 + 180_000, parent: "new", depth: 1 },
     ]);
-    expect(latestAgyConversation("/p", 0, db)).toBe("new");
+    expect(latestAgyConversation(P, 0, db)).toBe("new");
   });
 
   test("a trailing slash on the project path still matches", () => {
-    const db = makeDb([{ id: "a", ws: ["/p"], at: T0 }]);
-    expect(latestAgyConversation("/p/", 0, db)).toBe("a");
+    const db = makeDb([{ id: "a", ws: [P], at: T0 }]);
+    expect(latestAgyConversation(P + "/", 0, db)).toBe("a");
   });
 
   test("a conversation not touched since `sinceMs` is not this run's", () => {
-    const db = makeDb([{ id: "a", ws: ["/p"], at: T0 }]);
-    expect(latestAgyConversation("/p", T0 + 1, db)).toBeNull();
-    expect(latestAgyConversation("/p", T0, db)).toBe("a");
+    const db = makeDb([{ id: "a", ws: [P], at: T0 }]);
+    expect(latestAgyConversation(P, T0 + 1, db)).toBeNull();
+    expect(latestAgyConversation(P, T0, db)).toBe("a");
   });
 
   test("matches any of a multi-root workspace", () => {
-    const db = makeDb([{ id: "a", ws: ["/q", "/p"], at: T0 }]);
-    expect(latestAgyConversation("/p", 0, db)).toBe("a");
+    const db = makeDb([{ id: "a", ws: [Q, P], at: T0 }]);
+    expect(latestAgyConversation(P, 0, db)).toBe("a");
   });
 
   test("no database → null, not an error", () => {
-    expect(latestAgyConversation("/p", 0, join(root, "missing.db"))).toBeNull();
+    expect(latestAgyConversation(P, 0, join(root, "missing.db"))).toBeNull();
   });
 
   test("reads without writing: the tool's database is never modified", () => {
-    const db = makeDb([{ id: "a", ws: ["/p"], at: T0 }]);
+    const db = makeDb([{ id: "a", ws: [P], at: T0 }]);
     const before = Bun.file(db).size;
-    latestAgyConversation("/p", 0, db);
+    latestAgyConversation(P, 0, db);
     expect(Bun.file(db).size).toBe(before);
     // A read-write open in WAL mode would have created these.
     expect(Bun.file(`${db}-wal`).size).toBe(0);

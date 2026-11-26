@@ -88,7 +88,8 @@ describe("bare service output", () => {
 
 describe("bareLogPath", () => {
   test("keeps a file name inside the directory whatever the session is called", () => {
-    expect(bareLogPath("/logs", "termux-x11")).toBe("/logs/bare-termux-x11.log");
-    expect(bareLogPath("/logs", "../etc/x")).toBe("/logs/bare-.._etc_x.log");
+    // join(), not a literal: the separator is the platform's (a backslash on Windows).
+    expect(bareLogPath("/logs", "termux-x11")).toBe(join("/logs", "bare-termux-x11.log"));
+    expect(bareLogPath("/logs", "../etc/x")).toBe(join("/logs", "bare-.._etc_x.log"));
   });
 });
