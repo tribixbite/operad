@@ -83,6 +83,8 @@ const DEFAULT_BODY_TIMEOUT_MS = 10_000;
  * After a 413/408 the socket is closed gracefully (FIN once the reply has
  * flushed). A client that keeps streaming regardless is cut off this long
  * after the reply finished, so it cannot hold the connection open forever.
+ * It also bounds how long a 413 waits for the rest of an oversized body to be
+ * drained before the reply goes out anyway.
  */
 const REJECTED_BODY_LINGER_MS = 2_000;
 
@@ -727,11 +729,36 @@ export class DashboardServer {
         // and only force-destroy a client that keeps streaming past a grace
         // period.
         req.resume();
-        res.on("finish", () => {
-          setTimeout(() => { if (!req.socket.destroyed) req.destroy(); }, REJECTED_BODY_LINGER_MS).unref();
-        });
-        res.writeHead(err.status, { "Content-Type": "application/json", Connection: "close" });
-        res.end(JSON.stringify({ error: err.message }));
+        const reply = (): void => {
+          if (res.headersSent || req.socket.destroyed) return;
+          const socket = req.socket;
+          res.on("finish", () => {
+            // The socket, not req: once the body has ended, req.destroy() no
+            // longer reaches it, and bun's server does not act on
+            // `Connection: close` itself. A drained body leaves nothing
+            // unread, so a FIN is safe at once; a client still streaming is
+            // cut off after the linger.
+            if (req.readableEnded) socket.end();
+            setTimeout(() => { if (!socket.destroyed) socket.destroy(); }, REJECTED_BODY_LINGER_MS).unref();
+          });
+          res.writeHead(err.status, { "Content-Type": "application/json", Connection: "close" });
+          res.end(JSON.stringify({ error: err.message }));
+        };
+        // A 413 arrives while the client is still uploading. Draining alone is
+        // not enough: the HTTP layer may close the socket as soon as the reply
+        // flushes, and on Windows closing with unread bytes queued sends RST,
+        // which also discards the reply in the client's receive buffer (seen
+        // on the windows-latest runner; Linux and Android delivered it). So
+        // hold the reply until the body has been drained, bounded by the
+        // linger time for a client that never stops. A 408 means the client
+        // stopped sending, so it is answered at once.
+        if (err.status === 413 && !req.readableEnded) {
+          const fallback = setTimeout(reply, REJECTED_BODY_LINGER_MS);
+          req.once("end", () => { clearTimeout(fallback); reply(); });
+          req.once("close", () => clearTimeout(fallback));
+        } else {
+          reply();
+        }
         return;
       }
     }

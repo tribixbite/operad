@@ -28,7 +28,18 @@ const openWithBun: Opener = (path) => {
   const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
   const db = new Database(path, { readonly: true });
   return {
-    all: (sql, ...params) => db.query(sql).all(...params) as Record<string, unknown>[],
+    // prepare + finalize, not db.query(): query() caches the statement on the
+    // connection, and a connection with a live statement is not released by
+    // close(). On Windows the file then stays open, so the owning tool (and a
+    // test's temp-dir cleanup) gets EBUSY.
+    all: (sql, ...params) => {
+      const stmt = db.prepare(sql);
+      try {
+        return stmt.all(...params) as Record<string, unknown>[];
+      } finally {
+        stmt.finalize();
+      }
+    },
     close: () => db.close(),
   };
 };

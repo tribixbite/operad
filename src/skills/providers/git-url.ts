@@ -407,7 +407,11 @@ function gitEnv(): NodeJS.ProcessEnv {
  * group so helpers (remote-https, upload-pack) die with it.
  */
 async function runGit(args: string[], timeoutMs: number): Promise<string> {
-  const r = await runBounded("git", args, { env: gitEnv(), timeoutMs, maxBytes: GIT_MAX_OUTPUT_BYTES });
+  // The skills cache path (home + cache dir + repo slug + staging name) plus
+  // a repo's own files exceeds Windows' 260-character MAX_PATH, where Git for
+  // Windows fails with "Filename too long" unless core.longpaths is on.
+  const argv = process.platform === "win32" ? ["-c", "core.longpaths=true", ...args] : args;
+  const r = await runBounded("git", argv, { env: gitEnv(), timeoutMs, maxBytes: GIT_MAX_OUTPUT_BYTES });
   // Name the subcommand in errors, skipping a leading `-C <dir>`.
   const what = `git ${args[0] === "-C" ? args[2] : args[0]}`;
   if (r.spawnError) throw new Error(`${what}: ${r.spawnError.message}`);
