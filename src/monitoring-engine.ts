@@ -77,11 +77,31 @@ function cleanPaneOutput(raw: string, maxLines = 3): string {
   return meaningful.slice(-maxLines).join("\n");
 }
 
+/**
+ * Minimum gap between posts of the persistent status notification.
+ *
+ * Sessions flip between active and idle every few monitor polls, and each
+ * change re-posted the notification: about every 17 s on a busy phone
+ * (94 posts in 27 min, measured 2026-11-26). Every post spawns
+ * termux-notification → termux-api → an app_process in Termux:API and a
+ * NotificationManager update in system_server, all with the screen off.
+ * A change inside the window is posted when it ends, with the newest state.
+ */
+const STATUS_NOTIFICATION_MIN_INTERVAL_MS = 60_000;
+
 export class MonitoringEngine {
   private memoryTimer: ReturnType<typeof setInterval> | null = null;
   private batteryTimer: ReturnType<typeof setInterval> | null = null;
-  /** Summary notification content from last cycle — skip re-emit if unchanged */
+  /** Summary notification content last POSTED — skip re-emit if unchanged */
   private _prevSummaryContent = "";
+  /** When the status notification was last posted (ms, from `now`) */
+  private lastStatusPostAt = Number.NEGATIVE_INFINITY;
+  /** Newest notification held back by the rate limit, posted when it lapses */
+  private pendingStatus: { key: string; args: string[] } | null = null;
+  private pendingStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Minimum gap between status-notification posts */
+  private readonly statusMinIntervalMs: number;
+  private readonly now: () => number;
   /** Last known conversation UUID per session — for delta detection */
   private lastConversationUuids = new Map<string, string>();
 
@@ -99,10 +119,16 @@ export class MonitoringEngine {
     opts: {
       pinner?: ConversationPinner;
       runtimeFor?: (type: SessionType) => Pick<SessionRuntime, "latestConversationId"> | null;
+      /** Override STATUS_NOTIFICATION_MIN_INTERVAL_MS (tests). */
+      statusMinIntervalMs?: number;
+      /** Clock for the notification rate limit (tests). */
+      now?: () => number;
     } = {},
   ) {
     this.pinner = opts.pinner ?? new ConversationPinner();
     this.runtimeFor = opts.runtimeFor ?? getRuntime;
+    this.statusMinIntervalMs = opts.statusMinIntervalMs ?? STATUS_NOTIFICATION_MIN_INTERVAL_MS;
+    this.now = opts.now ?? Date.now;
   }
 
   // -- Memory monitoring -------------------------------------------------------
@@ -627,10 +653,14 @@ export class MonitoringEngine {
     }
     const content = parts.length > 0 ? parts.join(" | ") : "no sessions";
 
-    // Skip re-emit if nothing changed — prevents unnecessary termux-api spawns
+    // Skip re-emit if nothing changed since the last post — prevents
+    // unnecessary termux-api spawns. A pending (rate-limited) update that the
+    // state has since reverted from is dropped too.
     const summaryKey = `${title}|${content}`;
-    if (this._prevSummaryContent === summaryKey) return;
-    this._prevSummaryContent = summaryKey;
+    if (this._prevSummaryContent === summaryKey) {
+      this.cancelPendingStatus();
+      return;
+    }
 
     const anySuspended = suspendedCount > 0;
     const toggleLabel = anySuspended ? "Resume All" : "Pause All";
@@ -664,7 +694,7 @@ export class MonitoringEngine {
     const dashUrl = `http://127.0.0.1:${port}/?token=${this.dashboardToken()}`;
     const dashboardAction = `LD_PRELOAD=${ldPreload} ${amBin} start -a android.intent.action.VIEW -n ${edgeComponent} -f 0x14000000 -d ${JSON.stringify(dashUrl)}`;
 
-    detectPlatform().notifyWithArgs([
+    this.postStatusRateLimited(summaryKey, [
       "--ongoing",
       "--alert-once",
       "--id", "operad-status",
@@ -680,6 +710,41 @@ export class MonitoringEngine {
       "--button3", "Dashboard",
       "--button3-action", dashboardAction,
     ]);
+  }
+
+  /**
+   * Post the status notification now if the last post is at least
+   * statusMinIntervalMs old; otherwise keep it as the pending update and post
+   * it (or whatever newer update replaces it) when the window lapses.
+   */
+  private postStatusRateLimited(key: string, args: string[]): void {
+    const wait = this.lastStatusPostAt + this.statusMinIntervalMs - this.now();
+    if (wait <= 0) {
+      this.cancelPendingStatus();
+      this.postStatus(key, args);
+      return;
+    }
+    this.pendingStatus = { key, args };
+    if (this.pendingStatusTimer) return; // already scheduled; it posts the newest
+    this.pendingStatusTimer = setTimeout(() => {
+      this.pendingStatusTimer = null;
+      const pending = this.pendingStatus;
+      this.pendingStatus = null;
+      if (pending) this.postStatus(pending.key, pending.args);
+    }, wait);
+    this.pendingStatusTimer.unref?.();
+  }
+
+  private postStatus(key: string, args: string[]): void {
+    this._prevSummaryContent = key;
+    this.lastStatusPostAt = this.now();
+    detectPlatform().notifyWithArgs(args);
+  }
+
+  private cancelPendingStatus(): void {
+    if (this.pendingStatusTimer) clearTimeout(this.pendingStatusTimer);
+    this.pendingStatusTimer = null;
+    this.pendingStatus = null;
   }
 
   // -- Battery monitoring ------------------------------------------------------
@@ -737,5 +802,6 @@ export class MonitoringEngine {
       clearInterval(this.batteryTimer);
       this.batteryTimer = null;
     }
+    this.cancelPendingStatus();
   }
 }

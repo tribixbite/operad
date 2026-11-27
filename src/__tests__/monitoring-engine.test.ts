@@ -21,6 +21,7 @@ import { makeFakeContext, silentLog, type FakeContext } from "./helpers/fake-con
 import type { AndroidEngine } from "../android-engine.js";
 import { ConversationPinner } from "../conversation-pin.js";
 import { parseProcessSnapshot } from "../runtimes/detect.js";
+import { detectPlatform } from "../platform/platform.js";
 
 let fc: FakeContext;
 let eng: MonitoringEngine;
@@ -153,6 +154,87 @@ path = "/work/idle-svc"
     // Idempotent: a second poll must not re-flag or throw.
     eng.autoSuspendOnPressure("normal");
     expect(fc.state.getSession("idle-svc")?.auto_suspended).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Status notification rate limit — at most one post per interval, with the
+// newest state posted when the window lapses.
+// ---------------------------------------------------------------------------
+
+describe("MonitoringEngine — status notification rate limit", () => {
+  const INTERVAL_MS = 60;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let posts: string[][];
+  let restore: () => void;
+
+  beforeEach(async () => {
+    fc = await makeFakeContext({
+      extraToml: `[[session]]
+name = "svc"
+type = "service"
+command = "sleep"
+path = "/work/svc"
+`,
+    });
+    const log = silentLog();
+    eng = new MonitoringEngine(
+      fc.ctx, new MemoryMonitor(log), new ActivityDetector(log), new BatteryMonitor(log), fakeAndroidEngine(),
+      { statusMinIntervalMs: INTERVAL_MS },
+    );
+    // Record posts instead of spawning termux-notification.
+    posts = [];
+    const platform = detectPlatform();
+    const original = platform.notifyWithArgs;
+    platform.notifyWithArgs = (args: string[]) => { posts.push(args); };
+    restore = () => { platform.notifyWithArgs = original; };
+    const s = fc.state.getSession("svc")!;
+    s.status = "running";
+  });
+  afterEach(() => restore());
+
+  /** Set the session's activity and ask for a notification update. */
+  const show = (activity: "active" | "idle") => {
+    fc.state.updateSessionMetrics("svc", null, activity);
+    eng.updateStatusNotification();
+  };
+  /** The --content value of a recorded post. */
+  const contentOf = (args: string[]) => args[args.indexOf("--content") + 1];
+
+  test("posts at once, holds changes inside the window, then posts the newest", async () => {
+    show("active");
+    expect(posts).toHaveLength(1);
+    expect(contentOf(posts[0])).toContain("▶ svc");
+    show("idle");
+    show("active");
+    show("idle");
+    expect(posts).toHaveLength(1); // still inside the window
+    await sleep(INTERVAL_MS * 2);
+    expect(posts).toHaveLength(2); // one trailing post, not three
+    expect(contentOf(posts[1])).toContain("◇ svc");
+  });
+
+  test("a held update the state reverted from is dropped", async () => {
+    show("active");
+    show("idle"); // held
+    show("active"); // back to what is already posted
+    await sleep(INTERVAL_MS * 2);
+    expect(posts).toHaveLength(1);
+  });
+
+  test("an unchanged state is never re-posted, even after the window", async () => {
+    show("active");
+    await sleep(INTERVAL_MS * 2);
+    show("active");
+    expect(posts).toHaveLength(1);
+  });
+
+  test("stopTimers cancels a held update", async () => {
+    show("active");
+    show("idle");
+    eng.stopTimers();
+    await sleep(INTERVAL_MS * 2);
+    expect(posts).toHaveLength(1);
   });
 });
 

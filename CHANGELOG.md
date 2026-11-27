@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — status notification posts at most once a minute
+
+The persistent `operad ▶ N/M` notification was re-posted on every activity
+change, about every 17 s on a busy phone (94 posts in 27 minutes, screen
+off). Each post starts termux-notification, a Termux:API process and a
+system_server update. It now posts at most once every 60 s; a change inside
+that window is shown when it ends, with the newest state, and a change that
+reverts before then is not posted at all.
+
 ### Fixed — Windows
 
 - Reading Antigravity's conversation index no longer leaves its database
