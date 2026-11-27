@@ -18,6 +18,7 @@ import {
   describeUnfreeze,
   unfreezeSession,
   tmuxServerArgs,
+  findProcessTree,
   PANE_FLAGS_FORMAT,
   type UnfreezeReport,
 } from "../session.js";
@@ -91,6 +92,21 @@ function t(...args: string[]): string {
   return (r.stdout ?? "").trim();
 }
 
+/**
+ * First descendant of `parent` (polls until it has forked). Uses operad's
+ * ps-based tree walk: /proc/<pid>/task/<pid>/children needs
+ * CONFIG_PROC_CHILDREN, which Android kernels lack.
+ */
+async function childOf(parent: number): Promise<number> {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const kid = findProcessTree(parent).find((p) => p !== parent);
+    if (kid) return kid;
+    if (Date.now() > deadline) throw new Error(`no child under pid ${parent}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 /** State letter of `pid` from /proc. */
 function stateOf(pid: number): string | null {
   return procStateFromStat(readFileSync(`/proc/${pid}/stat`, "utf-8"));
@@ -120,9 +136,14 @@ describe.skipIf(!HAS_TMUX || !HAS_PROC)("unfreezeSession (isolated tmux server)"
   });
 
   test("continues a stopped pane, leaves copy mode and re-enables input", async () => {
-    t("new-session", "-d", "-s", "uf", "-x", "80", "-y", "24", "sleep 600");
-    const pid = Number(t("list-panes", "-t", "=uf:", "-F", "#{pane_pid}"));
-    expect(pid).toBeGreaterThan(1);
+    // Stop a GRANDCHILD of the pane, not the pane process itself: tmux on
+    // Linux SIGCONTs a pane's direct child as soon as it stops (Android's
+    // tmux left cleverkeys' stopped for hours). `; :` keeps sh from
+    // exec'ing sleep, so sleep stays one level down.
+    t("new-session", "-d", "-s", "uf", "-x", "80", "-y", "24", "sh -c 'sleep 600; :'");
+    const panePid = Number(t("list-panes", "-t", "=uf:", "-F", "#{pane_pid}"));
+    expect(panePid).toBeGreaterThan(1);
+    const pid = await childOf(panePid);
 
     // Freeze it all three ways.
     process.kill(pid, "SIGSTOP");

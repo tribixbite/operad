@@ -164,6 +164,11 @@ path = "/work/idle-svc"
 
 describe("MonitoringEngine — status notification rate limit", () => {
   const INTERVAL_MS = 60;
+  // The rate limit reads this clock; it stands still during a burst so the
+  // result does not depend on how fast the runner is. A Windows runner took
+  // longer than the whole window per update, so every change looked spaced
+  // out and was posted. The trailing post still waits on a real timer.
+  let fakeNow = 1_000_000;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let posts: string[][];
   let restore: () => void;
@@ -180,7 +185,7 @@ path = "/work/svc"
     const log = silentLog();
     eng = new MonitoringEngine(
       fc.ctx, new MemoryMonitor(log), new ActivityDetector(log), new BatteryMonitor(log), fakeAndroidEngine(),
-      { statusMinIntervalMs: INTERVAL_MS },
+      { statusMinIntervalMs: INTERVAL_MS, now: () => fakeNow },
     );
     // Record posts instead of spawning termux-notification.
     posts = [];
@@ -209,6 +214,7 @@ path = "/work/svc"
     show("active");
     show("idle");
     expect(posts).toHaveLength(1); // still inside the window
+    fakeNow += INTERVAL_MS * 2;
     await sleep(INTERVAL_MS * 2);
     expect(posts).toHaveLength(2); // one trailing post, not three
     expect(contentOf(posts[1])).toContain("◇ svc");
@@ -218,12 +224,14 @@ path = "/work/svc"
     show("active");
     show("idle"); // held
     show("active"); // back to what is already posted
+    fakeNow += INTERVAL_MS * 2;
     await sleep(INTERVAL_MS * 2);
     expect(posts).toHaveLength(1);
   });
 
   test("an unchanged state is never re-posted, even after the window", async () => {
     show("active");
+    fakeNow += INTERVAL_MS * 2;
     await sleep(INTERVAL_MS * 2);
     show("active");
     expect(posts).toHaveLength(1);
@@ -233,6 +241,7 @@ path = "/work/svc"
     show("active");
     show("idle");
     eng.stopTimers();
+    fakeNow += INTERVAL_MS * 2;
     await sleep(INTERVAL_MS * 2);
     expect(posts).toHaveLength(1);
   });
