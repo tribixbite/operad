@@ -1017,6 +1017,127 @@ export function resumeSession(sessionName: string, log: Logger): boolean {
   return signalSessionTree(sessionName, "SIGCONT", log);
 }
 
+// -- Unfreeze ------------------------------------------------------------------
+
+/** `list-panes -F` format parsed by {@link parsePaneFlags}. */
+export const PANE_FLAGS_FORMAT = "#{pane_id}|#{pane_pid}|#{pane_in_mode}|#{pane_input_off}|#{pane_dead}";
+
+/** The per-pane state that decides whether a pane can take keys. */
+export interface PaneFlags {
+  id: string;
+  pid: number;
+  /** In copy or view mode: keys scroll the history instead of reaching the program. */
+  inMode: boolean;
+  /** Input disabled with `select-pane -d`: keys are dropped. */
+  inputOff: boolean;
+  /** The pane's program has exited. */
+  dead: boolean;
+}
+
+/** Parse one line of `list-panes -F PANE_FLAGS_FORMAT`, or null if malformed. */
+export function parsePaneFlags(line: string): PaneFlags | null {
+  const parts = line.trim().split("|");
+  if (parts.length !== 5 || !parts[0].startsWith("%")) return null;
+  const pid = parseInt(parts[1], 10);
+  if (isNaN(pid)) return null;
+  return { id: parts[0], pid, inMode: parts[2] === "1", inputOff: parts[3] === "1", dead: parts[4] === "1" };
+}
+
+/**
+ * Process state letter from the text of `/proc/<pid>/stat` ("T" = stopped by
+ * a signal), or null. The command name in field 2 may itself contain spaces
+ * and ")", so the state is read after the LAST ")".
+ */
+export function procStateFromStat(stat: string): string | null {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return null;
+  const state = stat.slice(close + 2, close + 3);
+  return state.trim() ? state : null;
+}
+
+/** State letter of a live process, or null (gone, or no /proc on this OS). */
+function processState(pid: number): string | null {
+  try {
+    return procStateFromStat(readFileSync(`/proc/${pid}/stat`, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/** What {@link unfreezeSession} found and fixed. */
+export interface UnfreezeReport {
+  /** Panes inspected; 0 means tmux has no such session. */
+  panes: number;
+  /** Stopped processes (state T: SIGSTOP / SIGTSTP) sent SIGCONT. */
+  continued: number;
+  /** Panes taken out of copy or view mode. */
+  modesCancelled: number;
+  /** Panes whose disabled input was re-enabled. */
+  inputsEnabled: number;
+  /** Panes whose program has exited; unfreezing cannot bring those back. */
+  deadPanes: number;
+}
+
+/**
+ * Make a session's panes take keys again, acting on what the panes and
+ * processes actually are rather than on operad's `suspended` flag.
+ *
+ * Covers the three ways a pane silently ignores typing: its processes are
+ * stopped (an operad suspend, a stray SIGSTOP or SIGTSTP, or a suspend whose
+ * flag a daemon restart lost), the pane is in copy/view mode (one stray
+ * scroll gesture on a phone enters it), or its input was disabled. An agent
+ * that is busy or waiting looks the same from outside; that is reported, not
+ * "fixed".
+ */
+export function unfreezeSession(sessionName: string, log: Logger): UnfreezeReport {
+  const report: UnfreezeReport = { panes: 0, continued: 0, modesCancelled: 0, inputsEnabled: 0, deadPanes: 0 };
+  const out = tmux("list-panes", "-s", "-t", formatTmuxTarget(sessionName), "-F", PANE_FLAGS_FORMAT);
+  const panes = (out ?? "").split("\n").map(parsePaneFlags).filter((p): p is PaneFlags => p !== null);
+  report.panes = panes.length;
+
+  const pids = new Set<number>();
+  for (const pane of panes) {
+    if (pane.dead) {
+      report.deadPanes++;
+      continue;
+    }
+    if (pane.inMode && tmux("send-keys", "-t", pane.id, "-X", "cancel") !== null) report.modesCancelled++;
+    if (pane.inputOff && tmux("select-pane", "-e", "-t", pane.id) !== null) report.inputsEnabled++;
+    for (const pid of findProcessTree(pane.pid)) pids.add(pid);
+  }
+  for (const pid of pids) {
+    if (processState(pid) !== "T") continue;
+    try {
+      process.kill(pid, "SIGCONT");
+      report.continued++;
+    } catch {
+      // Exited meanwhile, or not ours to signal.
+    }
+  }
+
+  if (report.continued || report.modesCancelled || report.inputsEnabled) {
+    log.info(
+      `Unfroze '${sessionName}': continued ${report.continued} stopped process(es), `
+      + `left copy/view mode in ${report.modesCancelled} pane(s), re-enabled input in ${report.inputsEnabled}`,
+      { session: sessionName },
+    );
+  }
+  return report;
+}
+
+/** One-paragraph, user-facing summary of an {@link UnfreezeReport}. */
+export function describeUnfreeze(name: string, r: UnfreezeReport): string {
+  if (r.panes === 0) return `No tmux panes found for '${name}'`;
+  const fixed: string[] = [];
+  if (r.continued) fixed.push(`continued ${r.continued} stopped process(es)`);
+  if (r.modesCancelled) fixed.push(`left copy/view mode in ${r.modesCancelled} pane(s)`);
+  if (r.inputsEnabled) fixed.push(`re-enabled input in ${r.inputsEnabled} pane(s)`);
+  const parts = [fixed.length ? `Unfroze '${name}': ${fixed.join(", ")}.` : `'${name}': nothing was stopped, in copy mode or input-disabled.`];
+  if (r.deadPanes) parts.push(`${r.deadPanes} pane(s) have exited; restart the session for those.`);
+  if (!fixed.length && !r.deadPanes) parts.push("If it still ignores keys, the program itself is busy or waiting; check its screen.");
+  return parts.join(" ");
+}
+
 /** Promise-based sleep */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

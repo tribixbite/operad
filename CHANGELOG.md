@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `operad unfreeze <name>`
+
+For a session that has stopped taking keys. Unlike `resume`, it acts on what
+the panes and processes actually are rather than on the `suspended` flag:
+it SIGCONTs every stopped process in the session's tree, takes panes out of
+copy/view mode and re-enables disabled pane input, then clears the flags,
+and says what it found. If nothing was stuck it says the program itself is
+busy or waiting. Also `POST /api/unfreeze/:name` and a keyboard-icon button
+on each running session in the dashboard; tapping it by mistake is harmless.
+
+Every suspend request (`suspend`, `suspend-others`, `suspend-all`) now logs
+whether it came through the REST API or the CLI. A session was found
+SIGSTOPped for 5 hours on 2026-11-27 with nothing recording who asked.
+
+### Fixed — `operad upgrade` rebuilds the dashboard from any shell
+
+Run from a shell that lacks Termux's `LD_PRELOAD` (an agent's shell, or
+anything bun spawned), the dashboard build failed with
+`/usr/bin/env: bad interpreter` and the old dashboard stayed live. The
+build steps now run with the platform's clean environment, which restores
+`libtermux-exec`.
+
 ### Changed — status notification posts at most once a minute
 
 The persistent `operad ▶ N/M` notification was re-posted on every activity

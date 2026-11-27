@@ -263,6 +263,16 @@ export async function resumeSession(name: string): Promise<void> {
   await checkedPost(`/api/resume/${encodeURIComponent(name)}`);
 }
 
+/**
+ * Make a session that ignores keys take them again (continue stopped
+ * processes, leave copy mode, re-enable pane input). Resolves with a
+ * description of what was found and fixed.
+ */
+export async function unfreezeSession(name: string): Promise<string> {
+  const res = await fetch(`/api/unfreeze/${encodeURIComponent(name)}`, { method: "POST" });
+  return checkedJson<string>(res);
+}
+
 /** Fetch recent Claude projects from history */
 export async function fetchRecent(): Promise<RecentProject[]> {
   const res = await fetch("/api/recent");

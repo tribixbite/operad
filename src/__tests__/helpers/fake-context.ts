@@ -354,6 +354,7 @@ export async function makeFakeContext(opts: FakeContextOpts = {}): Promise<FakeC
     cmdRecent: syncCmd("cmdRecent"),
     cmdSuspend: syncCmd("cmdSuspend"),
     cmdResume: syncCmd("cmdResume"),
+    cmdUnfreeze: syncCmd("cmdUnfreeze"),
     cmdSuspendOthers: syncCmd("cmdSuspendOthers"),
     cmdSuspendAll: syncCmd("cmdSuspendAll"),
     cmdResumeAll: syncCmd("cmdResumeAll"),

@@ -111,6 +111,13 @@ Freeze a session with SIGSTOP (zero CPU, pages may be swapped).
 #### `POST /api/resume/:name`
 Unfreeze a SIGSTOP'd session.
 
+#### `POST /api/unfreeze/:name`
+Make a session that ignores keys take them again, whatever its `suspended`
+flag says: SIGCONT every stopped (state `T`) process in its panes' trees,
+take panes out of copy/view mode, re-enable disabled pane input, then clear
+the suspended flags. The response names what was found; if nothing was, the
+program itself is busy or waiting.
+
 #### `POST /api/suspend-others/:name`
 Suspend all sessions except `:name`.
 
@@ -1299,6 +1306,7 @@ Max buffer: 1 MB. Default client timeout: 30 s.
 | `recent` | — | `count` | Recent session list |
 | `suspend` | `name` | — | SIGSTOP a session |
 | `resume` | `name` | — | SIGCONT a session |
+| `unfreeze` | `name` | — | Continue stopped processes, leave copy mode, re-enable input |
 | `suspend-others` | `name` | — | Suspend all except named session |
 | `suspend-all` | — | — | Suspend all sessions |
 | `resume-all` | — | — | Resume all sessions |

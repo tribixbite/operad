@@ -394,6 +394,7 @@ export class Daemon {
       cmdRecent: (count) => this.sessionCommands.cmdRecent(count),
       cmdSuspend: (name) => this.sessionCommands.cmdSuspend(name),
       cmdResume: (name) => this.sessionCommands.cmdResume(name),
+      cmdUnfreeze: (name) => this.sessionCommands.cmdUnfreeze(name),
       cmdSuspendOthers: (name) => this.sessionCommands.cmdSuspendOthers(name),
       cmdSuspendAll: () => this.sessionCommands.cmdSuspendAll(),
       cmdResumeAll: () => this.sessionCommands.cmdResumeAll(),

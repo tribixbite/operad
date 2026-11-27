@@ -17,6 +17,8 @@ import type { OrchestratorContext } from "./orchestrator-context.js";
 import {
   suspendSession,
   resumeSession,
+  unfreezeSession,
+  describeUnfreeze,
   sendGoToSession,
   sendKeys,
   sessionExists,
@@ -1128,6 +1130,24 @@ export class SessionCommands {
       ok,
       data: ok ? `Resumed '${resolved}'` : `Failed to resume '${resolved}'`,
     };
+  }
+
+  /**
+   * Make an unresponsive session take keys again. Unlike cmdResume this acts
+   * on what the panes and processes actually are, not on the suspended flag:
+   * it continues stopped processes, leaves copy/view mode and re-enables pane
+   * input (see unfreezeSession), then clears the suspended flags.
+   */
+  cmdUnfreeze(name: string): IpcResponse {
+    const resolved = this.ctx.resolveName(name);
+    if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
+    const report = unfreezeSession(resolved, this.ctx.log);
+    if (report.panes === 0) return { ok: false, error: describeUnfreeze(resolved, report) };
+    const s = this.ctx.state.getSession(resolved);
+    if (s?.suspended || s?.auto_suspended) this.ctx.state.setSuspended(resolved, false);
+    this.ctx.updateStatusNotification();
+    this.ctx.pushSseState();
+    return { ok: true, data: describeUnfreeze(resolved, report) };
   }
 
   /** Suspend all sessions except the named one — "make room" for a heavy build */

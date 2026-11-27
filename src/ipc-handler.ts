@@ -98,15 +98,23 @@ export class IpcHandler {
         return this.ctx.cmdRecent(cmd.count);
 
       case "suspend":
+        // Record who asked: an unexplained suspend left a session frozen for
+        // hours on 2026-11-27 and nothing showed where it came from.
+        this.ctx.log.info(`Suspend '${cmd.name}' requested via IPC (CLI)`, { session: cmd.name });
         return this.ctx.cmdSuspend(cmd.name);
 
       case "resume":
         return this.ctx.cmdResume(cmd.name);
 
+      case "unfreeze":
+        return this.ctx.cmdUnfreeze(cmd.name);
+
       case "suspend-others":
+        this.ctx.log.info(`Suspend-others (keep '${cmd.name}') requested via IPC (CLI)`);
         return this.ctx.cmdSuspendOthers(cmd.name);
 
       case "suspend-all":
+        this.ctx.log.info("Suspend-all requested via IPC (CLI)");
         return this.ctx.cmdSuspendAll();
 
       case "resume-all":

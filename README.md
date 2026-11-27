@@ -162,6 +162,7 @@ The dashboard's **Settings → SDK Streaming** form persists to a JSON overlay a
 | `operad memory` | System memory + per-session RSS |
 | `operad suspend <name>` | SIGSTOP a session |
 | `operad resume <name>` | SIGCONT a session |
+| `operad unfreeze <name>` | Make an unresponsive session take keys again (stopped processes, copy mode, disabled input) |
 | `operad watch` | Tail the daemon log for state-machine transitions, health checks, and IPC events. |
 | `operad logs` | Stream daemon logs |
 | `operad doctor` | Diagnose install issues |

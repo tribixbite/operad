@@ -609,6 +609,7 @@ export type IpcCommand =
   | { cmd: "recent"; count?: number }
   | { cmd: "suspend"; name: string }
   | { cmd: "resume"; name: string }
+  | { cmd: "unfreeze"; name: string }
   | { cmd: "suspend-others"; name: string }
   | { cmd: "suspend-all" }
   | { cmd: "resume-all" }

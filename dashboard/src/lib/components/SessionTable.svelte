@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
     startSession, stopSession, restartSession, goSession,
-    openTab, closeSession, suspendSession, resumeSession,
+    openTab, closeSession, suspendSession, resumeSession, unfreezeSession,
     fetchSdkStatus, launchApp, forceCleanupSession, setSessionAutostart,
   } from "$lib/api";
   import { store, refreshStatus } from "$lib/store.svelte";
@@ -227,6 +227,18 @@
     }
   }
 
+  /** Unfreeze is safe to tap by mistake: it only undoes stuck states. */
+  async function handleUnfreeze(e: Event, name: string) {
+    e.stopPropagation();
+    actionError = null;
+    try {
+      actionError = await unfreezeSession(name);
+      await refreshStatus();
+    } catch (err) {
+      actionError = `Unfreeze failed for ${name}: ${(err as Error).message}`;
+    }
+  }
+
   async function handleClose(e: Event, name: string) {
     e.stopPropagation();
     actionError = null;
@@ -360,6 +372,7 @@
           <button class="btn-icon success" onclick={(e) => handleAction(e, "go", session.name)} title="Go"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5L13 8L4 13.5Z"/></svg></button>
           <button class="btn-icon muted" onclick={(e) => handleSuspend(e, session.name)} title="Pause"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2.5" width="3.5" height="11" rx="1"/><rect x="9.5" y="2.5" width="3.5" height="11" rx="1"/></svg></button>
         {/if}
+        <button class="btn-icon" onclick={(e) => handleUnfreeze(e, session.name)} title="Unfreeze (make it take keys again)" aria-label="Unfreeze session"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h.01M6.5 7h.01M9 7h.01M11.5 7h.01M5 9.5h6"/></svg></button>
       {:else if session.status === "starting" || session.status === "waiting" || session.status === "stopping"}
         <button class="btn-icon danger" onclick={(e) => handleAction(e, "stop", session.name)} title="Stop"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg></button>
       {:else if session.status === "stopped" || session.status === "failed" || session.status === "pending"}

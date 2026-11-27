@@ -200,6 +200,7 @@ export interface CmdDelegates {
   cmdRecent: (count?: number) => IpcResponse;
   cmdSuspend: (name: string) => IpcResponse;
   cmdResume: (name: string) => IpcResponse;
+  cmdUnfreeze: (name: string) => IpcResponse;
   cmdSuspendOthers: (name: string) => IpcResponse;
   cmdSuspendAll: () => IpcResponse;
   cmdResumeAll: () => IpcResponse;

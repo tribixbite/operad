@@ -778,7 +778,15 @@ export class RestHandler {
         case "suspend":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Session name required" } };
+          // Record who asked (see the IPC handler): REST callers are the
+          // dashboard's Pause button and anything holding the API token.
+          this.ctx.log.info(`Suspend '${name}' requested via REST API`, { session: name });
           resp = this.ctx.cmdSuspend(name);
+          break;
+        case "unfreeze":
+          if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          if (!name) return { status: 400, data: { error: "Session name required" } };
+          resp = this.ctx.cmdUnfreeze(name);
           break;
         case "resume":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
@@ -788,10 +796,13 @@ export class RestHandler {
         case "suspend-others":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
           if (!name) return { status: 400, data: { error: "Session name required" } };
+          this.ctx.log.info(`Suspend-others (keep '${name}') requested via REST API`);
           resp = this.ctx.cmdSuspendOthers(name);
           break;
         case "suspend-all":
           if (method !== "POST") return { status: 405, data: { error: "Method not allowed" } };
+          // The persistent notification's "Pause All" button posts here.
+          this.ctx.log.info("Suspend-all requested via REST API");
           resp = this.ctx.cmdSuspendAll();
           break;
         case "resume-all":
