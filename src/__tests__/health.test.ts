@@ -691,8 +691,12 @@ const hasProcCmdline = (() => {
   }
 })();
 
-/** Poll until the spawned child's cmdline reflects the exec'd target */
-async function waitForCmdline(pid: number, token: string, tries = 50): Promise<boolean> {
+/**
+ * Poll until the spawned child's cmdline reflects the exec'd target.
+ * Up to 5 s: 1 s (50 tries) was not enough for bash to exec on a phone at
+ * load average 18, which failed the suite about one run in four.
+ */
+async function waitForCmdline(pid: number, token: string, tries = 250): Promise<boolean> {
   for (let i = 0; i < tries; i++) {
     try {
       const raw = readFileSync(`/proc/${pid}/cmdline`, "utf-8").replace(/\0/g, " ");
