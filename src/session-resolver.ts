@@ -284,3 +284,46 @@ export function resolveBootSessions(
     `visible=[${[...visibleNames].join(",")}]` +
     (skippedAsClosed.length > 0 ? ` closed-by-user=[${skippedAsClosed.join(",")}]` : ""));
 }
+
+/**
+ * Final boot-time adjustment of which sessions start, applied after the
+ * recency partition and the ⭐ autostart pins. Mutates `enabled`.
+ *
+ * - A session the user stopped explicitly stays stopped (until an explicit
+ *   start). Without this every non-Claude service was started again on each
+ *   daemon restart, so `operad stop x2d` lasted only until the next upgrade.
+ * - A session that is already running in tmux is adopted even if recency
+ *   would not start it. Otherwise a dynamically opened session that ranked
+ *   "visible" lost its state at boot and showed as pending while its agent
+ *   kept running untracked (seen with `match`, 2026-11-26).
+ *
+ * `isRunning` answers "does this session already have live processes";
+ * the daemon passes a tmux-session check.
+ */
+export function applyBootStopsAndAdoptions(
+  sessions: SessionConfig[],
+  userStops: Record<string, string>,
+  isRunning: (s: SessionConfig) => boolean,
+  log: Logger,
+): { held: string[]; adopted: string[] } {
+  const held: string[] = [];
+  const adopted: string[] = [];
+  for (const s of sessions) {
+    if (userStops[s.name]) {
+      if (s.enabled) held.push(s.name);
+      s.enabled = false;
+      continue;
+    }
+    if (!s.enabled && isRunning(s)) {
+      s.enabled = true;
+      adopted.push(s.name);
+    }
+  }
+  if (held.length > 0) {
+    log.info(`Boot: leaving stopped by user: ${held.join(", ")} (operad start <name> to start)`);
+  }
+  if (adopted.length > 0) {
+    log.info(`Boot: adopting already-running sessions recency would not start: ${adopted.join(", ")}`);
+  }
+  return { held, adopted };
+}

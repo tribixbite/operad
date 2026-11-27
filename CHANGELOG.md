@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — a daemon restart no longer brings back what you stopped or drops what is running
+
+- `operad stop <name>` (and the dashboard's Stop) is now remembered: boot
+  leaves that session stopped until an explicit `operad start <name>`
+  (or `operad start` for everything). Before, every non-Claude service was
+  started again on each restart, so a stopped `x2d` came back with
+  Bambu Studio and the X server after every upgrade. Stop-all and restart
+  record nothing.
+- A session that is already running in tmux is adopted at boot even when
+  the recency filter would not start it. A dynamically opened session that
+  ranked "visible" used to lose its state and show as pending while its
+  agent kept running untracked.
+- `operad open <path>` only reuses a session of the same runtime at that
+  path. Opening a Claude session in a project that also has a service
+  (`x2d`) started the service; it now opens `x2d-claude`.
+
 ### Added — `operad unfreeze <name>`
 
 For a session that has stopped taking keys. Unlike `resume`, it acts on what

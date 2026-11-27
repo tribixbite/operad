@@ -895,3 +895,77 @@ describe("cmdOpen — fuzzy resolution error paths", () => {
     expect(String(resp.error)).toMatch(/conflict/i);
   });
 });
+
+// =============================================================================
+// User stops — an explicit stop survives a daemon restart until a start
+// =============================================================================
+
+describe("user stops", () => {
+  test("stopping one session records it; starting it again clears the record", async () => {
+    const path = makeProjectPath("x2d");
+    h = makeHarness([makeSession("x2d", path, { type: "service", bare: true })]);
+    h.state.forceStatus("x2d", "running");
+
+    await h.cmds.cmdStop("x2d");
+    expect(Object.keys(h.state.getUserStops())).toEqual(["x2d"]);
+
+    await h.cmds.cmdStart("x2d");
+    expect(h.state.getUserStops()).toEqual({});
+  });
+
+  test("stop-all does not record anything (it is how a full cycle starts)", async () => {
+    const pathA = makeProjectPath("a-svc");
+    h = makeHarness([makeSession("a-svc", pathA)]);
+    h.state.forceStatus("a-svc", "running");
+    await h.cmds.cmdStop();
+    expect(h.state.getUserStops()).toEqual({});
+  });
+
+  test("closing a session drops its user stop", async () => {
+    const path = makeProjectPath("gone");
+    h = makeHarness([makeSession("gone", path)]);
+    h.state.forceStatus("gone", "running");
+    await h.cmds.cmdStop("gone");
+    await h.cmds.cmdClose("gone");
+    expect(h.state.getUserStops()).toEqual({});
+  });
+});
+
+// =============================================================================
+// cmdOpen — a different-runtime session already owns the project path
+// =============================================================================
+
+describe("cmdOpen — a service shares the project path", () => {
+  test("opens a Claude session named <dir>-claude instead of starting the service", async () => {
+    const path = makeProjectPath("x2d");
+    h = makeHarness([makeSession("x2d", path, { type: "service", bare: true })]);
+    h.state.forceStatus("x2d", "stopped");
+
+    const resp = await h.cmds.cmdOpen(path);
+    expect(resp.ok).toBe(true);
+    expect(h.startCalls).toEqual(["x2d-claude"]);
+    const cfg = h.config.sessions.find((s) => s.name === "x2d-claude");
+    expect(cfg?.type).toBe("claude");
+    expect(cfg?.path).toBe(path);
+    expect(h.registry.find("x2d-claude")?.path).toBe(path);
+  });
+
+  test("a second open reuses that Claude session", async () => {
+    const path = makeProjectPath("x2d");
+    h = makeHarness([makeSession("x2d", path, { type: "service", bare: true })]);
+    await h.cmds.cmdOpen(path);
+    const resp = await h.cmds.cmdOpen(path);
+    expect(resp.ok).toBe(true);
+    expect(String(resp.data)).toContain("x2d-claude");
+    expect(h.config.sessions.filter((s) => s.name.startsWith("x2d-claude"))).toHaveLength(1);
+  });
+
+  test("a name taken at a DIFFERENT path is still an error", async () => {
+    const path = makeProjectPath("x2d");
+    const other = makeProjectPath("x2d"); // same basename, different directory
+    h = makeHarness([makeSession("x2d", other, { type: "service", bare: true })]);
+    const resp = await h.cmds.cmdOpen(path);
+    expect(resp.ok).toBe(false);
+    expect(String(resp.error)).toMatch(/different path/);
+  });
+});

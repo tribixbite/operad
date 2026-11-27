@@ -391,6 +391,40 @@ export class StateManager {
     }
   }
 
+  // -- User stops -------------------------------------------------------------
+
+  /** Sessions the user stopped explicitly (name → ISO time of the stop). */
+  getUserStops(): Record<string, string> {
+    return this.state.user_stops ?? {};
+  }
+
+  /**
+   * Record that the user stopped a session on purpose, so a daemon restart
+   * leaves it stopped. Before this, boot started every non-Claude service
+   * again, so `operad stop x2d` lasted only until the next upgrade.
+   */
+  recordUserStop(name: string, when = new Date()): void {
+    if (!this.state.user_stops) this.state.user_stops = {};
+    this.state.user_stops[name] = when.toISOString();
+    this.persist();
+  }
+
+  /** Forget a user stop: the user has asked for the session again. */
+  clearUserStop(name: string): void {
+    if (this.state.user_stops && name in this.state.user_stops) {
+      delete this.state.user_stops[name];
+      this.persist();
+    }
+  }
+
+  /** Forget every user stop (an explicit "start everything"). */
+  clearAllUserStops(): void {
+    if (this.state.user_stops && Object.keys(this.state.user_stops).length > 0) {
+      this.state.user_stops = {};
+      this.persist();
+    }
+  }
+
   // -- Manual closes ----------------------------------------------------------
 
   /** All recorded manual closes (project path → ISO time of the close). */

@@ -7,6 +7,7 @@ import {
   resolveSessionPath,
   resolveOpenTarget,
   resolveBootSessions,
+  applyBootStopsAndAdoptions,
 } from "../session-resolver.js";
 import { Registry } from "../registry.js";
 import { StateManager } from "../state.js";
@@ -619,5 +620,39 @@ describe("resolveBootSessions — rename-scan cache", () => {
     const cachePath = join(tmpDir, "title-cache.json");
     resolveBootSessions(cfg, reg, state, silentLog(), historyPath, cachePath);
     expect(existsSync(cachePath)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyBootStopsAndAdoptions — user stops hold, live tmux sessions are adopted
+// ---------------------------------------------------------------------------
+
+describe("applyBootStopsAndAdoptions", () => {
+  test("a user-stopped service is not started at boot", () => {
+    const x2d = makeSession("x2d", { type: "service", bare: true, enabled: true });
+    const r = applyBootStopsAndAdoptions([x2d], { x2d: "2026-11-27T10:00:00.000Z" }, () => false, silentLog());
+    expect(x2d.enabled).toBe(false);
+    expect(r.held).toEqual(["x2d"]);
+  });
+
+  test("a session recency disabled but already live in tmux is adopted", () => {
+    const match = makeSession("match", { enabled: false });
+    const r = applyBootStopsAndAdoptions([match], {}, (s) => s.name === "match", silentLog());
+    expect(match.enabled).toBe(true);
+    expect(r.adopted).toEqual(["match"]);
+  });
+
+  test("a user stop wins over a live session", () => {
+    const s = makeSession("ck", { enabled: true });
+    applyBootStopsAndAdoptions([s], { ck: "2026-11-27T10:00:00.000Z" }, () => true, silentLog());
+    expect(s.enabled).toBe(false);
+  });
+
+  test("everything else is left as recency and pins decided", () => {
+    const on = makeSession("on", { enabled: true });
+    const off = makeSession("off", { enabled: false });
+    const r = applyBootStopsAndAdoptions([on, off], {}, () => false, silentLog());
+    expect([on.enabled, off.enabled]).toEqual([true, false]);
+    expect(r).toEqual({ held: [], adopted: [] });
   });
 });

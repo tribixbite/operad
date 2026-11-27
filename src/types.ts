@@ -564,6 +564,12 @@ export interface TmxState {
    * so it auto-starts again).
    */
   manual_closes?: Record<string, string>;
+  /**
+   * Sessions the user stopped explicitly (`operad stop <name>`, the
+   * dashboard's Stop), name → ISO time. Boot leaves these stopped instead of
+   * starting them again; an explicit start clears the entry.
+   */
+  user_stops?: Record<string, string>;
 }
 
 /** Battery snapshot stored in state */

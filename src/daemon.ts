@@ -88,6 +88,7 @@ import {
   setExitRecordDir,
   agentSessionsToAdopt,
   applyAgentSessionOptions,
+  sessionExists,
 } from "./session.js";
 import { exitRecordDirFor } from "./exit-record.js";
 import { retireUserExits } from "./user-exit.js";
@@ -103,7 +104,7 @@ import { RestHandler } from "./rest-handler.js";
 import { AndroidEngine } from "./android-engine.js";
 import { MonitoringEngine } from "./monitoring-engine.js";
 import { SessionCommands } from "./session-commands.js";
-import { resolveSessionName, resolveSessionPath as resolveSessionPathFn, resolveBootSessions } from "./session-resolver.js";
+import { resolveSessionName, resolveSessionPath as resolveSessionPathFn, resolveBootSessions, applyBootStopsAndAdoptions } from "./session-resolver.js";
 import type { OrchestratorContext } from "./orchestrator-context.js";
 
 /** Pattern indicating Claude Code is actively processing (not waiting for input).
@@ -1537,6 +1538,14 @@ export class Daemon {
       const cfg = this.config.sessions.find((s) => s.name === name);
       if (cfg) cfg.enabled = enabled;
     }
+    // Then: explicit user stops hold, and sessions already live in tmux are
+    // adopted whatever recency or a pin said.
+    applyBootStopsAndAdoptions(
+      this.config.sessions,
+      this.state.getUserStops(),
+      (s) => !s.bare && sessionExists(s.name),
+      this.log,
+    );
   }
 
   // -- Dashboard HTTP server ---------------------------------------------------

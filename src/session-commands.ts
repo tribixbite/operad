@@ -192,12 +192,15 @@ export class SessionCommands {
       // this project again, so stop excluding it from auto-boot.
       const startPath = sessionConfig?.path ?? this.ctx.resolveSessionPath(resolved);
       if (startPath) this.ctx.state.clearManualClose(resolve(startPath));
+      // Same for an earlier explicit stop: boot may start it again from now on.
+      this.ctx.state.clearUserStop(resolved);
       const success = await this.ctx.startSession(resolved);
       return {
         ok: success,
         data: success ? `Started '${resolved}'` : `Failed to start '${resolved}'`,
       };
     }
+    this.ctx.state.clearAllUserStops();
     await this.ctx.startAllSessions();
     return { ok: true, data: "All sessions started" };
   }
@@ -208,6 +211,11 @@ export class SessionCommands {
       const resolved = this.ctx.resolveName(name);
       if (!resolved) return { ok: false, error: `Unknown session: ${name}` };
       const success = await this.ctx.stopSessionByName(resolved);
+      // Remember it, so a daemon restart (upgrade, watchdog) does not start
+      // it again. Only a single-session stop counts: "stop all" is also how
+      // a shutdown or a full cycle starts, and must not leave everything
+      // off at the next boot.
+      if (success) this.ctx.state.recordUserStop(resolved);
       return {
         ok: success,
         data: success ? `Stopped '${resolved}'` : `Failed to stop '${resolved}'`,
@@ -485,9 +493,12 @@ export class SessionCommands {
       };
     }
 
-    // Find any existing config sessions registered for this path.
+    // Find any existing sessions of this runtime registered for this path.
+    // Only the same runtime counts: ~/git/x2d also has a bare `x2d` service
+    // (the X server + Bambu Studio), and opening a Claude session there
+    // started that service instead.
     const existingByPath = this.ctx.config.sessions.filter(
-      (s) => s.path && resolve(s.path) === resolvedPath,
+      (s) => s.path && resolve(s.path) === resolvedPath && s.type === runtime,
     );
 
     // Reuse path: caller didn't ask for a new instance and didn't supply an
@@ -537,6 +548,7 @@ export class SessionCommands {
         cfg.enabled = true;
         this.ctx.log.info(`Re-enabled session '${target}' for on-demand open`, { session: target });
       }
+      this.ctx.state.clearUserStop(target);
       const started = await this.ctx.startSession(target);
       this.ctx.log.info(
         `Open '${resolvedPath}' → starting existing session '${target}' (${started ? "ok" : "failed"})`,
@@ -554,13 +566,22 @@ export class SessionCommands {
     if (existingByPath.length === 0) {
       // First instance — check for name conflict only
       const nameConflict = this.ctx.config.sessions.find((s) => s.name === baseName);
-      if (nameConflict) {
+      const samePath = !!nameConflict?.path && resolve(nameConflict.path) === resolvedPath;
+      if (nameConflict && !samePath) {
         return {
           ok: false,
           error: `Name '${baseName}' conflicts with an existing session at a different path`,
         };
       }
-      sessionName = baseName;
+      if (nameConflict) {
+        // Same project, different runtime (e.g. the `x2d` service): name
+        // this one after its runtime instead, `x2d-claude`.
+        const base = `${baseName}-${runtime}`;
+        const taken = this.ctx.config.sessions.map((s) => s.name);
+        sessionName = taken.includes(base) ? nextSuffix(base, taken) : base;
+      } else {
+        sessionName = baseName;
+      }
     } else if (name && !this.ctx.config.sessions.some((s) => s.name === name)) {
       // Caller supplied an explicit name that isn't taken — honour it as-is.
       sessionName = name;
@@ -789,6 +810,7 @@ export class SessionCommands {
     // it), re-registered it, and started it — with the one piece of state
     // that could have said "no" having just been deleted.
     this.ctx.state.setAutostartOverride(resolved, false);
+    this.ctx.state.clearUserStop(resolved);
     if (closedPath) this.ctx.state.recordManualClose(resolve(closedPath));
 
     this.ctx.log.info(
