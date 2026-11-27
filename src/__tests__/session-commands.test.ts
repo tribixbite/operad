@@ -969,3 +969,25 @@ describe("cmdOpen — a service shares the project path", () => {
     expect(String(resp.error)).toMatch(/different path/);
   });
 });
+
+// =============================================================================
+// cmdSetAutostart — un-pinning a service must not close its directory
+// =============================================================================
+
+describe("cmdSetAutostart — services share a directory with agent sessions", () => {
+  test("un-pinning a service records no manual close for its path", async () => {
+    const path = makeProjectPath("x2d");
+    h = makeHarness([makeSession("x2d", path, { type: "service", bare: true })]);
+    const resp = await h.cmds.cmdSetAutostart("x2d", false);
+    expect(resp.ok).toBe(true);
+    expect(h.state.getAutostartOverrides()).toEqual({ x2d: false });
+    expect(h.state.getManualCloses()).toEqual({});
+  });
+
+  test("un-pinning a Claude session still records the close", async () => {
+    const path = makeProjectPath("proj");
+    h = makeHarness([makeSession("proj", path)]);
+    await h.cmds.cmdSetAutostart("proj", false);
+    expect(Object.keys(h.state.getManualCloses())).toEqual([path]);
+  });
+});

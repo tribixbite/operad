@@ -16,6 +16,9 @@ All notable changes to this project will be documented in this file.
   the recency filter would not start it. A dynamically opened session that
   ranked "visible" used to lose its state and show as pending while its
   agent kept running untracked.
+- `operad autostart <service> off` no longer records a manual close for
+  the service's directory. Boot recency treated that as the project being
+  closed and skipped a Claude session in the same directory.
 - `operad open <path>` only reuses a session of the same runtime at that
   path. Opening a Claude session in a project that also has a service
   (`x2d`) started the service; it now opens `x2d-claude`.

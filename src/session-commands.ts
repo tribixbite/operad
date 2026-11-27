@@ -24,6 +24,7 @@ import {
   sessionExists,
   createTermuxTab,
 } from "./session.js";
+import { getRuntime } from "./runtimes/index.js";
 import {
   parseRecentProjects,
   deriveName,
@@ -865,8 +866,13 @@ export class SessionCommands {
     // exit, or the pin would be honoured while boot discovery still skipped
     // the project. Un-pinning records one, so the ⭐ toggle and an exit mean
     // the same thing.
+    // Only agent sessions take part in boot recency, which is what a manual
+    // close steers. A service (the bare `x2d`) shares its directory with a
+    // Claude session there, so un-pinning the service recorded a close for
+    // ~/git/x2d and boot then skipped the Claude session too.
     const pinPath = cfg?.path ?? this.ctx.resolveSessionPath(resolved);
-    if (pinPath) {
+    const isAgent = cfg ? getRuntime(cfg.type) !== null : true;
+    if (pinPath && isAgent) {
       if (enabled) this.ctx.state.clearManualClose(resolve(pinPath));
       else this.ctx.state.recordManualClose(resolve(pinPath));
     }
