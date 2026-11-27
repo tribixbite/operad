@@ -164,6 +164,7 @@ async function main(): Promise<void> {
     case "dedupe":
     case "suspend":
     case "resume":
+    case "unfreeze":
     case "suspend-others":
     case "suspend-all":
     case "resume-all":
@@ -562,9 +563,16 @@ async function runUpgrade(): Promise<void> {
     );
     process.exit(1);
   }
+  // Build children get the platform's clean env. On Termux that restores
+  // LD_PRELOAD=libtermux-exec.so, which bun and Claude Code strip from the
+  // processes they spawn. Without it every `#!/usr/bin/env node` script
+  // (vite, svelte-kit) fails with "/usr/bin/env: bad interpreter", so an
+  // upgrade run from an agent's shell never rebuilt the dashboard.
+  const buildEnv = detectPlatform().cleanEnv();
   console.log(`${CYAN}Building orchestrator...${RESET}`);
   const buildResult = spawnSync("bun", ["run", "build"], {
     cwd: orcDir,
+    env: buildEnv,
     encoding: "utf-8",
     timeout: 30_000,
     stdio: ["ignore", "pipe", "pipe"],
@@ -581,6 +589,7 @@ async function runUpgrade(): Promise<void> {
   console.log(`${CYAN}Building dashboard...${RESET}`);
   const dashResult = spawnSync("bun", ["run", "build"], {
     cwd: dashDir,
+    env: buildEnv,
     encoding: "utf-8",
     timeout: 120_000,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1664,6 +1673,13 @@ async function runIpcCommand(): Promise<void> {
       }
       cmd = { cmd: "resume", name: subArgs[0] };
       break;
+    case "unfreeze":
+      if (!subArgs[0]) {
+        console.error(`Usage: operad unfreeze <session-name>`);
+        process.exit(1);
+      }
+      cmd = { cmd: "unfreeze", name: subArgs[0] };
+      break;
     case "suspend-others":
       if (!subArgs[0]) {
         console.error(`Usage: operad suspend-others <session-to-keep>`);
@@ -1991,6 +2007,8 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}recent${RESET} [count]        Show recently active Claude projects
   ${CYAN}suspend${RESET} <name>         Freeze a session (SIGSTOP — zero CPU, swappable RAM)
   ${CYAN}resume${RESET} <name>         Unfreeze a suspended session (SIGCONT)
+  ${CYAN}unfreeze${RESET} <name>       Make an unresponsive session take keys: continue stopped
+                         processes, leave copy mode, re-enable pane input
   ${CYAN}suspend-others${RESET} <name> Suspend all except named session (free RAM for builds)
   ${CYAN}suspend-all${RESET}           Suspend all running sessions
   ${CYAN}resume-all${RESET}            Resume all suspended sessions
